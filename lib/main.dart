@@ -14883,6 +14883,17 @@ class _PermissionsCard extends StatelessWidget {
 
   static bool _teachersSynced = false;
 
+  /// For a teacher without an account the user document may not exist yet:
+  /// the first change creates it with the name and email.
+  static Map<String, dynamic> _base(UserProfile u) => u.pending
+      ? {
+    'role': u.role,
+    'name': u.name,
+    'email': u.email.trim().toLowerCase(),
+    'pendingLogin': true,
+  }
+      : <String, dynamic>{};
+
   static void _toast(BuildContext c, String m) =>
       ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(m)));
 
@@ -15031,26 +15042,53 @@ class _PermissionsCard extends StatelessWidget {
                           child: Center(child: CircularProgressIndicator()),
                         );
                       }
-                      final list = snap.data!.docs
-                          .map(UserProfile.fromDoc)
-                          .toList()
-                        ..sort((a, b) => (a.name.isEmpty ? a.email : a.name)
-                            .toLowerCase()
-                            .compareTo((b.name.isEmpty ? b.email : b.name)
-                            .toLowerCase()));
-                      if (list.isEmpty) {
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 8),
-                          child: Text('No other users yet.',
-                              style: TextStyle(color: Colors.black54)),
-                        );
-                      }
-                      return ValueListenableBuilder<AppSettings>(
-                        valueListenable: appSettings,
-                        builder: (context, st, _) => Column(children: [
-                          for (final u in list)
-                            _userTile(context, u, st, u.uid == me, users),
-                        ]),
+                      final accounts =
+                      snap.data!.docs.map(UserProfile.fromDoc).toList();
+                      // Everybody in Teachers must be here too: a teacher /
+                      // staff member without an account yet is listed as
+                      // "not signed in yet" (set up now, linked at the first
+                      // sign in).
+                      return StreamBuilder<List<TeacherInfo>>(
+                        stream: TeacherService().watch(),
+                        builder: (context, ts) {
+                          final ids = {for (final x in accounts) x.uid};
+                          final emails = {
+                            for (final x in accounts) x.email.trim().toLowerCase()
+                          }..remove('');
+                          final list = [...accounts];
+                          for (final t in ts.data ?? const <TeacherInfo>[]) {
+                            final mail = t.email.trim().toLowerCase();
+                            if (ids.contains(t.id)) continue;
+                            if (mail.isNotEmpty && emails.contains(mail)) continue;
+                            ids.add(t.id);
+                            if (mail.isNotEmpty) emails.add(mail);
+                            list.add(UserProfile(
+                              uid: t.id,
+                              role: 'teacher',
+                              name: t.name,
+                              email: t.email,
+                              pending: true,
+                            ));
+                          }
+                          list.sort((x, y) => (x.name.isEmpty ? x.email : x.name)
+                              .toLowerCase()
+                              .compareTo((y.name.isEmpty ? y.email : y.name)
+                              .toLowerCase()));
+                          if (list.isEmpty) {
+                            return const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 8),
+                              child: Text('No other users yet.',
+                                  style: TextStyle(color: Colors.black54)),
+                            );
+                          }
+                          return ValueListenableBuilder<AppSettings>(
+                            valueListenable: appSettings,
+                            builder: (context, st, _) => Column(children: [
+                              for (final u in list)
+                                _userTile(context, u, st, u.uid == me, users),
+                            ]),
+                          );
+                        },
                       );
                     },
                   ),
@@ -15103,7 +15141,9 @@ class _PermissionsCard extends StatelessWidget {
               : (v) {
             if (v == null || v == u.role) return;
             _run(context,
-                    () => users.doc(u.uid).set({'role': v}, SetOptions(merge: true)));
+                    () => users
+                    .doc(u.uid)
+                    .set({..._base(u), 'role': v}, SetOptions(merge: true)));
           },
         ),
         const SizedBox(height: 12),
@@ -15113,7 +15153,9 @@ class _PermissionsCard extends StatelessWidget {
         _pageChips(
           eff,
               (v) => _run(context,
-                  () => users.doc(u.uid).set({'access': v}, SetOptions(merge: true))),
+                  () => users
+                  .doc(u.uid)
+                  .set({..._base(u), 'access': v}, SetOptions(merge: true))),
           enabled: !isMe && !u.isAdmin,
         ),
         if (!isMe && !u.isAdmin && u.access != null)
@@ -15399,6 +15441,7 @@ class TeacherService {
         if (ids.contains(t.id) || (mail.isNotEmpty && emails.contains(mail))) {
           continue;
         }
+        if (mail.isNotEmpty) emails.add(mail); // same email twice: one user
         missing.add(t);
       }
       for (var i = 0; i < missing.length; i += 400) {
