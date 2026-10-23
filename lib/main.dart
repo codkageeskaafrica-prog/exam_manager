@@ -15187,7 +15187,7 @@ class _PermissionsCard extends StatelessWidget {
             r == null
                 ? 'Not set yet: no role, subjects or forms.'
                 : '${r.role}'
-                '${r.isTeaching ? (r.assignments.isEmpty ? ' · no subjects yet' : ' · ${assignmentsText(r.assignments)}') : ' · non-teaching staff'}',
+                '${r.assignments.isNotEmpty ? ' · ${assignmentsText(r.assignments)}' : (r.isTeaching ? ' · no subjects yet' : ' · non-teaching staff')}',
             style: const TextStyle(
                 fontSize: 13, fontWeight: FontWeight.w600, color: kBlue),
           ),
@@ -15352,7 +15352,7 @@ class _AccountBadgeState extends State<AccountBadge> {
                     _row(Icons.email_outlined, 'Email', email),
                     if (t != null) ...[
                 _row(Icons.phone_outlined, 'Phone', t.phone),
-            if (t.isTeaching) ...[
+            if (t.isTeaching || t.assignments.isNotEmpty) ...[
         _row(Icons.menu_book_outlined, 'Subjects and forms',
         t.assignments.isEmpty
         ? [...t.subjects, ...t.forms].join(', ')
@@ -15511,7 +15511,8 @@ class TeacherService {
     }
   }
 
-  Future<void> save(TeacherInfo t) async {
+  /// Saves the record and returns its id.
+  Future<String> save(TeacherInfo t) async {
     final ref = t.id.isEmpty ? _col.doc() : _col.doc(t.id);
     await ref.set({
       'name': t.name.trim(),
@@ -15530,6 +15531,7 @@ class TeacherService {
       'updatedBy', 'updatedAt',
     ]));
     await _ensureUser(ref.id, t);
+    return ref.id;
   }
 
   Future<void> delete(String id) async {
@@ -15555,6 +15557,32 @@ Future<void> editTeacherDialog(BuildContext context,
       String newId = ''}) async {
   void toast(String m) => ScaffoldMessenger.of(context)
       .showSnackBar(SnackBar(content: Text(m)));
+  // Only the administrator sets the pages of a person (users/{id}.access).
+  var isAdminMe = false;
+  UserProfile? up; // the user of this person, when there is one
+  try {
+    final users = FirebaseFirestore.instance.collection('users');
+    final meId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (meId.isNotEmpty) {
+      isAdminMe = UserProfile.fromDoc(await users.doc(meId).get()).isAdmin;
+    }
+    if (isAdminMe) {
+      final id = t?.id ?? newId;
+      if (id.isNotEmpty) {
+        final d = await users.doc(id).get();
+        if (d.exists) up = UserProfile.fromDoc(d);
+      }
+      final mail = (t?.email ?? presetEmail).trim().toLowerCase();
+      if (up == null && mail.isNotEmpty) {
+        final q = await users.where('email', isEqualTo: mail).limit(1).get();
+        if (q.docs.isNotEmpty) up = UserProfile.fromDoc(q.docs.first);
+      }
+    }
+  } catch (_) {}
+  if (!context.mounted) return;
+  final showPages = isAdminMe && up?.isAdmin != true;
+  var access = <String>[...(up?.access ?? appSettings.value.teacherAccess)];
+  var accessEdited = false;
   final name = TextEditingController(text: t?.name ?? presetName);
   final phone = TextEditingController(text: t?.phone ?? '');
   final email = TextEditingController(text: t?.email ?? presetEmail);
@@ -15569,7 +15597,7 @@ Future<void> editTeacherDialog(BuildContext context,
   final result = await showDialog<TeacherInfo>(
     context: context,
     builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-      final teaching = role != 'Staff';
+      const teaching = true; // staff can also be given subjects and forms
       return AlertDialog(
         title: Text(t == null ? 'Add teacher / staff' : 'Edit teacher / staff'),
         content: SizedBox(
@@ -15623,6 +15651,33 @@ Future<void> editTeacherDialog(BuildContext context,
                     border: OutlineInputBorder(),
                   ),
                 ),
+                if (showPages) ...[
+                  const SizedBox(height: 16),
+                  const Text('Pages this person can see',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(
+                      up?.access == null && !accessEdited
+                          ? 'Using the default pages for teachers. Tick to change.'
+                          : 'Tick the pages this person can open.',
+                      style: TextStyle(
+                          fontSize: 12.5, color: Colors.grey.shade700)),
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    for (final pg in AppPages.all)
+                      FilterChip(
+                        label: Text(AppPages.labels[pg]!),
+                        selected: access.contains(pg),
+                        onSelected: (on) => setD(() {
+                          accessEdited = true;
+                          access = [
+                            for (final x in AppPages.all)
+                              if (x == pg ? on : access.contains(x)) x
+                          ];
+                        }),
+                      ),
+                  ]),
+                ],
                 if (teaching) ...[
                   const SizedBox(height: 16),
                   const Text('Subjects taught',
@@ -15770,7 +15825,13 @@ Future<void> editTeacherDialog(BuildContext context,
   email.dispose();
   if (result == null || !context.mounted) return;
   try {
-    await TeacherService().save(result);
+    final savedId = await TeacherService().save(result);
+    if (showPages && accessEdited) {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(up?.uid ?? savedId)
+          .set({'access': access}, SetOptions(merge: true));
+    }
     toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
   } catch (e) {
     toast('Failed: $e');
