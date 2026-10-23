@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1089685038469",
+    "project_id": "exam-manager-1e832",
+    "storage_bucket": "exam-manager-1e832.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1089685038469:android:a6745a0043a46c27bb10ec",
+        "android_client_info": {
+          "package_name": "com.example.exam_manager"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAOBm7InMc51ElvptN3PDLCrC9oYEZc7S8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
