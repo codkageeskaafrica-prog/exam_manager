@@ -8958,6 +8958,27 @@ class SchoolService {
     });
   }
 
+  /// Saves ONE set of marks into the register of EVERY chosen subject, in a
+  /// single atomic write. Empty list = "All subjects" (whole-day register).
+  Future<void> saveAttendanceMulti(String sectionId, String dateKey,
+      Map<String, String> records, List<String> subjects) {
+    final subs = subjects.isEmpty ? <String>[''] : subjects;
+    final batch = _db.batch();
+    for (final s in subs) {
+      batch.set(_attendance.doc(_attId(sectionId, dateKey, s)), {
+        'sectionId': sectionId,
+        'date': dateKey,
+        'subject': s.trim(),
+        'records': records,
+        'updatedBy': _uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+    return batch.commit().timeout(const Duration(seconds: 30), onTimeout: () {
+      throw Exception('Saving timed out. Check the internet connection.');
+    });
+  }
+
   /// Every register between two dates (yyyy-MM-dd, inclusive). One range
   /// filter on one field, so no extra Firestore index is needed.
   Future<List<AttendanceDoc>> getAttendanceRange(
@@ -10977,6 +10998,7 @@ class AttendanceScreen extends StatefulWidget {
 class _AttendanceScreenState extends State<AttendanceScreen> {
   final _service = SchoolService();
   String? _sectionId;
+<<<<<<< HEAD
   // Selected subjects. Empty = "All subjects" (whole-day register).
   // One or more subjects = the same marks are saved for each of them.
   final Set<String> _subjects = {};
@@ -10990,6 +11012,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   String get _subjectLabel =>
       _subjects.isEmpty ? 'All subjects' : _subjectOrder.join(', ');
+=======
+  List<String> _subjects = []; // empty = All subjects (whole day)
+>>>>>>> 9d4ce72 (update)
   DateTime _date = DateTime.now();
   Map<String, String> _marks = {};
   bool _loading = false;
@@ -11000,15 +11025,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 
   String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
 
+  String get _subjectsLabel => _subjects.isEmpty
+      ? 'All subjects'
+      : _subjects.length <= 2
+      ? _subjects.join(', ')
+      : '${_subjects.length} subjects';
+
   Future<void> _load() async {
     final id = _sectionId;
     if (id == null) return;
     final t = ++_token;
+    final subs = List<String>.of(_subjects.isEmpty ? [''] : _subjects);
     setState(() {
       _loading = true;
       _dirty = false;
     });
     try {
+<<<<<<< HEAD
       // Empty selection = whole day. Several subjects: merge their registers
       // (the first selected subject wins when two of them disagree).
       final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
@@ -11017,6 +11050,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         final m = await _service.getAttendance(id, _dateKey, subject: k);
         for (final e in m.entries) {
           merged.putIfAbsent(e.key, () => e.value);
+=======
+      final regs = await Future.wait([
+        for (final s in subs) _service.getAttendance(id, _dateKey, subject: s),
+      ]);
+      // A student absent in ANY chosen subject is shown absent for all of them.
+      final m = <String, String>{};
+      for (final r in regs) {
+        for (final e in r.entries) {
+          if (m[e.key] == 'absent') continue;
+          m[e.key] = e.value;
+>>>>>>> 9d4ce72 (update)
         }
       }
       if (!mounted || t != _token) return;
@@ -11086,24 +11130,31 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         for (final s in students)
           if (_marks[s.id] != null) s.id: _marks[s.id]!,
       };
+<<<<<<< HEAD
       final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
       for (final k in keys) {
         await _service.saveAttendance(id, _dateKey, records, subject: k);
       }
+=======
+      await _service.saveAttendanceMulti(id, _dateKey, records, _subjects);
+>>>>>>> 9d4ce72 (update)
       if (!mounted) return;
       setState(() {
         _saving = false;
         _dirty = false;
       });
+      final n = _subjects.length;
       messenger.showSnackBar(SnackBar(
           content: Text(
-              'Saved · ${records.length} of ${students.length} students marked')));
+              'Saved · ${records.length} of ${students.length} students marked'
+                  '${n > 1 ? ' · $n subjects' : ''}')));
     } catch (e) {
       if (mounted) setState(() => _saving = false);
       messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
     }
   }
 
+<<<<<<< HEAD
   /// Dialog with checkboxes: "All subjects" or any number of subjects.
   Future<void> _pickSubjects() async {
     final all = teacherScope.value.subjectList;
@@ -11155,6 +11206,60 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         ..clear()
         ..addAll(result);
     });
+=======
+  /// Lets the teacher tick one or more subjects (none ticked = All subjects).
+  Future<void> _pickSubjects() async {
+    final options = teacherScope.value.subjectList;
+    final picked = await showDialog<List<String>>(
+      context: context,
+      builder: (ctx) {
+        final sel = <String>{..._subjects};
+        return StatefulBuilder(
+          builder: (ctx, setD) => AlertDialog(
+            title: const Text('Choose subjects'),
+            content: SizedBox(
+              width: 360,
+              child: ListView(shrinkWrap: true, children: [
+                CheckboxListTile(
+                  value: sel.isEmpty,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('All subjects'),
+                  subtitle: const Text('Whole-day register'),
+                  onChanged: (_) => setD(sel.clear),
+                ),
+                const Divider(height: 1),
+                for (final s in options)
+                  CheckboxListTile(
+                    value: sel.contains(s),
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: Text(s),
+                    onChanged: (v) => setD(() {
+                      if (v == true) {
+                        sel.add(s);
+                      } else {
+                        sel.remove(s);
+                      }
+                    }),
+                  ),
+              ]),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: () => Navigator.pop(
+                      ctx, [for (final s in options) if (sel.contains(s)) s]),
+                  child: const Text('OK')),
+            ],
+          ),
+        );
+      },
+    );
+    if (picked == null || picked.join('|') == _subjects.join('|')) return;
+    if (!await _okToLeave() || !mounted) return;
+    setState(() => _subjects = picked);
+>>>>>>> 9d4ce72 (update)
     _load();
   }
 
@@ -11205,7 +11310,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           flex: 5,
           child: InkWell(
             borderRadius: BorderRadius.circular(4),
+<<<<<<< HEAD
             onTap: _pickSubjects,
+=======
+            onTap: _saving ? null : _pickSubjects,
+>>>>>>> 9d4ce72 (update)
             child: InputDecorator(
               decoration: const InputDecoration(
                 labelText: 'Subjects',
@@ -11213,7 +11322,11 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 isDense: true,
                 suffixIcon: Icon(Icons.arrow_drop_down),
               ),
+<<<<<<< HEAD
               child: Text(_subjectLabel,
+=======
+              child: Text(_subjectsLabel,
+>>>>>>> 9d4ce72 (update)
                   maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
           ),
@@ -11381,9 +11494,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 2),
         child: Row(children: [
+<<<<<<< HEAD
           Text(
               '${students.length} students · $_subjectLabel',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+=======
+          Flexible(
+            child: Text(
+                '${students.length} students · ${_subjects.isEmpty ? 'All subjects' : _subjects.join(', ')}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+          ),
+>>>>>>> 9d4ce72 (update)
           const Spacer(),
           FilterChip(
             label: const Text('Not marked only'),
@@ -11394,6 +11517,17 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
           ),
         ]),
       ),
+      if (_subjects.length > 1)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 2),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+                'One mark is saved to all ${_subjects.length} subjects. '
+                    'Absent in one = absent in all.',
+                style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
+          ),
+        ),
       // ---- students: name + 3 one-tap buttons on a single line ----
       Expanded(
         child: shown.isEmpty
