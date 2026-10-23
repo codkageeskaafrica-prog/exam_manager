@@ -2394,8 +2394,7 @@ class ExamService {
         .where((r) =>
     r.received &&
         r.hasFile &&
-        teacherScope.value.allowsSubject(r.subject) &&
-        teacherScope.value.allowsForm(r.form))
+        teacherScope.value.allows(r.subject, r.form))
         .toList();
     if (received.isEmpty) {
       throw Exception('There are no uploaded exams to download yet.');
@@ -4766,7 +4765,11 @@ class ExamTableScreen extends StatelessWidget {
             for (final f in sc.formList)
               SizedBox(
                 width: cellWidth,
-                child: _ExamCell(
+                child: !sc.allows(s, f)
+                    ? const Center(
+                    child: Text('—',
+                        style: TextStyle(color: Colors.black26, fontSize: 18)))
+                    : _ExamCell(
                   record:
                   data[ExamRecord.idFor(s, f)] ?? ExamRecord.empty(s, f),
                   service: service,
@@ -5111,8 +5114,7 @@ class AssignmentService {
     final list = [
       for (final d in snap.docs) AssignmentRecord.fromDoc(d),
     ].where((r) =>
-    teacherScope.value.allowsSubject(r.subject) &&
-        teacherScope.value.allowsForm(r.form)).toList();
+        teacherScope.value.allows(r.subject, r.form)).toList();
     if (list.isEmpty) {
       throw Exception('There are no uploaded assignments to download yet.');
     }
@@ -5326,7 +5328,11 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
             for (final f in sc.formList)
               SizedBox(
                 width: cellWidth,
-                child: _AssignmentCell(
+                child: !sc.allows(s, f)
+                    ? const Center(
+                    child: Text('—',
+                        style: TextStyle(color: Colors.black26, fontSize: 18)))
+                    : _AssignmentCell(
                   subject: s,
                   form: f,
                   items: data[AssignmentRecord.keyFor(s, f)] ?? const [],
@@ -6078,6 +6084,56 @@ Future<void> ensureUserProfile(User user) async {
   }
 }
 
+/// subject -> forms taught, read from a teacher document. Records saved
+/// before per-subject forms existed only have the two lists `subjects` and
+/// `forms`: every subject then applies to every form of the teacher.
+Map<String, List<String>> parseTeacherAssignments(Map? m) {
+  final out = <String, List<String>>{};
+  final a = m?['assignments'];
+  if (a is Map) {
+    for (final s in ExamService.subjects) {
+      final v = a[s];
+      if (v is List) {
+        final fs = [
+          for (final f in ExamService.forms)
+            if (v.contains(f)) f
+        ];
+        if (fs.isNotEmpty) out[s] = fs;
+      }
+    }
+    if (out.isNotEmpty) return out;
+  }
+  List<String> list(String k) {
+    final v = m?[k];
+    return v is List ? [for (final e in v) if (e is String) e] : <String>[];
+  }
+
+  final subs = list('subjects'), forms = list('forms');
+  if (subs.isNotEmpty && forms.isNotEmpty) {
+    for (final s in ExamService.subjects) {
+      if (subs.contains(s)) {
+        out[s] = [
+          for (final f in ExamService.forms)
+            if (forms.contains(f)) f
+        ];
+      }
+    }
+  }
+  return out;
+}
+
+/// The forms used by any subject of [a] (in the usual order).
+List<String> formsOfAssignments(Map<String, List<String>> a) => [
+  for (final f in ExamService.forms)
+    if (a.values.any((l) => l.contains(f))) f
+];
+
+/// "Islamic (Form3, Form4) · Maths (Form4)"
+String assignmentsText(Map<String, List<String>> a) => [
+  for (final s in ExamService.subjects)
+    if (a[s] != null && a[s]!.isNotEmpty) '$s (${a[s]!.join(', ')})'
+].join(' · ');
+
 /// What a teacher may see: ONLY the subjects and forms (classes) that were
 /// filled in when the account was created (Firestore: teachers/{uid}).
 /// Administrators, students and old accounts without a profile are not
@@ -6086,6 +6142,9 @@ class TeacherScope {
   final bool restricted;
   final List<String> subjects, forms;
 
+  /// subject -> the forms in which this teacher teaches that subject.
+  final Map<String, List<String>> assignments;
+
   /// A student account: sees only the own record (see [_LinkStudentBody]).
   final bool isStudent;
   final String studentId, sectionId;
@@ -6093,6 +6152,7 @@ class TeacherScope {
     this.restricted = false,
     this.subjects = const [],
     this.forms = const [],
+    this.assignments = const {},
     this.isStudent = false,
     this.studentId = '',
     this.sectionId = '',
@@ -6115,6 +6175,15 @@ class TeacherScope {
 
   bool allowsSubject(String s) => !restricted || subjects.contains(s);
   bool allowsForm(String f) => !restricted || forms.contains(f);
+
+  /// True when this person teaches [subject] in [form] (the exact pair).
+  bool allows(String subject, String form) {
+    if (!restricted) return true;
+    if (assignments.isNotEmpty) {
+      return assignments[subject]?.contains(form) ?? false;
+    }
+    return subjects.contains(subject) && forms.contains(form);
+  }
 
   List<SectionInfo> filterSections(List<SectionInfo> l) {
     if (isStudent) return [for (final s in l) if (s.id == sectionId) s];
@@ -6175,7 +6244,11 @@ class _ScopeGateState extends State<_ScopeGate> {
           try {
             final t = await findTeacherByEmail(mail);
             if (t != null) {
-              _teacher = {'subjects': t.subjects, 'forms': t.forms};
+              _teacher = {
+                'subjects': t.subjects,
+                'forms': t.forms,
+                'assignments': t.assignments,
+              };
             }
           } catch (_) {}
         }
@@ -6230,10 +6303,15 @@ class _ScopeGateState extends State<_ScopeGate> {
         sectionId: '${_stu?['sectionId'] ?? ''}',
       );
     } else if (role == 'teacher') {
+      final asg = parseTeacherAssignments(_teacher);
       teacherScope.value = TeacherScope(
           restricted: true,
-          subjects: _list('subjects'),
-          forms: _list('forms'));
+          subjects: [
+            for (final s in ExamService.subjects)
+              if (asg.containsKey(s)) s
+          ],
+          forms: formsOfAssignments(asg),
+          assignments: asg);
     } else {
       teacherScope.value = TeacherScope.open;
     }
@@ -10899,7 +10977,19 @@ class AttendanceScreen extends StatefulWidget {
 class _AttendanceScreenState extends State<AttendanceScreen> {
   final _service = SchoolService();
   String? _sectionId;
-  String _subject = ''; // '' = whole day
+  // Selected subjects. Empty = "All subjects" (whole-day register).
+  // One or more subjects = the same marks are saved for each of them.
+  final Set<String> _subjects = {};
+
+  List<String> get _subjectOrder {
+    final all = teacherScope.value.subjectList;
+    final sel = _subjects.toList();
+    sel.sort((a, b) => all.indexOf(a).compareTo(all.indexOf(b)));
+    return sel;
+  }
+
+  String get _subjectLabel =>
+      _subjects.isEmpty ? 'All subjects' : _subjectOrder.join(', ');
   DateTime _date = DateTime.now();
   Map<String, String> _marks = {};
   bool _loading = false;
@@ -10919,12 +11009,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _dirty = false;
     });
     try {
-      final m = await _service.getAttendance(id, _dateKey, subject: _subject);
+      // Empty selection = whole day. Several subjects: merge their registers
+      // (the first selected subject wins when two of them disagree).
+      final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
+      final merged = <String, String>{};
+      for (final k in keys) {
+        final m = await _service.getAttendance(id, _dateKey, subject: k);
+        for (final e in m.entries) {
+          merged.putIfAbsent(e.key, () => e.value);
+        }
+      }
       if (!mounted || t != _token) return;
       setState(() {
         // the Late option was removed: old late marks count as present
         _marks = {
-          for (final e in m.entries)
+          for (final e in merged.entries)
             e.key: e.value == 'late' ? 'present' : e.value,
         };
         _loading = false;
@@ -10987,7 +11086,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         for (final s in students)
           if (_marks[s.id] != null) s.id: _marks[s.id]!,
       };
-      await _service.saveAttendance(id, _dateKey, records, subject: _subject);
+      final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
+      for (final k in keys) {
+        await _service.saveAttendance(id, _dateKey, records, subject: k);
+      }
       if (!mounted) return;
       setState(() {
         _saving = false;
@@ -11000,6 +11102,60 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       if (mounted) setState(() => _saving = false);
       messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
     }
+  }
+
+  /// Dialog with checkboxes: "All subjects" or any number of subjects.
+  Future<void> _pickSubjects() async {
+    final all = teacherScope.value.subjectList;
+    final temp = {..._subjects};
+    final result = await showDialog<Set<String>>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, setD) => AlertDialog(
+          title: const Text('Subjects'),
+          contentPadding: const EdgeInsets.fromLTRB(8, 12, 8, 0),
+          content: SizedBox(
+            width: 360,
+            child: ListView(shrinkWrap: true, children: [
+              CheckboxListTile(
+                value: temp.isEmpty,
+                title: const Text('All subjects'),
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (_) => setD(temp.clear),
+              ),
+              const Divider(height: 1),
+              for (final s in all)
+                CheckboxListTile(
+                  value: temp.contains(s),
+                  title: Text(s),
+                  controlAffinity: ListTileControlAffinity.leading,
+                  onChanged: (v) =>
+                      setD(() => v == true ? temp.add(s) : temp.remove(s)),
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(c, temp),
+                child: const Text('Done')),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    if (result.length == _subjects.length && result.containsAll(_subjects)) {
+      return;
+    }
+    if (!await _okToLeave() || !mounted) return;
+    setState(() {
+      _subjects
+        ..clear()
+        ..addAll(result);
+    });
+    _load();
   }
 
   void _openReport() {
@@ -11047,25 +11203,19 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         const SizedBox(width: 10),
         Expanded(
           flex: 5,
-          child: DropdownButtonFormField<String>(
-            value: _subject,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Subject',
-              border: OutlineInputBorder(),
-              isDense: true,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(4),
+            onTap: _pickSubjects,
+            child: InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Subjects',
+                border: OutlineInputBorder(),
+                isDense: true,
+                suffixIcon: Icon(Icons.arrow_drop_down),
+              ),
+              child: Text(_subjectLabel,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
-            items: [
-              const DropdownMenuItem(value: '', child: Text('All subjects')),
-              for (final s in teacherScope.value.subjectList)
-                DropdownMenuItem(value: s, child: Text(s)),
-            ],
-            onChanged: (v) async {
-              if (v == null || v == _subject) return;
-              if (!await _okToLeave() || !mounted) return;
-              setState(() => _subject = v);
-              _load();
-            },
           ),
         ),
       ]),
@@ -11232,7 +11382,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 2),
         child: Row(children: [
           Text(
-              '${students.length} students · ${_subject.isEmpty ? 'All subjects' : _subject}',
+              '${students.length} students · $_subjectLabel',
               style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
           const Spacer(),
           FilterChip(
@@ -11871,15 +12021,28 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
     final bySubject = <String, _Tally>{};
     final bySection = <String, _Tally>{};
     final byStudent = <String, _Tally>{};
+    // One student counts ONCE per day (not once per subject): if the student
+    // is absent in any register of that day, the student is absent that day.
+    final dayMark = <String, String>{}; // section|date|student -> present/absent
     for (final d in docs) {
       for (final e in d.records.entries) {
-        overall.add(e.value);
-        byDay.putIfAbsent(d.dateKey, _Tally.new).add(e.value);
+        // the By subject table still counts every subject on its own
         bySubject.putIfAbsent(d.subject, _Tally.new).add(e.value);
-        bySection.putIfAbsent(d.sectionId, _Tally.new).add(e.value);
-        byStudent.putIfAbsent(e.key, _Tally.new).add(e.value);
+        final k = '${d.sectionId}|${d.dateKey}|${e.key}';
+        final mark = e.value == 'absent' ? 'absent' : 'present';
+        if (mark == 'absent' || !dayMark.containsKey(k)) dayMark[k] = mark;
       }
     }
+    for (final e in dayMark.entries) {
+      final parts = e.key.split('|');
+      overall.add(e.value);
+      byDay.putIfAbsent(parts[1], _Tally.new).add(e.value);
+      bySection.putIfAbsent(parts[0], _Tally.new).add(e.value);
+      byStudent.putIfAbsent(parts[2], _Tally.new).add(e.value);
+    }
+    // registers = distinct section + day (not one per subject)
+    final registerCount =
+        {for (final d in docs) '${d.sectionId}|${d.dateKey}'}.length;
 
     final (from, to) = _range;
     final dayRows = <_RepRow>[];
@@ -11954,7 +12117,7 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
     ]..sort((x, y) => y.value.a.compareTo(x.value.a));
     final attShown = _period == _Period.day ? att : att.take(10).toList();
 
-    return _Analysis(overall, docs.length, dayRows, subjectRows, sectionRows,
+    return _Analysis(overall, registerCount, dayRows, subjectRows, sectionRows,
         attShown, insights);
   }
 
@@ -13068,7 +13231,8 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
                   subtitle: Text(secOf[s.sectionId]?.label ?? ''),
                   trailing: teacherScope.value.isStudent ? null : const Icon(Icons.edit_note),
                   onTap: () => _openResultEditor(context, s,
-                      secOf[s.sectionId]?.label ?? '', _ResultPrefs.exam),
+                      secOf[s.sectionId]?.label ?? '', _ResultPrefs.exam,
+                      form: secOf[s.sectionId]?.form),
                 ),
               ),
             if (found.length > 60)
@@ -13351,6 +13515,10 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
                   exam: _ResultPrefs.exam,
                   students: students,
                   sectionLabels: {for (final s in students) s.id: secLabel(s)},
+                  studentForms: {
+                    for (final s in students)
+                      s.id: secOf[s.sectionId]?.form ?? ''
+                  },
                 ),
               )),
               icon: const Icon(Icons.grid_on, size: 18),
@@ -13376,7 +13544,8 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
               child: InkWell(
                 borderRadius: BorderRadius.circular(12),
                 onTap: () => _openResultEditor(
-                    context, s, secLabel(s), _ResultPrefs.exam),
+                    context, s, secLabel(s), _ResultPrefs.exam,
+                    form: secOf[s.sectionId]?.form),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 12, vertical: 10),
@@ -13511,12 +13680,14 @@ class ResultBulkScreen extends StatefulWidget {
   final String title, exam;
   final List<StudentInfo> students;
   final Map<String, String> sectionLabels; // studentId -> section label
+  final Map<String, String> studentForms; // studentId -> form
   const ResultBulkScreen({
     super.key,
     required this.title,
     required this.exam,
     required this.students,
     required this.sectionLabels,
+    this.studentForms = const {},
   });
 
   @override
@@ -13576,6 +13747,13 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
       }
     }
     super.dispose();
+  }
+
+  /// A teacher may only type a mark where the subject is taught in the
+  /// form of the student (other boxes stay locked and keep their value).
+  bool _can(String studentId, String subject) {
+    final f = widget.studentForms[studentId] ?? '';
+    return f.isEmpty || teacherScope.value.allows(subject, f);
   }
 
   bool _isBad(String text) {
@@ -13741,7 +13919,7 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
                             padding: const EdgeInsets.only(right: 8),
                             child: TextField(
                               controller: row[sub],
-                              enabled: !_saving,
+                              enabled: !_saving && _can(s.id, sub),
                               textAlign: TextAlign.center,
                               textInputAction: TextInputAction.next,
                               keyboardType:
@@ -13850,7 +14028,8 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
 // ---------------- Mark entry for one student ----------------
 
 Future<void> _openResultEditor(
-    BuildContext context, StudentInfo s, String sectionLabel, String exam) {
+    BuildContext context, StudentInfo s, String sectionLabel, String exam,
+    {String? form}) {
   // a student can look at the own result but never change it
   if (teacherScope.value.isStudent) {
     return showDialog(
@@ -13862,7 +14041,7 @@ Future<void> _openResultEditor(
   return showDialog(
     context: context,
     builder: (_) => _ResultEditorDialog(
-        student: s, sectionLabel: sectionLabel, exam: exam),
+        student: s, sectionLabel: sectionLabel, exam: exam, form: form),
   );
 }
 
@@ -13947,10 +14126,15 @@ class _ResultViewDialog extends StatelessWidget {
 class _ResultEditorDialog extends StatefulWidget {
   final StudentInfo student;
   final String sectionLabel, exam;
+
+  /// The form of the student: a teacher can only enter the marks of the
+  /// subjects taught in this form.
+  final String? form;
   const _ResultEditorDialog({
     required this.student,
     required this.sectionLabel,
     required this.exam,
+    this.form,
   });
 
   @override
@@ -13959,8 +14143,10 @@ class _ResultEditorDialog extends StatefulWidget {
 
 class _ResultEditorDialogState extends State<_ResultEditorDialog> {
   final _service = ResultService();
-  final _ctrl = {
-    for (final s in teacherScope.value.subjectList) s: TextEditingController(),
+  late final _ctrl = {
+    for (final s in teacherScope.value.subjectList)
+      if (widget.form == null || teacherScope.value.allows(s, widget.form!))
+        s: TextEditingController(),
   };
   // marks of subjects this person may not see: kept as they are when saving
   final Map<String, double> _hidden = {};
@@ -14358,6 +14544,7 @@ class _LoginScreenState extends State<LoginScreen> {
               email: email,
               subjects: subjects,
               forms: forms,
+              assignments: {for (final s in subjects) s: forms},
             ));
           }
         } catch (e) {
@@ -14914,6 +15101,9 @@ class _PermissionsCard extends StatelessWidget {
 class TeacherInfo {
   final String id, name, role, phone, email;
   final List<String> subjects, forms;
+
+  /// subject -> the forms in which this person teaches it.
+  final Map<String, List<String>> assignments;
   const TeacherInfo({
     required this.id,
     required this.name,
@@ -14922,6 +15112,7 @@ class TeacherInfo {
     this.email = '',
     this.subjects = const [],
     this.forms = const [],
+    this.assignments = const {},
   });
 
   static const roles = ['Teacher', 'Head teacher', 'Deputy head', 'Staff'];
@@ -14946,14 +15137,18 @@ class TeacherInfo {
     }
 
     final role = '${m['role'] ?? 'Teacher'}';
+    final asg = parseTeacherAssignments(m);
     return TeacherInfo(
       id: d.id,
       name: '${m['name'] ?? ''}',
       role: TeacherInfo.roles.contains(role) ? role : 'Teacher',
       phone: '${m['phone'] ?? ''}',
       email: '${m['email'] ?? ''}',
-      subjects: list('subjects'),
-      forms: list('forms'),
+      subjects: asg.isEmpty
+          ? list('subjects')
+          : [for (final s in ExamService.subjects) if (asg.containsKey(s)) s],
+      forms: asg.isEmpty ? list('forms') : formsOfAssignments(asg),
+      assignments: asg,
     );
   }
 }
@@ -15029,9 +15224,10 @@ class _AccountBadgeState extends State<AccountBadge> {
               if (t != null) ...[
                 _row(Icons.phone_outlined, 'Phone', t.phone),
                 if (t.isTeaching) ...[
-                  _row(Icons.menu_book_outlined, 'Subjects',
-                      t.subjects.join(', ')),
-                  _row(Icons.groups_outlined, 'Forms', t.forms.join(', ')),
+                  _row(Icons.menu_book_outlined, 'Subjects and forms',
+                      t.assignments.isEmpty
+                          ? [...t.subjects, ...t.forms].join(', ')
+                          : assignmentsText(t.assignments)),
                 ],
               ],
             ]),
@@ -15114,9 +15310,15 @@ class TeacherService {
       'email': t.email.trim().toLowerCase(),
       'subjects': t.subjects,
       'forms': t.forms,
+      'assignments': t.assignments,
       'updatedBy': FirebaseAuth.instance.currentUser?.uid,
       'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+      // mergeFields replaces "assignments" as a whole; a plain merge would
+      // keep a subject that was just removed.
+    }, SetOptions(mergeFields: [
+      'name', 'role', 'phone', 'email', 'subjects', 'forms', 'assignments',
+      'updatedBy', 'updatedAt',
+    ]));
   }
 
   Future<void> delete(String id) => _col.doc(id).delete();
@@ -15148,9 +15350,12 @@ class _TeachersScreenState extends State<TeachersScreen> {
     final phone = TextEditingController(text: t?.phone ?? '');
     final email = TextEditingController(text: t?.email ?? '');
     var role = t?.role ?? 'Teacher';
-    final subjects = {...?t?.subjects};
-    final forms = {...?t?.forms};
-    String? error;
+    // subject -> the forms in which it is taught
+    final assign = <String, Set<String>>{
+      for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
+        e.key: {...e.value},
+    };
+    String? error, assignError;
 
     final result = await showDialog<TeacherInfo>(
       context: context,
@@ -15218,24 +15423,89 @@ class _TeachersScreenState extends State<TeachersScreen> {
                       for (final sub in ExamService.subjects)
                         FilterChip(
                           label: Text(sub),
-                          selected: subjects.contains(sub),
-                          onSelected: (on) => setD(
-                                  () => on ? subjects.add(sub) : subjects.remove(sub)),
+                          selected: assign.containsKey(sub),
+                          onSelected: (on) => setD(() {
+                            assignError = null;
+                            if (on) {
+                              assign.putIfAbsent(sub, () => <String>{});
+                            } else {
+                              assign.remove(sub);
+                            }
+                          }),
                         ),
                     ]),
-                    const SizedBox(height: 16),
-                    const Text('Forms taught',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 6),
-                    Wrap(spacing: 6, runSpacing: 6, children: [
-                      for (final f in ExamService.forms)
-                        FilterChip(
-                          label: Text(f),
-                          selected: forms.contains(f),
-                          onSelected: (on) =>
-                              setD(() => on ? forms.add(f) : forms.remove(f)),
-                        ),
-                    ]),
+                    if (assign.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      const Text('Forms for each subject',
+                          style: TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 2),
+                      Text(
+                          'Tick the forms in which the teacher teaches each subject.',
+                          style: TextStyle(
+                              fontSize: 12.5, color: Colors.grey.shade700)),
+                      const SizedBox(height: 8),
+                      for (final sub in ExamService.subjects)
+                        if (assign.containsKey(sub))
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                  color: assign[sub]!.isEmpty
+                                      ? Colors.red.shade300
+                                      : Colors.grey.shade300),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(children: [
+                                  Expanded(
+                                    child: Text(sub,
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w700)),
+                                  ),
+                                  TextButton(
+                                    style: TextButton.styleFrom(
+                                        visualDensity: VisualDensity.compact),
+                                    onPressed: () => setD(() {
+                                      assignError = null;
+                                      assign[sub]!.length ==
+                                          ExamService.forms.length
+                                          ? assign[sub]!.clear()
+                                          : assign[sub]!
+                                          .addAll(ExamService.forms);
+                                    }),
+                                    child: Text(assign[sub]!.length ==
+                                        ExamService.forms.length
+                                        ? 'Clear'
+                                        : 'All forms'),
+                                  ),
+                                ]),
+                                Wrap(spacing: 6, runSpacing: 6, children: [
+                                  for (final f in ExamService.forms)
+                                    FilterChip(
+                                      label: Text(f),
+                                      selected: assign[sub]!.contains(f),
+                                      onSelected: (on) => setD(() {
+                                        assignError = null;
+                                        on
+                                            ? assign[sub]!.add(f)
+                                            : assign[sub]!.remove(f);
+                                      }),
+                                    ),
+                                ]),
+                              ],
+                            ),
+                          ),
+                    ],
+                    if (assignError != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(assignError!,
+                            style: const TextStyle(color: Colors.red)),
+                      ),
                   ],
                 ],
               ),
@@ -15251,6 +15521,21 @@ class _TeachersScreenState extends State<TeachersScreen> {
                   setD(() => error = 'Enter the name');
                   return;
                 }
+                if (teaching && assign.values.any((v) => v.isEmpty)) {
+                  setD(() => assignError =
+                  'Choose at least one form for every subject (or untick the subject).');
+                  return;
+                }
+                // keep the usual order; Staff have no subjects
+                final asg = <String, List<String>>{
+                  if (teaching)
+                    for (final x in ExamService.subjects)
+                      if (assign.containsKey(x))
+                        x: [
+                          for (final f in ExamService.forms)
+                            if (assign[x]!.contains(f)) f
+                        ],
+                };
                 Navigator.pop(
                   ctx,
                   TeacherInfo(
@@ -15259,13 +15544,9 @@ class _TeachersScreenState extends State<TeachersScreen> {
                     role: role,
                     phone: phone.text.trim(),
                     email: email.text.trim(),
-                    // keep the order of the lists, drop what is hidden for Staff
-                    subjects: teaching
-                        ? [for (final x in ExamService.subjects) if (subjects.contains(x)) x]
-                        : const [],
-                    forms: teaching
-                        ? [for (final x in ExamService.forms) if (forms.contains(x)) x]
-                        : const [],
+                    subjects: asg.keys.toList(),
+                    forms: formsOfAssignments(asg),
+                    assignments: asg,
                   ),
                 );
               },
@@ -15427,7 +15708,9 @@ class _TeachersScreenState extends State<TeachersScreen> {
                                 Padding(
                                   padding: const EdgeInsets.only(top: 4),
                                   child: Text(
-                                    [
+                                    t.assignments.isNotEmpty
+                                        ? assignmentsText(t.assignments)
+                                        : [
                                       if (t.subjects.isNotEmpty)
                                         t.subjects.join(', '),
                                       if (t.forms.isNotEmpty)
