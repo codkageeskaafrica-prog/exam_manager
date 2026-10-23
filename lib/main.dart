@@ -6002,6 +6002,9 @@ class UserProfile {
   final String studentId; // student accounts: the registered student record
   final List<String>? access;
   final bool legacy;
+
+  /// Added in the Teachers tab; has not signed in for the first time yet.
+  final bool pending;
   const UserProfile({
     required this.uid,
     required this.role,
@@ -6010,6 +6013,7 @@ class UserProfile {
     this.studentId = '',
     this.access,
     this.legacy = false,
+    this.pending = false,
   });
 
   static const roles = ['admin', 'teacher', 'student'];
@@ -6036,6 +6040,7 @@ class UserProfile {
       name: '${m['name'] ?? ''}',
       email: '${m['email'] ?? ''}',
       studentId: '${m['studentId'] ?? ''}',
+      pending: m['pendingLogin'] == true,
       access: a is List
           ? [
         for (final e in a)
@@ -14460,12 +14465,36 @@ class _LoginScreenState extends State<LoginScreen> {
         }
         return false;
       }
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      final usersCol = FirebaseFirestore.instance.collection('users');
+      // The administrator may already have set the role / pages of this
+      // person in Settings (user entry created with the teacher record).
+      final keep = <String, dynamic>{};
+      var hadPlaceholder = false;
+      if (t.id != user.uid) {
+        try {
+          final ph = await usersCol.doc(t.id).get();
+          if (ph.exists) {
+            hadPlaceholder = true;
+            final m = ph.data() ?? {};
+            if (UserProfile.roles.contains('${m['role']}')) {
+              keep['role'] = m['role'];
+            }
+            if (m['access'] is List) keep['access'] = m['access'];
+          }
+        } catch (_) {}
+      }
+      await usersCol.doc(user.uid).set({
         'role': 'teacher',
         'name': t.name,
         'email': email,
         'createdAt': FieldValue.serverTimestamp(),
+        ...keep,
       });
+      if (hadPlaceholder) {
+        try {
+          await usersCol.doc(t.id).delete();
+        } catch (_) {}
+      }
       return true;
     } catch (e) {
       debugPrint('Teacher first login failed: $e');
@@ -14852,6 +14881,8 @@ class ExamManagerApp extends StatelessWidget {
 class _PermissionsCard extends StatelessWidget {
   const _PermissionsCard();
 
+  static bool _teachersSynced = false;
+
   static void _toast(BuildContext c, String m) =>
       ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(m)));
 
@@ -14929,6 +14960,11 @@ class _PermissionsCard extends StatelessWidget {
           );
         }
         if (mine.data?.isAdmin != true) return const SizedBox.shrink();
+        if (!_teachersSynced) {
+          // Every teacher / staff member in Teachers must be in this list.
+          _teachersSynced = true;
+          TeacherService().syncAllUsers();
+        }
         final users = FirebaseFirestore.instance.collection('users');
         return Padding(
           padding: const EdgeInsets.only(bottom: 12),
@@ -15040,7 +15076,8 @@ class _PermissionsCard extends StatelessWidget {
       ),
       title: Text(isMe ? '$title (you)' : title),
       subtitle: Text(
-        '${UserProfile.roleLabel(u.role)} · '
+        '${UserProfile.roleLabel(u.role)}'
+            '${u.pending ? ' (not signed in yet)' : ''} · '
             '${u.isAdmin ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
             '${u.email.isEmpty || u.email == title ? '' : '\n${u.email}'}',
         style: const TextStyle(fontSize: 12),
@@ -15303,9 +15340,88 @@ class TeacherService {
     return l;
   });
 
-  Future<void> save(TeacherInfo t) {
+  /// Makes sure [t] is in the users list (Settings > Users). Roles and pages
+  /// already set for the user are never changed here.
+  Future<void> _ensureUser(String id, TeacherInfo t) async {
+    final users = FirebaseFirestore.instance.collection('users');
+    final name = t.name.trim();
+    final email = t.email.trim().toLowerCase();
+    try {
+      // 1. an account / entry with the same id (signed up, or made before)
+      final byId = await users.doc(id).get();
+      if (byId.exists) {
+        await byId.reference.set({
+          if (name.isNotEmpty) 'name': name,
+          if (email.isNotEmpty) 'email': email,
+        }, SetOptions(merge: true));
+        return;
+      }
+      // 2. an account that already signed in with this email
+      if (email.isNotEmpty) {
+        for (final v in {email, t.email.trim()}) {
+          final q = await users.where('email', isEqualTo: v).limit(1).get();
+          if (q.docs.isNotEmpty) {
+            await q.docs.first.reference
+                .set({if (name.isNotEmpty) 'name': name}, SetOptions(merge: true));
+            return;
+          }
+        }
+      }
+      // 3. new: a user waiting for its first sign in
+      await users.doc(id).set({
+        'role': 'teacher',
+        'name': name,
+        'email': email,
+        'pendingLogin': true,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      debugPrint('Could not add the teacher to the users list: $e');
+    }
+  }
+
+  /// Adds every teacher / staff member that is not a user yet (records made
+  /// before teachers became users automatically).
+  Future<void> syncAllUsers() async {
+    try {
+      final db = FirebaseFirestore.instance;
+      final teachers = await _col.get();
+      final users = await db.collection('users').get();
+      final ids = {for (final d in users.docs) d.id};
+      final emails = {
+        for (final d in users.docs)
+          '${d.data()['email'] ?? ''}'.trim().toLowerCase()
+      }..remove('');
+      final missing = <TeacherInfo>[];
+      for (final d in teachers.docs) {
+        final t = TeacherInfo.fromDoc(d);
+        final mail = t.email.trim().toLowerCase();
+        if (ids.contains(t.id) || (mail.isNotEmpty && emails.contains(mail))) {
+          continue;
+        }
+        missing.add(t);
+      }
+      for (var i = 0; i < missing.length; i += 400) {
+        final batch = db.batch();
+        for (final t in missing.skip(i).take(400)) {
+          batch.set(db.collection('users').doc(t.id), {
+            'role': 'teacher',
+            'name': t.name.trim(),
+            'email': t.email.trim().toLowerCase(),
+            'pendingLogin': true,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('Teachers could not be added to the users list: $e');
+    }
+  }
+
+  Future<void> save(TeacherInfo t) async {
     final ref = t.id.isEmpty ? _col.doc() : _col.doc(t.id);
-    return ref.set({
+    await ref.set({
       'name': t.name.trim(),
       'role': t.role,
       'phone': t.phone.trim(),
@@ -15321,9 +15437,19 @@ class TeacherService {
       'name', 'role', 'phone', 'email', 'subjects', 'forms', 'assignments',
       'updatedBy', 'updatedAt',
     ]));
+    await _ensureUser(ref.id, t);
   }
 
-  Future<void> delete(String id) => _col.doc(id).delete();
+  Future<void> delete(String id) async {
+    await _col.doc(id).delete();
+    // Remove the user entry too, but only while the person never signed in
+    // (a real account is kept: it is managed in Settings > Users).
+    try {
+      final u = FirebaseFirestore.instance.collection('users').doc(id);
+      final d = await u.get();
+      if (d.exists && d.data()?['pendingLogin'] == true) await u.delete();
+    } catch (_) {}
+  }
 }
 
 class TeachersScreen extends StatefulWidget {
