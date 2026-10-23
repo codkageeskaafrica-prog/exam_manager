@@ -15085,7 +15085,8 @@ class _PermissionsCard extends StatelessWidget {
                             valueListenable: appSettings,
                             builder: (context, st, _) => Column(children: [
                               for (final u in list)
-                                _userTile(context, u, st, u.uid == me, users),
+                                _userTile(context, u, st, u.uid == me, users,
+                                    ts.data ?? const <TeacherInfo>[]),
                             ]),
                           );
                         },
@@ -15102,9 +15103,28 @@ class _PermissionsCard extends StatelessWidget {
   }
 
   Widget _userTile(BuildContext context, UserProfile u, AppSettings st,
-      bool isMe, CollectionReference<Map<String, dynamic>> users) {
+      bool isMe, CollectionReference<Map<String, dynamic>> users,
+      List<TeacherInfo> teachers) {
     final eff = u.effectiveAccess(st);
+    // the teacher / staff record of this user (same id, or the same email)
+    TeacherInfo? rec;
+    for (final x in teachers) {
+      if (x.id == u.uid) {
+        rec = x;
+        break;
+      }
+    }
+    final mail = u.email.trim().toLowerCase();
+    if (rec == null && mail.isNotEmpty) {
+      for (final x in teachers) {
+        if (x.email.trim().toLowerCase() == mail) {
+          rec = x;
+          break;
+        }
+      }
+    }
     final title = u.name.isEmpty ? (u.email.isEmpty ? u.uid : u.email) : u.name;
+    final r = rec;
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
@@ -15158,6 +15178,35 @@ class _PermissionsCard extends StatelessWidget {
                   .set({..._base(u), 'access': v}, SetOptions(merge: true))),
           enabled: !isMe && !u.isAdmin,
         ),
+        if (u.role != 'student') ...[
+          const Divider(height: 24),
+          Text('Teacher / staff details',
+              style: const TextStyle(fontSize: 12)),
+          const SizedBox(height: 4),
+          Text(
+            r == null
+                ? 'Not set yet: no role, subjects or forms.'
+                : '${r.role}'
+                '${r.isTeaching ? (r.assignments.isEmpty ? ' · no subjects yet' : ' · ${assignmentsText(r.assignments)}') : ' · non-teaching staff'}',
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: kBlue),
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.edit_outlined, size: 18),
+              label: Text(r == null
+                  ? 'Set role, subjects and forms'
+                  : 'Edit role, subjects and forms'),
+              onPressed: () => editTeacherDialog(context,
+                  t: r,
+                  presetName: u.name,
+                  presetEmail: u.email,
+                  newId: u.uid),
+            ),
+          ),
+        ],
         if (!isMe && !u.isAdmin && u.access != null)
           Align(
             alignment: Alignment.centerRight,
@@ -15495,6 +15544,239 @@ class TeacherService {
   }
 }
 
+/// The add / edit dialog of a teacher or staff member (name, role, phone,
+/// email, subjects and the forms of every subject). Used by the Teachers tab
+/// and by Settings > Users. [presetName] / [presetEmail] / [newId] fill in a
+/// new record made from an existing user (the record id = the account id).
+Future<void> editTeacherDialog(BuildContext context,
+    {TeacherInfo? t,
+      String presetName = '',
+      String presetEmail = '',
+      String newId = ''}) async {
+  void toast(String m) => ScaffoldMessenger.of(context)
+      .showSnackBar(SnackBar(content: Text(m)));
+  final name = TextEditingController(text: t?.name ?? presetName);
+  final phone = TextEditingController(text: t?.phone ?? '');
+  final email = TextEditingController(text: t?.email ?? presetEmail);
+  var role = t?.role ?? 'Teacher';
+  // subject -> the forms in which it is taught
+  final assign = <String, Set<String>>{
+    for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
+      e.key: {...e.value},
+  };
+  String? error, assignError;
+
+  final result = await showDialog<TeacherInfo>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+      final teaching = role != 'Staff';
+      return AlertDialog(
+        title: Text(t == null ? 'Add teacher / staff' : 'Edit teacher / staff'),
+        content: SizedBox(
+          width: 440,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: name,
+                  autofocus: t == null,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: InputDecoration(
+                    labelText: 'Full name',
+                    errorText: error,
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: role,
+                  decoration: const InputDecoration(
+                    labelText: 'Role',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final r in TeacherInfo.roles)
+                      DropdownMenuItem(value: r, child: Text(r)),
+                  ],
+                  onChanged: (v) => setD(() => role = v ?? role),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: phone,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(
+                    labelText: 'Phone (optional)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Email (optional)',
+                    helperText:
+                    'The teacher signs in with this email as both email and password',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (teaching) ...[
+                  const SizedBox(height: 16),
+                  const Text('Subjects taught',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    for (final sub in ExamService.subjects)
+                      FilterChip(
+                        label: Text(sub),
+                        selected: assign.containsKey(sub),
+                        onSelected: (on) => setD(() {
+                          assignError = null;
+                          if (on) {
+                            assign.putIfAbsent(sub, () => <String>{});
+                          } else {
+                            assign.remove(sub);
+                          }
+                        }),
+                      ),
+                  ]),
+                  if (assign.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    const Text('Forms for each subject',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(
+                        'Tick the forms in which the teacher teaches each subject.',
+                        style: TextStyle(
+                            fontSize: 12.5, color: Colors.grey.shade700)),
+                    const SizedBox(height: 8),
+                    for (final sub in ExamService.subjects)
+                      if (assign.containsKey(sub))
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                                color: assign[sub]!.isEmpty
+                                    ? Colors.red.shade300
+                                    : Colors.grey.shade300),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(children: [
+                                Expanded(
+                                  child: Text(sub,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w700)),
+                                ),
+                                TextButton(
+                                  style: TextButton.styleFrom(
+                                      visualDensity: VisualDensity.compact),
+                                  onPressed: () => setD(() {
+                                    assignError = null;
+                                    assign[sub]!.length ==
+                                        ExamService.forms.length
+                                        ? assign[sub]!.clear()
+                                        : assign[sub]!
+                                        .addAll(ExamService.forms);
+                                  }),
+                                  child: Text(assign[sub]!.length ==
+                                      ExamService.forms.length
+                                      ? 'Clear'
+                                      : 'All forms'),
+                                ),
+                              ]),
+                              Wrap(spacing: 6, runSpacing: 6, children: [
+                                for (final f in ExamService.forms)
+                                  FilterChip(
+                                    label: Text(f),
+                                    selected: assign[sub]!.contains(f),
+                                    onSelected: (on) => setD(() {
+                                      assignError = null;
+                                      on
+                                          ? assign[sub]!.add(f)
+                                          : assign[sub]!.remove(f);
+                                    }),
+                                  ),
+                              ]),
+                            ],
+                          ),
+                        ),
+                  ],
+                  if (assignError != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(assignError!,
+                          style: const TextStyle(color: Colors.red)),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (name.text.trim().isEmpty) {
+                setD(() => error = 'Enter the name');
+                return;
+              }
+              if (teaching && assign.values.any((v) => v.isEmpty)) {
+                setD(() => assignError =
+                'Choose at least one form for every subject (or untick the subject).');
+                return;
+              }
+              // keep the usual order; Staff have no subjects
+              final asg = <String, List<String>>{
+                if (teaching)
+                  for (final x in ExamService.subjects)
+                    if (assign.containsKey(x))
+                      x: [
+                        for (final f in ExamService.forms)
+                          if (assign[x]!.contains(f)) f
+                      ],
+              };
+              Navigator.pop(
+                ctx,
+                TeacherInfo(
+                  id: t?.id ?? newId,
+                  name: name.text.trim(),
+                  role: role,
+                  phone: phone.text.trim(),
+                  email: email.text.trim(),
+                  subjects: asg.keys.toList(),
+                  forms: formsOfAssignments(asg),
+                  assignments: asg,
+                ),
+              );
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      );
+    }),
+  );
+  name.dispose();
+  phone.dispose();
+  email.dispose();
+  if (result == null || !context.mounted) return;
+  try {
+    await TeacherService().save(result);
+    toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
+  } catch (e) {
+    toast('Failed: $e');
+  }
+}
+
 class TeachersScreen extends StatefulWidget {
   const TeachersScreen({super.key});
 
@@ -15516,228 +15798,7 @@ class _TeachersScreenState extends State<TeachersScreen> {
   void _toast(String m) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
-  Future<void> _edit([TeacherInfo? t]) async {
-    final name = TextEditingController(text: t?.name ?? '');
-    final phone = TextEditingController(text: t?.phone ?? '');
-    final email = TextEditingController(text: t?.email ?? '');
-    var role = t?.role ?? 'Teacher';
-    // subject -> the forms in which it is taught
-    final assign = <String, Set<String>>{
-      for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
-        e.key: {...e.value},
-    };
-    String? error, assignError;
-
-    final result = await showDialog<TeacherInfo>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-        final teaching = role != 'Staff';
-        return AlertDialog(
-          title: Text(t == null ? 'Add teacher / staff' : 'Edit teacher / staff'),
-          content: SizedBox(
-            width: 440,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TextField(
-                    controller: name,
-                    autofocus: t == null,
-                    textCapitalization: TextCapitalization.words,
-                    decoration: InputDecoration(
-                      labelText: 'Full name',
-                      errorText: error,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    value: role,
-                    decoration: const InputDecoration(
-                      labelText: 'Role',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      for (final r in TeacherInfo.roles)
-                        DropdownMenuItem(value: r, child: Text(r)),
-                    ],
-                    onChanged: (v) => setD(() => role = v ?? role),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: phone,
-                    keyboardType: TextInputType.phone,
-                    decoration: const InputDecoration(
-                      labelText: 'Phone (optional)',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: email,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: const InputDecoration(
-                      labelText: 'Email (optional)',
-                      helperText:
-                      'The teacher signs in with this email as both email and password',
-                      helperMaxLines: 2,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  if (teaching) ...[
-                    const SizedBox(height: 16),
-                    const Text('Subjects taught',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 6),
-                    Wrap(spacing: 6, runSpacing: 6, children: [
-                      for (final sub in ExamService.subjects)
-                        FilterChip(
-                          label: Text(sub),
-                          selected: assign.containsKey(sub),
-                          onSelected: (on) => setD(() {
-                            assignError = null;
-                            if (on) {
-                              assign.putIfAbsent(sub, () => <String>{});
-                            } else {
-                              assign.remove(sub);
-                            }
-                          }),
-                        ),
-                    ]),
-                    if (assign.isNotEmpty) ...[
-                      const SizedBox(height: 16),
-                      const Text('Forms for each subject',
-                          style: TextStyle(fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 2),
-                      Text(
-                          'Tick the forms in which the teacher teaches each subject.',
-                          style: TextStyle(
-                              fontSize: 12.5, color: Colors.grey.shade700)),
-                      const SizedBox(height: 8),
-                      for (final sub in ExamService.subjects)
-                        if (assign.containsKey(sub))
-                          Container(
-                            width: double.infinity,
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-                            decoration: BoxDecoration(
-                              border: Border.all(
-                                  color: assign[sub]!.isEmpty
-                                      ? Colors.red.shade300
-                                      : Colors.grey.shade300),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(children: [
-                                  Expanded(
-                                    child: Text(sub,
-                                        style: const TextStyle(
-                                            fontWeight: FontWeight.w700)),
-                                  ),
-                                  TextButton(
-                                    style: TextButton.styleFrom(
-                                        visualDensity: VisualDensity.compact),
-                                    onPressed: () => setD(() {
-                                      assignError = null;
-                                      assign[sub]!.length ==
-                                          ExamService.forms.length
-                                          ? assign[sub]!.clear()
-                                          : assign[sub]!
-                                          .addAll(ExamService.forms);
-                                    }),
-                                    child: Text(assign[sub]!.length ==
-                                        ExamService.forms.length
-                                        ? 'Clear'
-                                        : 'All forms'),
-                                  ),
-                                ]),
-                                Wrap(spacing: 6, runSpacing: 6, children: [
-                                  for (final f in ExamService.forms)
-                                    FilterChip(
-                                      label: Text(f),
-                                      selected: assign[sub]!.contains(f),
-                                      onSelected: (on) => setD(() {
-                                        assignError = null;
-                                        on
-                                            ? assign[sub]!.add(f)
-                                            : assign[sub]!.remove(f);
-                                      }),
-                                    ),
-                                ]),
-                              ],
-                            ),
-                          ),
-                    ],
-                    if (assignError != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text(assignError!,
-                            style: const TextStyle(color: Colors.red)),
-                      ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel')),
-            FilledButton(
-              onPressed: () {
-                if (name.text.trim().isEmpty) {
-                  setD(() => error = 'Enter the name');
-                  return;
-                }
-                if (teaching && assign.values.any((v) => v.isEmpty)) {
-                  setD(() => assignError =
-                  'Choose at least one form for every subject (or untick the subject).');
-                  return;
-                }
-                // keep the usual order; Staff have no subjects
-                final asg = <String, List<String>>{
-                  if (teaching)
-                    for (final x in ExamService.subjects)
-                      if (assign.containsKey(x))
-                        x: [
-                          for (final f in ExamService.forms)
-                            if (assign[x]!.contains(f)) f
-                        ],
-                };
-                Navigator.pop(
-                  ctx,
-                  TeacherInfo(
-                    id: t?.id ?? '',
-                    name: name.text.trim(),
-                    role: role,
-                    phone: phone.text.trim(),
-                    email: email.text.trim(),
-                    subjects: asg.keys.toList(),
-                    forms: formsOfAssignments(asg),
-                    assignments: asg,
-                  ),
-                );
-              },
-              child: const Text('Save'),
-            ),
-          ],
-        );
-      }),
-    );
-    name.dispose();
-    phone.dispose();
-    email.dispose();
-    if (result == null || !mounted) return;
-    try {
-      await _service.save(result);
-      _toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
-    } catch (e) {
-      _toast('Failed: $e');
-    }
-  }
+  Future<void> _edit([TeacherInfo? t]) => editTeacherDialog(context, t: t);
 
   Future<void> _remove(TeacherInfo t) async {
     final ok = await showDialog<bool>(
