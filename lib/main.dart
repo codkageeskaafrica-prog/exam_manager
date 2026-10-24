@@ -5999,6 +5999,7 @@ class AppPages {
 ///    keeps full access, as an administrator.
 class UserProfile {
   final String uid, role, name, email;
+  final String phone; // students: the first phone number (their username)
   final String studentId; // student accounts: the registered student record
   final List<String>? access;
   final bool legacy;
@@ -6010,6 +6011,7 @@ class UserProfile {
     required this.role,
     this.name = '',
     this.email = '',
+    this.phone = '',
     this.studentId = '',
     this.access,
     this.legacy = false,
@@ -6039,6 +6041,7 @@ class UserProfile {
       role: roles.contains(r) ? r : 'teacher',
       name: '${m['name'] ?? ''}',
       email: '${m['email'] ?? ''}',
+      phone: '${m['phone'] ?? ''}',
       studentId: '${m['studentId'] ?? ''}',
       pending: m['pendingLogin'] == true,
       access: a is List
@@ -7976,13 +7979,18 @@ class StudentAccountsResult {
 /// number. The account is created on a SECOND Firebase app, so the person
 /// who is adding the students stays signed in.
 class StudentAccounts {
-  static Future<FirebaseAuth> _auth() async {
+  /// How many accounts are created at the same time. Every worker has its
+  /// own Firebase app (an app can only be signed in as one person at a time).
+  static const _workers = 8;
+
+  static Future<FirebaseAuth> _auth(int i) async {
+    final name = 'studentCreator$i';
     FirebaseApp app;
     try {
-      app = Firebase.app('studentCreator');
+      app = Firebase.app(name);
     } catch (_) {
       app = await Firebase.initializeApp(
-          name: 'studentCreator', options: DefaultFirebaseOptions.currentPlatform);
+          name: name, options: DefaultFirebaseOptions.currentPlatform);
     }
     return FirebaseAuth.instanceFor(app: app);
   }
@@ -8018,49 +8026,68 @@ class StudentAccounts {
       todo.add(d);
     }
     if (todo.isEmpty) return res;
-    final auth = await _auth();
-    var done = 0, fails = 0;
+    // Students with the same phone number (brothers / sisters) are done one
+    // after the other by the same worker, so they cannot link twice.
+    final groups = <String, List<DocumentSnapshot<Map<String, dynamic>>>>{};
     for (final d in todo) {
-      if (cancelled?.call() ?? false) {
-        res.cancelled = true;
-        break;
-      }
-      onProgress?.call(done, todo.length);
-      final m = d.data()!;
-      var attempt = 0;
-      while (true) {
-        attempt++;
-        try {
-          final r = await _one(auth, db, d.id, m, secForm['${m['sectionId']}'] ?? '');
-          if (r == 'shared') {
-            res.shared.add('${m['name']}');
-          } else {
-            res.created++;
+      groups.putIfAbsent('${d.data()!['phone']}', () => []).add(d);
+    }
+    final queue = groups.values.toList();
+    final n = queue.length < _workers ? queue.length : _workers;
+    final auths = await Future.wait([for (var i = 0; i < n; i++) _auth(i)]);
+    var done = 0, fails = 0, next = 0;
+    var stop = false;
+
+    Future<void> worker(FirebaseAuth auth) async {
+      while (!stop && next < queue.length) {
+        final group = queue[next++];
+        for (final d in group) {
+          if (stop) break;
+          if (cancelled?.call() ?? false) {
+            res.cancelled = true;
+            stop = true;
+            break;
           }
-          fails = 0;
-          break;
-        } on FirebaseAuthException catch (e) {
-          if (e.code == 'too-many-requests' && attempt < 3) {
-            await Future.delayed(const Duration(seconds: 30));
-            continue;
+          final m = d.data()!;
+          var attempt = 0;
+          while (true) {
+            attempt++;
+            try {
+              final r = await _one(
+                  auth, db, d.id, m, secForm['${m['sectionId']}'] ?? '');
+              if (r == 'shared') {
+                res.shared.add('${m['name']}');
+              } else {
+                res.created++;
+              }
+              fails = 0;
+              break;
+            } on FirebaseAuthException catch (e) {
+              if (e.code == 'too-many-requests' && attempt < 3) {
+                await Future.delayed(const Duration(seconds: 20));
+                continue;
+              }
+              res.failed++;
+              res.error ??= e.code == 'too-many-requests'
+                  ? 'Firebase is limiting new accounts. Try again in a few minutes.'
+                  : (e.message ?? e.code);
+              fails++;
+              break;
+            } catch (e) {
+              res.failed++;
+              res.error ??= '$e';
+              fails++;
+              break;
+            }
           }
-          res.failed++;
-          res.error ??= e.code == 'too-many-requests'
-              ? 'Firebase is limiting new accounts. Try again in a few minutes.'
-              : (e.message ?? e.code);
-          fails++;
-          break;
-        } catch (e) {
-          res.failed++;
-          res.error ??= '$e';
-          fails++;
-          break;
+          if (fails >= 3) stop = true; // something is wrong (rules, network)
+          done++;
+          onProgress?.call(done, todo.length);
         }
       }
-      if (fails >= 3) break; // something is wrong (rules, network): stop
-      done++;
-      await Future.delayed(const Duration(milliseconds: 120));
     }
+
+    await Future.wait([for (final a in auths) worker(a)]);
     onProgress?.call(done, todo.length);
     return res;
   }
@@ -16141,8 +16168,22 @@ body: Center(child: CircularProgressIndicator()))
 // ======================= USERS & PERMISSIONS (Settings) =======================
 
 /// Administrator only: default access per role and the access of each user.
-class _PermissionsCard extends StatelessWidget {
+class _PermissionsCard extends StatefulWidget {
 const _PermissionsCard();
+
+@override
+State<_PermissionsCard> createState() => _PermissionsCardState();
+}
+
+class _PermissionsCardState extends State<_PermissionsCard> {
+final _search = TextEditingController();
+String _roleFilter = 'all'; // all | admin | teacher | student
+
+@override
+void dispose() {
+_search.dispose();
+super.dispose();
+}
 
 static bool _teachersSynced = false;
 
@@ -16292,6 +16333,32 @@ st.studentAccess,
 const Divider(height: 28),
 const Text('Users',
 style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+TextField(
+controller: _search,
+onChanged: (_) => setState(() {}),
+decoration: InputDecoration(
+hintText: 'Search name, phone or email',
+prefixIcon: const Icon(Icons.search),
+suffixIcon: _search.text.isEmpty
+? null
+    : IconButton(
+icon: const Icon(Icons.clear),
+onPressed: () => setState(_search.clear)),
+border: const OutlineInputBorder(),
+isDense: true,
+),
+),
+const SizedBox(height: 8),
+Wrap(spacing: 8, runSpacing: 4, children: [
+for (final r in ['all', ...UserProfile.roles])
+ChoiceChip(
+label: Text(
+r == 'all' ? 'All roles' : UserProfile.roleLabel(r)),
+selected: _roleFilter == r,
+onSelected: (_) => setState(() => _roleFilter = r),
+),
+]),
 const SizedBox(height: 4),
 StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
 stream: users.snapshots(),
@@ -16344,12 +16411,57 @@ child: Text('No other users yet.',
 style: TextStyle(color: Colors.black54)),
 );
 }
+final tList = ts.data ?? const <TeacherInfo>[];
+String phoneOf(UserProfile u) {
+if (u.phone.isNotEmpty) return u.phone;
+final m = u.email.trim().toLowerCase();
+for (final t in tList) {
+if (t.id == u.uid ||
+(m.isNotEmpty &&
+t.email.trim().toLowerCase() == m)) {
+return t.phone;
+}
+}
+return '';
+}
+
+final q = _search.text.trim().toLowerCase();
+final qd = q.replaceAll(RegExp(r'\D'), '');
+final shown = [
+for (final u in list)
+if ((_roleFilter == 'all' || u.role == _roleFilter) &&
+(q.isEmpty ||
+u.name.toLowerCase().contains(q) ||
+u.email.toLowerCase().contains(q) ||
+(qd.isNotEmpty &&
+phoneOf(u)
+    .replaceAll(RegExp(r'\D'), '')
+    .contains(qd))))
+u,
+];
 return ValueListenableBuilder<AppSettings>(
 valueListenable: appSettings,
-builder: (context, st, _) => Column(children: [
-for (final u in list)
+builder: (context, st, _) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 4),
+child: Text(
+shown.length == list.length
+? '${list.length} users'
+    : '${shown.length} of ${list.length} users',
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+),
+if (shown.isEmpty)
+const Padding(
+padding: EdgeInsets.symmetric(vertical: 8),
+child: Text('No user matches.',
+style: TextStyle(color: Colors.black54)),
+),
+for (final u in shown)
 _userTile(context, u, st, u.uid == me, users,
-ts.data ?? const <TeacherInfo>[]),
+tList),
 ]),
 );
 },
@@ -16388,6 +16500,9 @@ break;
 }
 final title = u.name.isEmpty ? (u.email.isEmpty ? u.uid : u.email) : u.name;
 final r = rec;
+final phone = u.phone.isNotEmpty ? u.phone : (r?.phone ?? '');
+// a student's email is just the phone number: show it once
+final shownEmail = u.email.endsWith('@$kStudentEmailDomain') ? '' : u.email;
 return ExpansionTile(
 tilePadding: EdgeInsets.zero,
 childrenPadding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
@@ -16400,7 +16515,8 @@ subtitle: Text(
 '${UserProfile.roleLabel(u.role)}'
 '${u.pending ? ' (not signed in yet)' : ''} · '
 '${u.isAdmin ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
-'${u.email.isEmpty || u.email == title ? '' : '\n${u.email}'}',
+'${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
+'${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
 style: const TextStyle(fontSize: 12),
 ),
 children: [
