@@ -11726,14 +11726,23 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
 late Future<Map<String, ResultMarks>> _f = _load();
 
 Future<Map<String, ResultMarks>> _load() async {
-final q = await FirebaseFirestore.instance
-    .collection('results')
-    .where('studentId', isEqualTo: widget.studentId)
+final col = FirebaseFirestore.instance.collection('results');
+// also the marks entered on this student's twin record (class <-> section)
+final twin = (await ResultService().twinMap())[widget.studentId];
+QuerySnapshot<Map<String, dynamic>> q;
+try {
+q = await col
+    .where('studentId', whereIn: [widget.studentId, if (twin != null) twin])
     .get();
+} catch (_) {
+q = await col.where('studentId', isEqualTo: widget.studentId).get();
+}
+final byExam = <String, List<Map<String, dynamic>>>{};
+for (final d in q.docs) {
+byExam.putIfAbsent('${d.data()['exam'] ?? ''}', () => []).add(d.data());
+}
 return {
-for (final d in q.docs)
-'${d.data()['exam'] ?? ''}':
-ResultMarks(ResultService._marksOf(d.data()['marks'])),
+for (final e in byExam.entries) e.key: ResultMarks(ResultService._merge(e.value)),
 };
 }
 
@@ -11797,122 +11806,281 @@ if (exams.isNotEmpty) _transcript(exams, data),
 }
 
 Widget _transcript(List<String> exams, Map<String, ResultMarks> data) {
+final cs = Theme.of(context).colorScheme;
 final subs = <String>[
 for (final s in ExamService.subjects)
 if (exams.any((e) => data[e]!.marks.containsKey(s))) s,
 for (final s in {for (final e in exams) ...data[e]!.marks.keys})
 if (!ExamService.subjects.contains(s)) s,
 ];
-const bold = TextStyle(fontWeight: FontWeight.w700);
-final cs = Theme.of(context).colorScheme;
 final avgs = [for (final e in exams) data[e]!.average!];
 final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
 final overallG = _gradeOf(overall);
+final multi = exams.length > 1;
+
+double? subAvg(String sub) {
+final v = [
+for (final e in exams)
+if (data[e]!.marks[sub] != null) data[e]!.marks[sub]!
+];
+return v.isEmpty ? null : v.fold(0.0, (a, b) => a + b) / v.length;
+}
+
+String best = '';
+double bestV = -1;
+for (final sub in subs) {
+final v = subAvg(sub);
+if (v != null && v > bestV) {
+bestV = v;
+best = sub;
+}
+}
+String f1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+const bold = TextStyle(fontWeight: FontWeight.w700);
+final head = Color.lerp(cs.primary, Colors.black, 0.25)!;
 
 Widget cell(Widget child, {Alignment al = Alignment.center}) => Padding(
-padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
 child: Align(alignment: al, child: child),
 );
-Widget txt(String t, {TextStyle? style, TextAlign a = TextAlign.center}) =>
-Text(t, style: style, textAlign: a);
-Widget chip(String g) => Container(
-padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+Widget label(String t, {bool strong = true}) => cell(
+Text(t,
+style: TextStyle(
+fontWeight: strong ? FontWeight.w700 : FontWeight.w500)),
+al: Alignment.centerLeft);
+Widget pill(String text, Color c) => Container(
+constraints: const BoxConstraints(minWidth: 44),
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
 decoration: BoxDecoration(
+color: c.withAlpha(30),
+borderRadius: BorderRadius.circular(20),
+),
+child: Text(text,
+textAlign: TextAlign.center,
+style: TextStyle(fontWeight: FontWeight.w800, color: c)),
+);
+Widget markPill(double v) => pill(_fmtMark(v), _gradeColor(_gradeOf(v)));
+Widget gradeBadge(String g, {double size = 34}) => Container(
+width: size,
+height: size,
+alignment: Alignment.center,
+decoration: BoxDecoration(
+shape: BoxShape.circle,
 color: _gradeColor(g).withAlpha(36),
-borderRadius: BorderRadius.circular(16)),
+border: Border.all(color: _gradeColor(g), width: 1.5),
+),
 child: Text(g,
 style: TextStyle(
-fontWeight: FontWeight.w800, color: _gradeColor(g))),
+fontSize: size * 0.46,
+fontWeight: FontWeight.w900,
+color: _gradeColor(g))),
 );
+Widget tile(String title, Widget value) => Expanded(
+child: Container(
+margin: const EdgeInsets.symmetric(horizontal: 4),
+padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+decoration: BoxDecoration(
+color: cs.surface,
+borderRadius: BorderRadius.circular(14),
+border: Border.all(color: cs.outlineVariant),
+),
+child: Column(children: [
+Text(title,
+style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+const SizedBox(height: 6),
+value,
+]),
+),
+);
+Widget trend(int i) {
+if (i == 0) return const SizedBox.shrink();
+final d = avgs[i] - avgs[i - 1];
+if (d.abs() < 0.05) return const SizedBox.shrink();
+final up = d > 0;
+final c = up ? kGreen : kRed;
+return Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(up ? Icons.arrow_upward : Icons.arrow_downward, size: 12, color: c),
+Text(f1(d.abs()),
+style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: c)),
+]);
+}
+
+// grading key, e.g. "A 80+ · B 70+ · ... · F below 40"
+final limits = appSettings.value.grades;
+final key = [
+for (var i = 0; i < limits.length; i++)
+'${AppSettings.gradeLetters[i]} ${_fmtMark(limits[i])}+',
+'F below ${_fmtMark(limits.last)}',
+].join('  ·  ');
 
 return Card(
-child: Padding(
-padding: const EdgeInsets.all(16),
+margin: EdgeInsets.zero,
+clipBehavior: Clip.antiAlias,
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+// ---- banner ----
+Container(
+padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+decoration: BoxDecoration(
+gradient: LinearGradient(
+colors: [cs.primary, head],
+begin: Alignment.topLeft,
+end: Alignment.bottomRight,
+),
+),
+child: Row(children: [
+Container(
+padding: const EdgeInsets.all(10),
+decoration: BoxDecoration(
+color: Colors.white.withAlpha(40), shape: BoxShape.circle),
+child: const Icon(Icons.workspace_premium,
+color: Colors.white, size: 28),
+),
+const SizedBox(width: 14),
+Expanded(
 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 const Text('Academic Transcript',
-style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-const SizedBox(height: 4),
-Text('${exams.length} exam${exams.length == 1 ? '' : 's'}',
-style: TextStyle(color: cs.onSurfaceVariant)),
-const SizedBox(height: 12),
-LayoutBuilder(builder: (context, c) {
-const firstW = 150.0;
-final colW = ((c.maxWidth - firstW) / exams.length).clamp(110.0, 220.0);
-final tableW = firstW + colW * exams.length;
-return SingleChildScrollView(
+style: TextStyle(
+color: Colors.white,
+fontSize: 19,
+fontWeight: FontWeight.w800)),
+const SizedBox(height: 2),
+Text(
+'${exams.length} exam${exams.length == 1 ? '' : 's'}  ·  '
+'${subs.length} subject${subs.length == 1 ? '' : 's'}',
+style: const TextStyle(color: Colors.white70, fontSize: 13)),
+]),
+),
+]),
+),
+// ---- summary ----
+Padding(
+padding: const EdgeInsets.fromLTRB(12, 14, 12, 4),
+child: Row(children: [
+tile('Overall average',
+Text(f1(overall),
+style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800))),
+tile('Overall grade', gradeBadge(overallG, size: 38)),
+tile(
+'Best subject',
+Column(children: [
+Text(best.isEmpty ? '-' : best,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+if (best.isNotEmpty)
+Text(f1(bestV),
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w700,
+color: _gradeColor(_gradeOf(bestV)))),
+]),
+),
+]),
+),
+// ---- table ----
+Padding(
+padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+child: LayoutBuilder(builder: (context, c) {
+const firstW = 120.0;
+final cols = exams.length + (multi ? 1 : 0);
+final colW = ((c.maxWidth - firstW) / cols).clamp(96.0, 220.0);
+final tableW = firstW + colW * cols;
+final fit = tableW <= c.maxWidth;
+TableColumnWidth w() =>
+fit ? const FlexColumnWidth() : FixedColumnWidth(colW);
+return ClipRRect(
+borderRadius: BorderRadius.circular(12),
+child: DecoratedBox(
+decoration: BoxDecoration(
+border: Border.all(color: cs.outlineVariant),
+borderRadius: BorderRadius.circular(12),
+),
+child: SingleChildScrollView(
 scrollDirection: Axis.horizontal,
 child: SizedBox(
-width: tableW < c.maxWidth ? c.maxWidth : tableW,
+width: fit ? c.maxWidth : tableW,
 child: Table(
 columnWidths: {
 0: const FixedColumnWidth(firstW),
-for (var i = 0; i < exams.length; i++)
-i + 1: tableW < c.maxWidth
-? const FlexColumnWidth()
-    : FixedColumnWidth(colW),
+for (var i = 1; i <= cols; i++) i: w(),
 },
 defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-border: TableBorder(
-horizontalInside: BorderSide(color: cs.outlineVariant),
-bottom: BorderSide(color: cs.outlineVariant),
+children: [
+TableRow(
+decoration: BoxDecoration(color: cs.primary.withAlpha(28)),
+children: [
+label('Subject'),
+for (final e in exams)
+cell(Text(e,
+textAlign: TextAlign.center, style: bold)),
+if (multi) cell(const Text('Average', style: bold)),
+]),
+for (var r = 0; r < subs.length; r++)
+TableRow(
+decoration: BoxDecoration(
+color: r.isOdd
+? cs.surfaceContainerHighest.withAlpha(70)
+    : Colors.transparent,
 ),
 children: [
-TableRow(
-decoration: BoxDecoration(color: cs.primaryContainer.withAlpha(110)),
-children: [
-cell(txt('Subject', style: bold, a: TextAlign.left),
-al: Alignment.centerLeft),
-for (final e in exams) cell(txt(e, style: bold)),
-]),
-for (final sub in subs)
-TableRow(children: [
-cell(txt(sub, a: TextAlign.left), al: Alignment.centerLeft),
+label(subs[r], strong: false),
 for (final e in exams)
-cell(txt(
-data[e]!.marks[sub] == null
-? '-'
-    : _fmtMark(data[e]!.marks[sub]!),
-style: bold)),
+cell(data[e]!.marks[subs[r]] == null
+? Text('-',
+style: TextStyle(color: cs.onSurfaceVariant))
+    : markPill(data[e]!.marks[subs[r]]!)),
+if (multi)
+cell(subAvg(subs[r]) == null
+? const Text('-')
+    : markPill(double.parse(
+subAvg(subs[r])!.toStringAsFixed(1)))),
 ]),
 TableRow(
-decoration: BoxDecoration(color: cs.surfaceContainerHighest.withAlpha(120)),
+decoration: BoxDecoration(
+color: cs.primary.withAlpha(18),
+border: Border(
+top: BorderSide(color: cs.primary, width: 1.5))),
 children: [
-cell(txt('Total', style: bold, a: TextAlign.left),
-al: Alignment.centerLeft),
+label('Total'),
 for (final e in exams)
-cell(txt(_fmtMark(data[e]!.total), style: bold)),
+cell(Text(_fmtMark(data[e]!.total), style: bold)),
+if (multi) cell(const SizedBox.shrink()),
 ]),
 TableRow(
-decoration: BoxDecoration(color: cs.surfaceContainerHighest.withAlpha(120)),
+decoration: BoxDecoration(color: cs.primary.withAlpha(18)),
 children: [
-cell(txt('Average', style: bold, a: TextAlign.left),
-al: Alignment.centerLeft),
+label('Average'),
 for (var i = 0; i < exams.length; i++)
-cell(txt(_fmtMark(double.parse(avgs[i].toStringAsFixed(1))),
-style: bold)),
+cell(Column(mainAxisSize: MainAxisSize.min, children: [
+Text(f1(avgs[i]), style: bold),
+trend(i),
+])),
+if (multi)
+cell(Text(f1(overall), style: bold)),
 ]),
-TableRow(children: [
-cell(txt('Grade', style: bold, a: TextAlign.left),
-al: Alignment.centerLeft),
-for (var i = 0; i < exams.length; i++) cell(chip(_gradeOf(avgs[i]))),
+TableRow(
+decoration: BoxDecoration(color: cs.primary.withAlpha(18)),
+children: [
+label('Grade'),
+for (var i = 0; i < exams.length; i++)
+cell(gradeBadge(_gradeOf(avgs[i]))),
+if (multi) cell(gradeBadge(overallG)),
 ]),
 ],
 ),
 ),
+),
+),
 );
 }),
-const SizedBox(height: 16),
-Row(children: [
-const Expanded(
-child: Text('Overall average',
-style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700))),
-Text(_fmtMark(double.parse(overall.toStringAsFixed(1))),
-style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
-const SizedBox(width: 10),
-chip(overallG),
-]),
-]),
 ),
+Padding(
+padding: const EdgeInsets.fromLTRB(16, 6, 16, 16),
+child: Text('Grading: $key',
+style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+),
+]),
 );
 }
 
@@ -14727,14 +14895,96 @@ if (teacherScope.value.allowsSubject(e.key)) e.key: e.value
 }
     : m;
 
+/// A student can exist twice: once in the whole class (3C) and once in a
+/// divided section (3C-A), e.g. when a list was uploaded twice. Results are
+/// stored per student record, so marks entered on one copy were invisible on
+/// the other. This finds those pairs (same form + class + name, exactly one
+/// copy in the whole class and one in a section) so results stay the same
+/// whichever way they are entered or viewed. id -> id of its twin.
+static Map<String, String> _twinCache = const {};
+static Map<String, String> _stuSection = {};
+static DateTime? _twinAt;
+
+Future<Map<String, String>> twinMap() async {
+final at = _twinAt;
+if (at != null && DateTime.now().difference(at) < const Duration(minutes: 2)) {
+return _twinCache;
+}
+try {
+final secs = await _db.collection('sections').get();
+final secOf = {for (final d in secs.docs) d.id: SectionInfo.fromDoc(d)};
+final stu = await _db.collection('students').get();
+String norm(String n) =>
+n.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+final groups = <String, List<(String, bool)>>{};
+final stuSec = <String, String>{};
+for (final d in stu.docs) {
+final sid = '${d.data()['sectionId'] ?? ''}';
+final sec = secOf[sid];
+if (sec == null) continue;
+stuSec[d.id] = sid;
+groups
+    .putIfAbsent('${sec.form}|${sec.classKey}|${norm('${d.data()['name'] ?? ''}')}',
+() => [])
+    .add((d.id, sec.isSub));
+}
+final out = <String, String>{};
+for (final g in groups.values) {
+if (g.length == 2 && g[0].$2 != g[1].$2) {
+out[g[0].$1] = g[1].$1;
+out[g[1].$1] = g[0].$1;
+}
+}
+_twinCache = out;
+_stuSection = stuSec;
+_twinAt = DateTime.now();
+return out;
+} catch (_) {
+return _twinCache; // no access: work without twins
+}
+}
+
+static int _ts(Map<String, dynamic> d) {
+final t = d['updatedAt'];
+return t is Timestamp ? t.millisecondsSinceEpoch : 0;
+}
+
+/// Marks of several copies of one student: the newest entry wins per subject.
+static Map<String, double> _merge(List<Map<String, dynamic>> docs) {
+final l = [...docs]..sort((a, b) => _ts(a).compareTo(_ts(b)));
+final out = <String, double>{};
+for (final d in l) {
+out.addAll(_marksOf(d['marks']));
+}
+return out;
+}
+
 /// studentId -> marks, for one exam.
 Stream<Map<String, ResultMarks>> watchResults(String exam) =>
-_col.where('exam', isEqualTo: exam).snapshots().map((s) => {
-for (final d in s.docs)
-if (!teacherScope.value.isStudent ||
-'${d.data()['studentId']}' == teacherScope.value.studentId)
-'${d.data()['studentId'] ?? ''}':
-ResultMarks(_visibleMarks(_marksOf(d.data()['marks']))),
+_col.where('exam', isEqualTo: exam).snapshots().asyncMap((s) async {
+final twins = await twinMap();
+final raw = <String, Map<String, dynamic>>{};
+for (final d in s.docs) {
+raw['${d.data()['studentId'] ?? ''}'] = d.data();
+}
+final ids = <String>{...raw.keys};
+for (final e in twins.entries) {
+if (raw.containsKey(e.value)) ids.add(e.key);
+}
+final out = <String, ResultMarks>{};
+for (final id in ids) {
+final t = twins[id];
+final docs = [
+if (raw[id] != null) raw[id]!,
+if (t != null && raw[t] != null) raw[t]!,
+];
+out[id] = ResultMarks(_visibleMarks(_merge(docs)));
+}
+if (teacherScope.value.isStudent) {
+final me = teacherScope.value.studentId;
+return {if (out[me] != null) me: out[me]!};
+}
+return out;
 });
 
 /// studentId -> ALL marks (every subject), for one exam.
@@ -14750,18 +15000,19 @@ for (final d in s.docs)
 /// result of that student).
 Future<void> saveMany(String exam,
 List<(StudentInfo, Map<String, double>)> items) async {
-for (var i = 0; i < items.length; i += 400) {
+Future<void> write(List<(String, String, Map<String, double>)> rows) async {
+for (var i = 0; i < rows.length; i += 400) {
 final batch = _db.batch();
-for (final it in items.skip(i).take(400)) {
-final ref = _col.doc(_id(it.$1.id, exam));
-if (it.$2.isEmpty) {
+for (final r in rows.skip(i).take(400)) {
+final ref = _col.doc(_id(r.$1, exam));
+if (r.$3.isEmpty) {
 batch.delete(ref);
 } else {
 batch.set(ref, {
-'studentId': it.$1.id,
-'sectionId': it.$1.sectionId,
+'studentId': r.$1,
+'sectionId': r.$2,
 'exam': exam,
-'marks': it.$2,
+'marks': r.$3,
 'updatedBy': _uid,
 'updatedAt': FieldValue.serverTimestamp(),
 });
@@ -14773,25 +15024,48 @@ throw Exception('Saving timed out. Check the internet connection.');
 }
 }
 
+await write([for (final it in items) (it.$1.id, it.$1.sectionId, it.$2)]);
+
+// the same marks go to the twin copy of a student (whole class <-> section)
+try {
+final twins = await twinMap();
+final extra = <(String, String, Map<String, double>)>[
+for (final it in items)
+if (twins[it.$1.id] != null)
+(twins[it.$1.id]!, _stuSection[twins[it.$1.id]!] ?? it.$1.sectionId, it.$2),
+];
+if (extra.isNotEmpty) await write(extra);
+} catch (_) {}
+}
+
 Future<ResultMarks> get(String studentId, String exam) async {
 final d = await _col.doc(_id(studentId, exam)).get();
 return ResultMarks(_marksOf(d.data()?['marks']));
 }
 
 /// Saves the marks (an empty map removes the result).
-Future<void> save(StudentInfo s, String exam, Map<String, double> marks) {
-final ref = _col.doc(_id(s.id, exam));
+Future<void> save(StudentInfo s, String exam, Map<String, double> marks) async {
+Future<void> put(String id, String sectionId) {
+final ref = _col.doc(_id(id, exam));
 if (marks.isEmpty) return ref.delete();
 return ref.set({
-'studentId': s.id,
-'sectionId': s.sectionId,
+'studentId': id,
+'sectionId': sectionId,
 'exam': exam,
 'marks': marks,
 'updatedBy': _uid,
 'updatedAt': FieldValue.serverTimestamp(),
-}).timeout(const Duration(seconds: 30), onTimeout: () {
+});
+}
+
+await put(s.id, s.sectionId).timeout(const Duration(seconds: 30), onTimeout: () {
 throw Exception('Saving timed out. Check the internet connection.');
 });
+// the same marks go to the twin copy of the student (whole class <-> section)
+try {
+final t = (await twinMap())[s.id];
+if (t != null) await put(t, _stuSection[t] ?? s.sectionId);
+} catch (_) {}
 }
 }
 
