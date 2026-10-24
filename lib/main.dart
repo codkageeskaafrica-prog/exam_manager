@@ -9579,6 +9579,14 @@ PopupMenuItem(value: 'delete', child: Text('Delete')),
 );
 }
 
+/// Students of a class, each counted once: the whole-class record when there
+/// is one, otherwise the sum of its sections.
+static int _classTotal(List<SectionInfo> list, Map<String, int> counts) {
+final whole = list.where((s) => !s.isSub);
+final pick = whole.isNotEmpty ? whole : list;
+return pick.fold<int>(0, (a, s) => a + (counts[s.id] ?? 0));
+}
+
 /// A class: a plain card when it is not divided, otherwise a card that
 /// holds its sections (1B -> 1B-A, 1B-B, 1B-C).
 Widget _classCard(BuildContext context, SchoolService service, String form,
@@ -9587,7 +9595,10 @@ list.sort((a, b) => a.name.toUpperCase().compareTo(b.name.toUpperCase()));
 if (list.length == 1 && !list.first.isSub) {
 return Card(child: _sectionTile(context, service, list.first, counts));
 }
-final total = list.fold<int>(0, (a, s) => a + (counts[s.id] ?? 0));
+// The whole class (1A) already holds every student, so its sections
+// (1A-A, 1A-B ...) are not counted again and the whole-class row is hidden.
+final subs = list.where((s) => s.isSub).toList();
+final total = _classTotal(list, counts);
 return Card(
 clipBehavior: Clip.antiAlias,
 child: ExpansionTile(
@@ -9601,9 +9612,9 @@ child: Icon(Icons.account_tree, color: Color(0xFF7D3C98)),
 ),
 title: Text(SectionInfo.code(form, key),
 style: const TextStyle(fontWeight: FontWeight.bold)),
-subtitle: Text('${_students(total)} · ${list.length} sections'),
+subtitle: Text('${_students(total)} · ${subs.length} sections'),
 children: [
-for (final s in list)
+for (final s in subs)
 _sectionTile(context, service, s, counts, sub: true),
 ],
 ),
@@ -9663,8 +9674,7 @@ for (final f in forms) {
 final classes = byForm[f]!;
 final keys = classes.keys.toList()..sort();
 final total = classes.values
-    .expand((l) => l)
-    .fold<int>(0, (a, s) => a + (counts[s.id] ?? 0));
+    .fold<int>(0, (a, l) => a + _classTotal(l, counts));
 columns.add(_formColumn(
 context,
 service,
@@ -14907,15 +14917,25 @@ static DateTime? _twinAt;
 
 Future<Map<String, String>> twinMap() async {
 final at = _twinAt;
-if (at != null && DateTime.now().difference(at) < const Duration(minutes: 2)) {
+if (at != null && DateTime.now().difference(at) < const Duration(seconds: 30)) {
 return _twinCache;
 }
 try {
 final secs = await _db.collection('sections').get();
 final secOf = {for (final d in secs.docs) d.id: SectionInfo.fromDoc(d)};
 final stu = await _db.collection('students').get();
-String norm(String n) =>
-n.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+// same words in any order, ignoring case and punctuation
+String norm(String n) {
+final w = n
+    .toLowerCase()
+    .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+    .split(RegExp(r'\s+'))
+    .where((x) => x.isNotEmpty)
+    .toList()
+..sort();
+return w.join(' ');
+}
+
 final groups = <String, List<(String, bool)>>{};
 final stuSec = <String, String>{};
 for (final d in stu.docs) {
@@ -14989,10 +15009,21 @@ return out;
 
 /// studentId -> ALL marks (every subject), for one exam.
 Future<Map<String, Map<String, double>>> getAllForExam(String exam) async {
-final s = await _col.where('exam', isEqualTo: exam).get();
+final twins = await twinMap();
+final q = await _col.where('exam', isEqualTo: exam).get();
+final raw = <String, Map<String, dynamic>>{
+for (final d in q.docs) '${d.data()['studentId'] ?? ''}': d.data(),
+};
+final ids = <String>{...raw.keys};
+for (final e in twins.entries) {
+if (raw.containsKey(e.value)) ids.add(e.key);
+}
 return {
-for (final d in s.docs)
-'${d.data()['studentId'] ?? ''}': _marksOf(d.data()['marks']),
+for (final id in ids)
+id: _merge([
+if (raw[id] != null) raw[id]!,
+if (twins[id] != null && raw[twins[id]] != null) raw[twins[id]]!,
+]),
 };
 }
 
@@ -15039,8 +15070,17 @@ if (extra.isNotEmpty) await write(extra);
 }
 
 Future<ResultMarks> get(String studentId, String exam) async {
-final d = await _col.doc(_id(studentId, exam)).get();
-return ResultMarks(_marksOf(d.data()?['marks']));
+final t = (await twinMap())[studentId];
+final docs = <Map<String, dynamic>>[];
+for (final id in [studentId, if (t != null) t]) {
+try {
+final d = await _col.doc(_id(id, exam)).get();
+if (d.data() != null) docs.add(d.data()!);
+} catch (_) {
+if (id == studentId) rethrow;
+}
+}
+return ResultMarks(_merge(docs));
 }
 
 /// Saves the marks (an empty map removes the result).
@@ -15129,6 +15169,14 @@ return q.split(RegExp(r'\s+')).every(n.contains);
 
 // ---------------- 1) Forms -> 2) Classes -> 3) Sections / All ----------------
 
+/// In an "All 3C" view a student that exists twice (whole class + section)
+/// must be listed and counted once: the section copy is dropped.
+bool _isDupCopy(StudentInfo st, Map<String, String> twins,
+Map<String, SectionInfo> secOf, Set<String> inScope) {
+final t = twins[st.id];
+return t != null && (secOf[st.sectionId]?.isSub ?? false) && inScope.contains(t);
+}
+
 class ResultBrowseScreen extends StatefulWidget {
 final String? form, classKey;
 const ResultBrowseScreen({super.key, this.form, this.classKey});
@@ -15144,6 +15192,15 @@ late final Stream<List<SectionInfo>> _secStream = _school.watchSections();
 late final Stream<List<StudentInfo>> _stuStream = _service.watchAllStudents();
 final _q = TextEditingController();
 String _query = '';
+Map<String, String> _twins = const {};
+
+@override
+void initState() {
+super.initState();
+_service.twinMap().then((t) {
+if (mounted) setState(() => _twins = t);
+});
+}
 
 @override
 void dispose() {
@@ -15243,8 +15300,19 @@ final count = <String, int>{};
 for (final s in students) {
 count[s.sectionId] = (count[s.sectionId] ?? 0) + 1;
 }
-int countOf(Iterable<SectionInfo> l) =>
-l.fold(0, (n, s) => n + (count[s.id] ?? 0));
+final secById = {for (final s in sections) s.id: s};
+int countOf(Iterable<SectionInfo> l) {
+final inScope = {
+for (final st in students)
+if (l.any((x) => x.id == st.sectionId)) st.id
+};
+return inScope.length -
+students
+    .where((st) =>
+inScope.contains(st.id) &&
+_isDupCopy(st, _twins, secById, inScope))
+    .length;
+}
 Set<String> ids(Iterable<SectionInfo> l) => {for (final s in l) s.id};
 const purple = Color(0xFF9B59B6);
 const orange = Color(0xFFE67E22);
@@ -15365,7 +15433,10 @@ orange,
 _n(countOf(list), 'student'),
 () => _go(ResultStudentsScreen(title: 'All $code', sectionIds: ids(list))),
 ),
+// When the class is divided (3C-A, 3C-B ...), the plain whole-class entry
+// ("Section 3C") is not shown: "All 3C" already is the whole class.
 for (final s in list)
+if (s.isSub || !list.any((x) => x.isSub))
 _tile(
 Icons.grid_view,
 purple,
@@ -15455,6 +15526,15 @@ late Stream<Map<String, ResultMarks>> _resStream =
 _service.watchResults(_ResultPrefs.exam);
 final _q = TextEditingController();
 String _query = '';
+Map<String, String> _twins = const {};
+
+@override
+void initState() {
+super.initState();
+_service.twinMap().then((t) {
+if (mounted) setState(() => _twins = t);
+});
+}
 
 @override
 void dispose() {
@@ -15468,9 +15548,13 @@ final secOf = {for (final s in sections) s.id: s};
 String secLabel(StudentInfo s) => secOf[s.sectionId]?.label ?? '';
 final multi = widget.sectionIds.length > 1;
 
+final inScope = {
+for (final s in all)
+if (widget.sectionIds.contains(s.sectionId)) s.id
+};
 final students = [
 for (final s in all)
-if (widget.sectionIds.contains(s.sectionId)) s,
+if (inScope.contains(s.id) && !_isDupCopy(s, _twins, secOf, inScope)) s,
 ];
 if (multi) {
 students.sort((a, b) {
