@@ -11748,11 +11748,27 @@ return Center(child: Text('Could not load your results: ${snap.error}'));
 if (!snap.hasData) {
 return const Center(child: CircularProgressIndicator());
 }
-// only the exams the administrator opened, newest setting order
-final exams = [
-for (final e in appSettings.value.openExams)
-if (snap.data![e] != null && snap.data![e]!.marks.isNotEmpty) e,
+// Show every exam this student has marks for, unless the administrator
+// CLOSED it. (Before, an exam was also hidden when its name was not in the
+// Settings > Exams list, e.g. after the list was edited or renamed.)
+final data = snap.data!;
+final order = appSettings.value.examOptions;
+final withMarks = [
+for (final e in data.keys)
+if (e.isNotEmpty && data[e]!.marks.isNotEmpty) e,
 ];
+final exams = [
+for (final e in withMarks)
+if (appSettings.value.isExamOpen(e)) e,
+]..sort((a, b) {
+int i(String x) {
+final k = order.indexOf(x);
+return k < 0 ? 1 << 20 : k;
+}
+final c = i(a).compareTo(i(b));
+return c != 0 ? c : a.compareTo(b);
+});
+final closedCount = withMarks.length - exams.length;
 return RefreshIndicator(
 onRefresh: () async {
 setState(() => _f = _load());
@@ -11763,15 +11779,140 @@ physics: const AlwaysScrollableScrollPhysics(),
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
 children: [
 if (exams.isEmpty)
-const Padding(
-padding: EdgeInsets.all(24),
-child: Center(child: Text('No results published yet.')),
+Padding(
+padding: const EdgeInsets.all(24),
+child: Center(
+child: Text(
+closedCount > 0
+? 'Your results are not open yet.\nThe administrator has not opened this exam.'
+    : 'No results published yet.',
+textAlign: TextAlign.center)),
 ),
-for (final e in exams) _examCard(e, snap.data![e]!),
+if (exams.isNotEmpty) _transcript(exams, data),
 ],
 ),
 );
 },
+);
+}
+
+Widget _transcript(List<String> exams, Map<String, ResultMarks> data) {
+final subs = <String>[
+for (final s in ExamService.subjects)
+if (exams.any((e) => data[e]!.marks.containsKey(s))) s,
+for (final s in {for (final e in exams) ...data[e]!.marks.keys})
+if (!ExamService.subjects.contains(s)) s,
+];
+const bold = TextStyle(fontWeight: FontWeight.w700);
+final cs = Theme.of(context).colorScheme;
+final avgs = [for (final e in exams) data[e]!.average!];
+final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
+final overallG = _gradeOf(overall);
+
+Widget cell(Widget child, {Alignment al = Alignment.center}) => Padding(
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+child: Align(alignment: al, child: child),
+);
+Widget txt(String t, {TextStyle? style, TextAlign a = TextAlign.center}) =>
+Text(t, style: style, textAlign: a);
+Widget chip(String g) => Container(
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+decoration: BoxDecoration(
+color: _gradeColor(g).withAlpha(36),
+borderRadius: BorderRadius.circular(16)),
+child: Text(g,
+style: TextStyle(
+fontWeight: FontWeight.w800, color: _gradeColor(g))),
+);
+
+return Card(
+child: Padding(
+padding: const EdgeInsets.all(16),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+const Text('Academic Transcript',
+style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+const SizedBox(height: 4),
+Text('${exams.length} exam${exams.length == 1 ? '' : 's'}',
+style: TextStyle(color: cs.onSurfaceVariant)),
+const SizedBox(height: 12),
+LayoutBuilder(builder: (context, c) {
+const firstW = 150.0;
+final colW = ((c.maxWidth - firstW) / exams.length).clamp(110.0, 220.0);
+final tableW = firstW + colW * exams.length;
+return SingleChildScrollView(
+scrollDirection: Axis.horizontal,
+child: SizedBox(
+width: tableW < c.maxWidth ? c.maxWidth : tableW,
+child: Table(
+columnWidths: {
+0: const FixedColumnWidth(firstW),
+for (var i = 0; i < exams.length; i++)
+i + 1: tableW < c.maxWidth
+? const FlexColumnWidth()
+    : FixedColumnWidth(colW),
+},
+defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+border: TableBorder(
+horizontalInside: BorderSide(color: cs.outlineVariant),
+bottom: BorderSide(color: cs.outlineVariant),
+),
+children: [
+TableRow(
+decoration: BoxDecoration(color: cs.primaryContainer.withAlpha(110)),
+children: [
+cell(txt('Subject', style: bold, a: TextAlign.left),
+al: Alignment.centerLeft),
+for (final e in exams) cell(txt(e, style: bold)),
+]),
+for (final sub in subs)
+TableRow(children: [
+cell(txt(sub, a: TextAlign.left), al: Alignment.centerLeft),
+for (final e in exams)
+cell(txt(
+data[e]!.marks[sub] == null
+? '-'
+    : _fmtMark(data[e]!.marks[sub]!),
+style: bold)),
+]),
+TableRow(
+decoration: BoxDecoration(color: cs.surfaceContainerHighest.withAlpha(120)),
+children: [
+cell(txt('Total', style: bold, a: TextAlign.left),
+al: Alignment.centerLeft),
+for (final e in exams)
+cell(txt(_fmtMark(data[e]!.total), style: bold)),
+]),
+TableRow(
+decoration: BoxDecoration(color: cs.surfaceContainerHighest.withAlpha(120)),
+children: [
+cell(txt('Average', style: bold, a: TextAlign.left),
+al: Alignment.centerLeft),
+for (var i = 0; i < exams.length; i++)
+cell(txt(_fmtMark(double.parse(avgs[i].toStringAsFixed(1))),
+style: bold)),
+]),
+TableRow(children: [
+cell(txt('Grade', style: bold, a: TextAlign.left),
+al: Alignment.centerLeft),
+for (var i = 0; i < exams.length; i++) cell(chip(_gradeOf(avgs[i]))),
+]),
+],
+),
+),
+);
+}),
+const SizedBox(height: 16),
+Row(children: [
+const Expanded(
+child: Text('Overall average',
+style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700))),
+Text(_fmtMark(double.parse(overall.toStringAsFixed(1))),
+style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+const SizedBox(width: 10),
+chip(overallG),
+]),
+]),
+),
 );
 }
 
