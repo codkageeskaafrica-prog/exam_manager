@@ -6680,6 +6680,17 @@ class HomeScreen extends StatelessWidget {
               profile.studentId.isEmpty) {
             return _LinkStudentBody(uid: profile.uid);
           }
+          if (profile != null &&
+              profile.role == 'student' &&
+              profile.studentId.isNotEmpty) {
+            // A student only sees the own results and attendance.
+            return ValueListenableBuilder<AppSettings>(
+              valueListenable: appSettings,
+              builder: (context, st, _) => StudentPortal(
+                  studentId: profile.studentId,
+                  allowed: profile.effectiveAccess(st)),
+            );
+          }
           return ValueListenableBuilder<AppSettings>(
             valueListenable: appSettings,
             builder: (context, st, _) {
@@ -11573,6 +11584,421 @@ label: const Text('Add'),
 ),
 );
 }
+}
+
+// ======================= STUDENT PORTAL (what a student sees) =======================
+/// A student account sees ONLY the own data: profile, exam results and
+/// attendance. No lists of classes or of other students.
+class StudentPortal extends StatelessWidget {
+final String studentId;
+final List<String> allowed; // pages the administrator gave this student
+const StudentPortal(
+{super.key, required this.studentId, required this.allowed});
+
+@override
+Widget build(BuildContext context) {
+final tabs = <(String, IconData, Widget)>[
+if (allowed.contains(AppPages.result))
+('Results', Icons.emoji_events, _StudentResultsBody(studentId: studentId)),
+if (allowed.contains(AppPages.attendance))
+('Attendance', Icons.fact_check,
+_StudentAttendanceBody(studentId: studentId)),
+];
+final header = Padding(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+child: _StudentProfileCard(studentId: studentId),
+);
+if (tabs.isEmpty) {
+return ListView(children: [
+Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760), child: header)),
+const Padding(
+padding: EdgeInsets.all(24),
+child: Text(
+'Your account has no access to results or attendance yet.\n'
+'Ask the administrator to give you access.',
+textAlign: TextAlign.center),
+),
+]);
+}
+return DefaultTabController(
+length: tabs.length,
+child: Align(
+alignment: Alignment.topCenter,
+child: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 760),
+child: Column(children: [
+header,
+TabBar(tabs: [
+for (final t in tabs) Tab(icon: Icon(t.$2), text: t.$1),
+]),
+Expanded(child: TabBarView(children: [for (final t in tabs) t.$3])),
+]),
+),
+),
+);
+}
+}
+
+class _StudentProfileCard extends StatelessWidget {
+final String studentId;
+const _StudentProfileCard({required this.studentId});
+
+@override
+Widget build(BuildContext context) {
+final cs = Theme.of(context).colorScheme;
+return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+stream: FirebaseFirestore.instance
+    .collection('students')
+    .doc(studentId)
+    .snapshots(),
+builder: (context, snap) {
+final m = snap.data?.data();
+if (m == null) {
+return const Card(
+child: Padding(
+padding: EdgeInsets.all(16),
+child: Text('Loading your details...')));
+}
+final name = '${m['name'] ?? ''}';
+final phone = '${m['phone'] ?? ''}';
+return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+future: FirebaseFirestore.instance
+    .collection('sections')
+    .doc('${m['sectionId']}')
+    .get(),
+builder: (context, sec) {
+final si = sec.data != null && sec.data!.exists
+? SectionInfo.fromDoc(sec.data!)
+    : null;
+return Card(
+margin: EdgeInsets.zero,
+child: Padding(
+padding: const EdgeInsets.all(14),
+child: Row(children: [
+CircleAvatar(
+radius: 28,
+backgroundColor: cs.primaryContainer,
+child: Text(name.isEmpty ? '?' : name[0].toUpperCase(),
+style: TextStyle(
+fontSize: 24,
+fontWeight: FontWeight.bold,
+color: cs.onPrimaryContainer)),
+),
+const SizedBox(width: 14),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(name,
+style: const TextStyle(
+fontSize: 18, fontWeight: FontWeight.w700)),
+if (si != null)
+Text('${si.form}  ·  ${si.fullName}',
+style: TextStyle(
+color: cs.primary,
+fontWeight: FontWeight.w600)),
+if (phone.isNotEmpty)
+Text('Phone: $phone',
+style: const TextStyle(
+fontSize: 12.5, color: Colors.black54)),
+]),
+),
+]),
+),
+);
+},
+);
+},
+);
+}
+}
+
+/// The exam results of the signed-in student (only the open exams).
+class _StudentResultsBody extends StatefulWidget {
+final String studentId;
+const _StudentResultsBody({required this.studentId});
+
+@override
+State<_StudentResultsBody> createState() => _StudentResultsBodyState();
+}
+
+class _StudentResultsBodyState extends State<_StudentResultsBody> {
+late Future<Map<String, ResultMarks>> _f = _load();
+
+Future<Map<String, ResultMarks>> _load() async {
+final q = await FirebaseFirestore.instance
+    .collection('results')
+    .where('studentId', isEqualTo: widget.studentId)
+    .get();
+return {
+for (final d in q.docs)
+'${d.data()['exam'] ?? ''}':
+ResultMarks(ResultService._marksOf(d.data()['marks'])),
+};
+}
+
+@override
+Widget build(BuildContext context) {
+return FutureBuilder<Map<String, ResultMarks>>(
+future: _f,
+builder: (context, snap) {
+if (snap.hasError) {
+return Center(child: Text('Could not load your results: ${snap.error}'));
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+// only the exams the administrator opened, newest setting order
+final exams = [
+for (final e in appSettings.value.openExams)
+if (snap.data![e] != null && snap.data![e]!.marks.isNotEmpty) e,
+];
+return RefreshIndicator(
+onRefresh: () async {
+setState(() => _f = _load());
+await _f;
+},
+child: ListView(
+physics: const AlwaysScrollableScrollPhysics(),
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+children: [
+if (exams.isEmpty)
+const Padding(
+padding: EdgeInsets.all(24),
+child: Center(child: Text('No results published yet.')),
+),
+for (final e in exams) _examCard(e, snap.data![e]!),
+],
+),
+);
+},
+);
+}
+
+Widget _examCard(String exam, ResultMarks r) {
+final avg = r.average!;
+final g = _gradeOf(avg);
+return Card(
+child: Padding(
+padding: const EdgeInsets.all(16),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Row(children: [
+Expanded(
+child: Text(exam,
+style: const TextStyle(
+fontSize: 16, fontWeight: FontWeight.w700)),
+),
+Container(
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+decoration: BoxDecoration(
+color: _gradeColor(g).withAlpha(36),
+borderRadius: BorderRadius.circular(20),
+),
+child: Text('Grade $g',
+style: TextStyle(
+fontWeight: FontWeight.w800, color: _gradeColor(g))),
+),
+]),
+const Divider(height: 20),
+for (final sub in ExamService.subjects)
+if (r.marks[sub] != null)
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 4),
+child: Row(children: [
+Expanded(child: Text(sub)),
+Text(_fmtMark(r.marks[sub]!),
+style: const TextStyle(fontWeight: FontWeight.w700)),
+]),
+),
+const Divider(height: 20),
+Row(children: [
+const Expanded(child: Text('Total')),
+Text(_fmtMark(r.total),
+style: const TextStyle(fontWeight: FontWeight.w700)),
+]),
+const SizedBox(height: 4),
+Row(children: [
+const Expanded(child: Text('Average')),
+Text(_fmtMark(double.parse(avg.toStringAsFixed(1))),
+style: const TextStyle(fontWeight: FontWeight.w700)),
+]),
+]),
+),
+);
+}
+}
+
+/// The attendance of the signed-in student: rate and day-by-day history.
+class _StudentAttendanceBody extends StatefulWidget {
+final String studentId;
+const _StudentAttendanceBody({required this.studentId});
+
+@override
+State<_StudentAttendanceBody> createState() => _StudentAttendanceBodyState();
+}
+
+class _StudentAttendanceBodyState extends State<_StudentAttendanceBody> {
+late Future<List<_AttEntry>> _f = _load();
+String _filter = 'all';
+
+Future<List<_AttEntry>> _load() async {
+final q = await FirebaseFirestore.instance
+    .collection('attendance')
+    .where(FieldPath(['records', widget.studentId]),
+whereIn: ['present', 'absent', 'late'])
+    .get();
+return [
+for (final d in q.docs)
+_AttEntry(
+'${d.data()['date'] ?? ''}',
+'${d.data()['subject'] ?? ''}'.trim(),
+'${(d.data()['records'] as Map?)?[widget.studentId] ?? ''}',
+),
+]..sort((a, b) {
+final c = b.dateKey.compareTo(a.dateKey);
+return c != 0 ? c : a.subject.compareTo(b.subject);
+});
+}
+
+DateTime? _parse(String k) {
+try {
+return DateFormat('yyyy-MM-dd').parseStrict(k);
+} catch (_) {
+return null;
+}
+}
+
+@override
+Widget build(BuildContext context) {
+return FutureBuilder<List<_AttEntry>>(
+future: _f,
+builder: (context, snap) {
+if (snap.hasError) {
+return Center(
+child: Text('Could not load your attendance: ${snap.error}'));
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+final all = snap.data!;
+final t = _Tally();
+var late = 0;
+for (final e in all) {
+t.add(e.mark);
+if (e.mark == 'late') late++;
+}
+final shown = [
+for (final e in all)
+if (_filter == 'all' || e.mark == _filter) e,
+];
+final rows = <Widget>[];
+String? lastMonth;
+for (final e in shown) {
+final d = _parse(e.dateKey);
+final month =
+d == null ? 'Unknown date' : DateFormat('MMMM yyyy').format(d);
+if (month != lastMonth) {
+lastMonth = month;
+rows.add(Padding(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 2),
+child: Text(month,
+style: const TextStyle(
+fontWeight: FontWeight.w700, color: Colors.black54)),
+));
+}
+final c = e.mark == 'absent'
+? kRed
+    : e.mark == 'late'
+? kLate
+    : kGreen;
+rows.add(ListTile(
+dense: true,
+leading: Icon(e.mark == 'absent' ? Icons.cancel : Icons.check_circle,
+color: c),
+title: Text(d == null
+? e.dateKey
+    : DateFormat('EEE, MMM d, yyyy').format(d)),
+subtitle: Text(e.subject.isEmpty ? 'Whole day' : e.subject),
+trailing: Text(
+e.mark.isEmpty ? '' : e.mark[0].toUpperCase() + e.mark.substring(1),
+style: TextStyle(color: c, fontWeight: FontWeight.w700)),
+));
+}
+return RefreshIndicator(
+onRefresh: () async {
+setState(() => _f = _load());
+await _f;
+},
+child: ListView(
+physics: const AlwaysScrollableScrollPhysics(),
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+children: [
+Card(
+child: Padding(
+padding: const EdgeInsets.all(16),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Row(children: [
+const Text('Attendance rate',
+style: TextStyle(
+fontSize: 16, fontWeight: FontWeight.bold)),
+const Spacer(),
+Text(_pct(t.rate),
+style: TextStyle(
+fontSize: 26,
+fontWeight: FontWeight.bold,
+color: _rateColor(t.rate))),
+]),
+const SizedBox(height: 10),
+_StackBar(t, height: 10),
+const SizedBox(height: 12),
+Wrap(spacing: 8, runSpacing: 8, children: [
+_pill('Present', t.p, kGreen),
+_pill('Absent', t.a, kRed),
+if (late > 0) _pill('of which late', late, kLate),
+_pill('Days marked', t.total, Colors.blueGrey),
+]),
+]),
+),
+),
+Card(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Padding(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+child: Wrap(spacing: 8, children: [
+for (final f in const ['all', 'present', 'absent', 'late'])
+ChoiceChip(
+label: Text(f[0].toUpperCase() + f.substring(1)),
+selected: _filter == f,
+onSelected: (_) => setState(() => _filter = f),
+),
+]),
+),
+if (rows.isEmpty)
+const Padding(
+padding: EdgeInsets.all(24),
+child: Center(child: Text('No attendance records.')),
+),
+...rows,
+]),
+),
+],
+),
+);
+},
+);
+}
+
+Widget _pill(String label, int n, Color c) => Chip(
+visualDensity: VisualDensity.compact,
+side: BorderSide(color: c),
+backgroundColor: c.withOpacity(0.12),
+label: Text('$label: $n',
+style: TextStyle(fontWeight: FontWeight.w600, color: c)),
+);
 }
 
 // ======================= STUDENT DETAIL SCREEN =======================
