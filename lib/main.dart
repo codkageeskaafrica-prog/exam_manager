@@ -9553,6 +9553,35 @@ final t = text.toLowerCase();
 return tokens.every(t.contains);
 }
 
+/// [text] with every search word marked (bold + coloured background).
+Widget _highlighted(BuildContext context, String text, List<String> tokens) {
+final base = const TextStyle(fontSize: 14, color: Colors.black87);
+final low = text.toLowerCase();
+final marks = List<bool>.filled(text.length, false);
+for (final t in tokens) {
+var i = low.indexOf(t);
+while (i >= 0) {
+for (var j = i; j < i + t.length && j < marks.length; j++) {
+marks[j] = true;
+}
+i = low.indexOf(t, i + t.length);
+}
+}
+final hl = base.copyWith(
+fontWeight: FontWeight.bold,
+backgroundColor: const Color(0xFFFFE082));
+final spans = <TextSpan>[];
+var start = 0;
+for (var i = 1; i <= text.length; i++) {
+if (i == text.length || marks[i] != marks[start]) {
+spans.add(TextSpan(
+text: text.substring(start, i), style: marks[start] ? hl : base));
+start = i;
+}
+}
+return Text.rich(TextSpan(children: spans));
+}
+
 Widget _searchBar() {
 return Padding(
 padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -9626,7 +9655,12 @@ Widget _sectionTile(BuildContext context, SchoolService service,
 SectionInfo s, Map<String, int> counts,
 {bool sub = false, List<String> matches = const []}) {
 final n = counts[s.id] ?? 0;
-return ListTile(
+final open = () => Navigator.of(context).push(
+MaterialPageRoute(
+builder: (_) => SectionStudentsScreen(section: s, service: service),
+),
+);
+final tile = ListTile(
 dense: true,
 visualDensity: VisualDensity.compact,
 contentPadding: EdgeInsets.only(left: sub ? 20 : 12, right: 0),
@@ -9646,14 +9680,10 @@ child: Icon(Icons.groups, color: Color(0xFF9B59B6)),
 ),
 title: Text(sub && s.subName.isNotEmpty ? 'Section ${s.subName}' : s.label,
 style: const TextStyle(fontWeight: FontWeight.w600)),
-subtitle: Text(
-matches.isEmpty
+subtitle: Text(matches.isEmpty
 ? _students(n)
-    : '${_students(n)} · ${matches.take(3).join(', ')}'
-'${matches.length > 3 ? ' +${matches.length - 3} more' : ''}',
-maxLines: 2,
-overflow: TextOverflow.ellipsis,
-),
+    : '${_students(n)} · ${matches.length} '
+'match${matches.length == 1 ? '' : 'es'}'),
 onTap: () => Navigator.of(context).push(
 MaterialPageRoute(
 builder: (_) => SectionStudentsScreen(section: s, service: service),
@@ -9675,6 +9705,44 @@ PopupMenuItem(value: 'edit', child: Text('Edit')),
 PopupMenuItem(value: 'delete', child: Text('Delete')),
 ],
 ),
+);
+if (matches.isEmpty) return tile;
+final names = [...matches]
+..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+final tokens = _tokens;
+return Column(
+crossAxisAlignment: CrossAxisAlignment.stretch,
+children: [
+tile,
+Container(
+margin: EdgeInsets.only(left: sub ? 20 : 12, right: 12, bottom: 8),
+padding: const EdgeInsets.symmetric(vertical: 4),
+decoration: BoxDecoration(
+color: const Color(0xFFFFF8E1),
+borderRadius: BorderRadius.circular(10),
+),
+child: Column(
+children: [
+for (final nm in names)
+InkWell(
+onTap: open,
+child: Padding(
+padding: const EdgeInsets.symmetric(
+horizontal: 12, vertical: 6),
+child: Row(
+children: [
+const Icon(Icons.person,
+size: 18, color: Color(0xFF7D3C98)),
+const SizedBox(width: 8),
+Expanded(child: _highlighted(context, nm, tokens)),
+],
+),
+),
+),
+],
+),
+),
+],
 );
 }
 
@@ -9845,6 +9913,11 @@ child: Text('No class, section or student matches '
 ),
 );
 }
+var found = 0, foundIn = 0;
+for (final e in shownMatches.entries) {
+found += e.value.length;
+foundIn++;
+}
 final columns = <Widget>[];
 for (final f in forms) {
 if (!shownByForm.containsKey(f)) continue;
@@ -9867,7 +9940,7 @@ searching: searching,
 }
 // All forms side by side. If they do not fit the screen at the
 // minimum column width, the row scrolls sideways.
-return LayoutBuilder(builder: (context, box) {
+final layout = LayoutBuilder(builder: (context, box) {
 const gap = 12.0, pad = 12.0, minW = 300.0, maxW = 420.0;
 final n = columns.length;
 final avail = box.maxWidth - pad * 2 - gap * (n - 1);
@@ -9889,6 +9962,21 @@ padding: const EdgeInsets.fromLTRB(pad, 12, pad, 88),
 child: SizedBox(height: h, child: row),
 );
 });
+if (found == 0) return layout;
+return Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Padding(
+padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+child: Text(
+'$found student${found == 1 ? '' : 's'} found '
+'in $foundIn section${foundIn == 1 ? '' : 's'}',
+style: const TextStyle(fontWeight: FontWeight.w600),
+),
+),
+Expanded(child: layout),
+],
+);
 },
 );
 },
