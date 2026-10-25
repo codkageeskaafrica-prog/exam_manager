@@ -15467,6 +15467,9 @@ final _school = SchoolService();
 final _service = ResultService();
 late final Stream<List<SectionInfo>> _secStream = _school.watchSections();
 late final Stream<List<StudentInfo>> _stuStream = _service.watchAllStudents();
+late Stream<Map<String, ResultMarks>> _resStream =
+_service.watchResults(_ResultPrefs.exam);
+String _exam = _ResultPrefs.exam;
 final _q = TextEditingController();
 String _query = '';
 Map<String, String> _twins = const {};
@@ -15485,6 +15488,20 @@ _q.dispose();
 super.dispose();
 }
 
+/// "12 entered · 17 not entered" (green / red).
+Widget _statusLine(int entered, int notEntered) => Text.rich(TextSpan(
+style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+children: [
+TextSpan(
+text: '$entered entered',
+style: const TextStyle(color: Color(0xFF2E7D32))),
+const TextSpan(text: ' · ', style: TextStyle(color: Colors.grey)),
+TextSpan(
+text: '$notEntered not entered',
+style: const TextStyle(color: Color(0xFFC62828))),
+],
+));
+
 static String _formName(String f) => f.replaceFirstMapped(
 RegExp(r'^Form\s*(\d+)$'), (m) => 'Form ${m[1]}');
 
@@ -15496,8 +15513,11 @@ if (widget.classKey == null) return _formName(widget.form!);
 return 'Class ${SectionInfo.code(widget.form!, widget.classKey!)}';
 }
 
-void _go(Widget w) =>
-Navigator.of(context).push(MaterialPageRoute(builder: (_) => w));
+void _go(Widget w) => Navigator.of(context)
+    .push(MaterialPageRoute(builder: (_) => w))
+    .then((_) {
+if (mounted) setState(() {}); // the exam may have been changed inside
+});
 
 /// Report of what this screen shows: every form (one table each), one whole
 /// form, or one whole class.
@@ -15551,7 +15571,8 @@ return groups;
 }
 
 Widget _tile(IconData icon, Color color, String title, String subtitle,
-VoidCallback onTap) =>
+VoidCallback? onTap,
+{Widget? extra}) =>
 Card(
 margin: const EdgeInsets.symmetric(vertical: 4),
 child: ListTile(
@@ -15561,8 +15582,13 @@ child: Icon(icon, color: color),
 ),
 title: Text(title,
 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-subtitle: Text(subtitle),
-trailing: const Icon(Icons.chevron_right),
+subtitle: extra == null
+? Text(subtitle)
+    : Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [Text(subtitle), extra],
+),
+trailing: onTap == null ? null : const Icon(Icons.chevron_right),
 onTap: onTap,
 ),
 );
@@ -15572,7 +15598,8 @@ padding: const EdgeInsets.all(32),
 child: Center(child: Text(text, textAlign: TextAlign.center)),
 );
 
-Widget _body(List<SectionInfo> sections, List<StudentInfo> students) {
+Widget _body(List<SectionInfo> sections, List<StudentInfo> students,
+Map<String, ResultMarks> results) {
 final count = <String, int>{};
 for (final s in students) {
 count[s.sectionId] = (count[s.sectionId] ?? 0) + 1;
@@ -15589,6 +15616,24 @@ students
 inScope.contains(st.id) &&
 _isDupCopy(st, _twins, secById, inScope))
     .length;
+}
+// entered = the student has marks for the chosen exam
+Widget status(Iterable<SectionInfo> l) {
+final secIds = {for (final x in l) x.id};
+final inScope = {
+for (final st in students)
+if (secIds.contains(st.sectionId)) st.id
+};
+var total = 0, entered = 0;
+for (final st in students) {
+if (!inScope.contains(st.id) ||
+_isDupCopy(st, _twins, secById, inScope)) {
+continue;
+}
+total++;
+if (results[st.id]?.average != null) entered++;
+}
+return _statusLine(entered, total - entered);
 }
 Set<String> ids(Iterable<SectionInfo> l) => {for (final s in l) s.id};
 const purple = Color(0xFF9B59B6);
@@ -15610,6 +15655,15 @@ s
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
 children: [
+if (!teacherScope.value.isStudent && sections.isNotEmpty)
+_tile(
+Icons.apartment,
+orange,
+'Whole school',
+_n(countOf(sections), 'student'),
+null,
+extra: status(sections),
+),
 if (searching) ...[
 if (found.isEmpty) _hint('No student matches "${_query.trim()}".'),
 for (final s in found.take(60))
@@ -15648,6 +15702,7 @@ kBlue,
 _formName(f),
 '${_n(countOf(inForm), 'student')} · ${_n(classes, 'class')}',
 () => _go(ResultBrowseScreen(form: f)),
+extra: status(inForm),
 );
 }),
 ],
@@ -15673,6 +15728,7 @@ orange,
 _n(countOf(inForm), 'student'),
 () => _go(ResultStudentsScreen(
 title: 'All ${_formName(widget.form!)}', sectionIds: ids(inForm))),
+extra: status(inForm),
 ),
 for (final k in keys)
 Builder(builder: (_) {
@@ -15688,6 +15744,7 @@ purple,
 ? _go(ResultStudentsScreen(
 title: list.first.label, sectionIds: ids(list)))
     : _go(ResultBrowseScreen(form: widget.form, classKey: k)),
+extra: status(list),
 );
 }),
 ],
@@ -15709,6 +15766,7 @@ orange,
 'All $code',
 _n(countOf(list), 'student'),
 () => _go(ResultStudentsScreen(title: 'All $code', sectionIds: ids(list))),
+extra: status(list),
 ),
 // When the class is divided (3C-A, 3C-B ...), the plain whole-class entry
 // ("Section 3C") is not shown: "All 3C" already is the whole class.
@@ -15720,6 +15778,7 @@ purple,
 'Section ${s.label}',
 _n(count[s.id] ?? 0, 'student'),
 () => _go(ResultStudentsScreen(title: s.label, sectionIds: {s.id})),
+extra: status([s]),
 ),
 ],
 );
@@ -15727,6 +15786,10 @@ _n(count[s.id] ?? 0, 'student'),
 
 @override
 Widget build(BuildContext context) {
+if (_exam != _ResultPrefs.exam) {
+_exam = _ResultPrefs.exam;
+_resStream = _service.watchResults(_exam);
+}
 return Scaffold(
 appBar: AppBar(
 title: Text(_title),
@@ -15763,15 +15826,23 @@ child: StreamBuilder<List<SectionInfo>>(
 stream: _secStream,
 builder: (context, secSnap) => StreamBuilder<List<StudentInfo>>(
 stream: _stuStream,
-builder: (context, stuSnap) {
+builder: (context, stuSnap) =>
+StreamBuilder<Map<String, ResultMarks>>(
+stream: _resStream,
+builder: (context, resSnap) {
 if (secSnap.hasError || stuSnap.hasError) {
-return _hint('Error: ${secSnap.error ?? stuSnap.error}');
+return _hint(
+'Error: ${secSnap.error ?? stuSnap.error}');
 }
-if (!secSnap.hasData || !stuSnap.hasData) {
+if (!secSnap.hasData ||
+!stuSnap.hasData ||
+(!resSnap.hasData && !resSnap.hasError)) {
 return const Center(child: CircularProgressIndicator());
 }
-return _body(secSnap.data!, stuSnap.data!);
+return _body(secSnap.data!, stuSnap.data!,
+resSnap.data ?? const <String, ResultMarks>{});
 },
+),
 ),
 ),
 ),
@@ -15891,10 +15962,26 @@ Padding(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
 child: Row(children: [
 Expanded(
-child: Text(
-'${students.length} students · ${scored.length} with results'
-'${groupAvg == null ? '' : ' · average ${_fmtMark(double.parse(groupAvg.toStringAsFixed(1)))}'}',
-style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
+child: Text.rich(TextSpan(
+style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700),
+children: [
+TextSpan(text: '${students.length} students · '),
+TextSpan(
+text: '${scored.length} entered',
+style: const TextStyle(
+color: Color(0xFF2E7D32),
+fontWeight: FontWeight.w600)),
+const TextSpan(text: ' · '),
+TextSpan(
+text: '${students.length - scored.length} not entered',
+style: const TextStyle(
+color: Color(0xFFC62828),
+fontWeight: FontWeight.w600)),
+if (groupAvg != null)
+TextSpan(
+text:
+' · average ${_fmtMark(double.parse(groupAvg.toStringAsFixed(1)))}'),
+])),
 ),
 _ReportMenuButton(
 enabled: scored.isNotEmpty,
