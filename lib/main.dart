@@ -14969,12 +14969,14 @@ return kRed;
 class _ResultPrefs {
 static String? _picked;
 
-/// The exams set in Settings > Exams.
-/// Teachers and students only get the open exams; the administrator gets
-/// all of them (closed ones are marked in the picker).
-static List<String> options() => teacherScope.value.scoped
-? appSettings.value.openExams
-    : appSettings.value.examOptions;
+/// The exams set in Settings > Exams. Only the OPEN exams are offered
+/// (for everyone, the administrator included); closed ones are hidden.
+/// Settings keeps at least one exam open; if none is, the full list is used
+/// so the picker is never empty.
+static List<String> options() {
+final open = appSettings.value.openExams;
+return open.isEmpty ? appSettings.value.examOptions : open;
+}
 
 /// The picked exam. If it was removed from the list, the list's
 /// "Mid-term <year>" (or its first exam) is used instead.
@@ -15489,18 +15491,32 @@ super.dispose();
 }
 
 /// "12 entered · 17 not entered" (green / red).
-Widget _statusLine(int entered, int notEntered) => Text.rich(TextSpan(
-style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-children: [
-TextSpan(
-text: '$entered entered',
-style: const TextStyle(color: Color(0xFF2E7D32))),
-const TextSpan(text: ' · ', style: TextStyle(color: Colors.grey)),
-TextSpan(
-text: '$notEntered not entered',
-style: const TextStyle(color: Color(0xFFC62828))),
-],
-));
+/// Tap "entered" / "not entered" to open the students of that scope,
+/// filtered.
+Widget _statusLine(int entered, int notEntered,
+{void Function(int filter)? onTap}) {
+Widget part(String text, Color c, int filter) => InkWell(
+onTap: onTap == null ? null : () => onTap(filter),
+borderRadius: BorderRadius.circular(6),
+child: Padding(
+padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+child: Text(text,
+style: TextStyle(
+fontSize: 13,
+fontWeight: FontWeight.w600,
+color: c,
+decoration: onTap == null
+? null
+    : TextDecoration.underline,
+decorationColor: c.withAlpha(110))),
+),
+);
+return Row(mainAxisSize: MainAxisSize.min, children: [
+part('$entered entered', const Color(0xFF2E7D32), 1),
+const Text(' · ', style: TextStyle(color: Colors.grey)),
+part('$notEntered not entered', const Color(0xFFC62828), 2),
+]);
+}
 
 static String _formName(String f) => f.replaceFirstMapped(
 RegExp(r'^Form\s*(\d+)$'), (m) => 'Form ${m[1]}');
@@ -15618,7 +15634,7 @@ _isDupCopy(st, _twins, secById, inScope))
     .length;
 }
 // entered = the student has marks for the chosen exam
-Widget status(Iterable<SectionInfo> l) {
+Widget status(Iterable<SectionInfo> l, String title) {
 final secIds = {for (final x in l) x.id};
 final inScope = {
 for (final st in students)
@@ -15633,7 +15649,9 @@ continue;
 total++;
 if (results[st.id]?.average != null) entered++;
 }
-return _statusLine(entered, total - entered);
+return _statusLine(entered, total - entered,
+onTap: (f) => _go(ResultStudentsScreen(
+title: title, sectionIds: secIds, initialFilter: f)));
 }
 Set<String> ids(Iterable<SectionInfo> l) => {for (final s in l) s.id};
 const purple = Color(0xFF9B59B6);
@@ -15659,10 +15677,10 @@ if (!teacherScope.value.isStudent && sections.isNotEmpty)
 _tile(
 Icons.apartment,
 orange,
-'Whole school',
+'School',
 _n(countOf(sections), 'student'),
 null,
-extra: status(sections),
+extra: status(sections, 'School'),
 ),
 if (searching) ...[
 if (found.isEmpty) _hint('No student matches "${_query.trim()}".'),
@@ -15702,7 +15720,7 @@ kBlue,
 _formName(f),
 '${_n(countOf(inForm), 'student')} · ${_n(classes, 'class')}',
 () => _go(ResultBrowseScreen(form: f)),
-extra: status(inForm),
+extra: status(inForm, 'All ${_formName(f)}'),
 );
 }),
 ],
@@ -15728,7 +15746,7 @@ orange,
 _n(countOf(inForm), 'student'),
 () => _go(ResultStudentsScreen(
 title: 'All ${_formName(widget.form!)}', sectionIds: ids(inForm))),
-extra: status(inForm),
+extra: status(inForm, 'All ${_formName(widget.form!)}'),
 ),
 for (final k in keys)
 Builder(builder: (_) {
@@ -15744,7 +15762,7 @@ purple,
 ? _go(ResultStudentsScreen(
 title: list.first.label, sectionIds: ids(list)))
     : _go(ResultBrowseScreen(form: widget.form, classKey: k)),
-extra: status(list),
+extra: status(list, 'All $code'),
 );
 }),
 ],
@@ -15766,7 +15784,7 @@ orange,
 'All $code',
 _n(countOf(list), 'student'),
 () => _go(ResultStudentsScreen(title: 'All $code', sectionIds: ids(list))),
-extra: status(list),
+extra: status(list, 'All $code'),
 ),
 // When the class is divided (3C-A, 3C-B ...), the plain whole-class entry
 // ("Section 3C") is not shown: "All 3C" already is the whole class.
@@ -15778,7 +15796,7 @@ purple,
 'Section ${s.label}',
 _n(count[s.id] ?? 0, 'student'),
 () => _go(ResultStudentsScreen(title: s.label, sectionIds: {s.id})),
-extra: status([s]),
+extra: status([s], s.label),
 ),
 ],
 );
@@ -15858,8 +15876,15 @@ resSnap.data ?? const <String, ResultMarks>{});
 class ResultStudentsScreen extends StatefulWidget {
 final String title;
 final Set<String> sectionIds;
+
+/// 0 = everyone, 1 = only students with marks entered,
+/// 2 = only students without marks.
+final int initialFilter;
 const ResultStudentsScreen(
-{super.key, required this.title, required this.sectionIds});
+{super.key,
+required this.title,
+required this.sectionIds,
+this.initialFilter = 0});
 
 @override
 State<ResultStudentsScreen> createState() => _ResultStudentsScreenState();
@@ -15874,6 +15899,12 @@ late Stream<Map<String, ResultMarks>> _resStream =
 _service.watchResults(_ResultPrefs.exam);
 final _q = TextEditingController();
 String _query = '';
+late int _filter = widget.initialFilter;
+
+/// Students whose marks are being typed in the list right now. They stay
+/// in the list (and keep their boxes) even after the first save moves them
+/// from "not entered" to "entered".
+final Set<String> _pinned = {};
 Map<String, String> _twins = const {};
 
 @override
@@ -15929,9 +15960,14 @@ final groupAvg = scored.isEmpty
 ? null
     : scored.fold(0.0, (a, s) => a + results[s.id]!.average!) / scored.length;
 
+bool hasMarks(StudentInfo s) => results[s.id]?.average != null;
 final shown = [
 for (final s in students)
-if (_nameMatches(s.name, _query)) s,
+if (_nameMatches(s.name, _query) &&
+(_filter == 0 ||
+(_filter == 1 ? hasMarks(s) : !hasMarks(s)) ||
+_pinned.contains(s.id)))
+s,
 ];
 
 List<ResultReportGroup> reportGroups() => [
@@ -15951,6 +15987,7 @@ _ExamPicker(
 value: _ResultPrefs.exam,
 onChanged: (v) => setState(() {
 _ResultPrefs.exam = v;
+_pinned.clear();
 _resStream = _service.watchResults(v);
 }),
 ),
@@ -16022,11 +16059,38 @@ label: const Text('Enter all'),
 ),
 ]),
 ),
+Padding(
+padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+child: Align(
+alignment: Alignment.centerLeft,
+child: Wrap(spacing: 8, runSpacing: 4, children: [
+for (final f in const [
+(0, 'All'),
+(1, 'Entered'),
+(2, 'Not entered'),
+])
+ChoiceChip(
+label: Text(
+'${f.$2} ${f.$1 == 0 ? students.length : f.$1 == 1 ? scored.length : students.length - scored.length}'),
+selected: _filter == f.$1,
+onSelected: (_) => setState(() {
+_filter = f.$1;
+_pinned.clear();
+}),
+),
+]),
+),
+),
 Expanded(
 child: students.isEmpty
 ? const Center(child: Text('This group has no students yet.'))
     : shown.isEmpty
-? Center(child: Text('No student matches "${_query.trim()}".'))
+? Center(
+child: Text(_query.trim().isEmpty
+? (_filter == 1
+? 'No student has marks entered yet.'
+    : 'Every student has marks entered.')
+    : 'No student matches "${_query.trim()}".'))
     : ListView.builder(
 padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
 itemCount: shown.length,
@@ -16035,6 +16099,25 @@ final s = shown[i];
 final r = results[s.id];
 final avg = r?.average;
 final g = avg == null ? null : _gradeOf(avg);
+// Marks are typed straight in the list (not for a student login).
+final sForm = secOf[s.sectionId]?.form;
+final inlineSubs = teacherScope.value.isStudent
+? const <String>[]
+    : [
+for (final x in teacherScope.value.subjectList)
+if (sForm == null ||
+teacherScope.value.allows(x, sForm))
+x,
+];
+final inline = inlineSubs.isNotEmpty &&
+(avg == null || _pinned.contains(s.id));
+Widget marksBox() => _InlineMarks(
+key: ValueKey('${s.id}|${_ResultPrefs.exam}'),
+student: s,
+subjects: inlineSubs,
+exam: _ResultPrefs.exam,
+onStart: () => _pinned.add(s.id),
+);
 return Card(
 margin: const EdgeInsets.symmetric(vertical: 3),
 child: InkWell(
@@ -16073,10 +16156,18 @@ style: TextStyle(
 fontSize: 12,
 color: Colors.grey.shade600)),
 ],
+if (inline && inlineSubs.length > 1) ...[
+const SizedBox(height: 8),
+marksBox(),
+],
 ],
 ),
 ),
-if (r == null || avg == null)
+if (inline && inlineSubs.length == 1)
+marksBox()
+else if (inline)
+const SizedBox.shrink()
+else if (r == null || avg == null)
 Text('No result',
 style: TextStyle(
 fontSize: 12,
@@ -16519,6 +16610,155 @@ Expanded(child: body),
 
 static const _bulkHead = TextStyle(
 color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14);
+}
+
+/// Boxes to type the marks of one student straight in the list (one box per
+/// subject the person may enter). A mark is saved when its box loses focus
+/// (Enter / Tab / tapping elsewhere). Other marks of the student, also the
+/// ones this person may not see, are kept as they are.
+class _InlineMarks extends StatefulWidget {
+final StudentInfo student;
+final List<String> subjects;
+final String exam;
+final VoidCallback onStart;
+const _InlineMarks({
+super.key,
+required this.student,
+required this.subjects,
+required this.exam,
+required this.onStart,
+});
+
+@override
+State<_InlineMarks> createState() => _InlineMarksState();
+}
+
+class _InlineMarksState extends State<_InlineMarks> {
+final _svc = ResultService();
+late final Map<String, TextEditingController> _c = {
+for (final s in widget.subjects) s: TextEditingController(),
+};
+late final Map<String, FocusNode> _f = {
+for (final s in widget.subjects) s: FocusNode(),
+};
+final Map<String, String> _saved = {}; // subject -> text already saved
+Future<void> _chain = Future.value();
+bool _saving = false, _ok = false;
+
+@override
+void initState() {
+super.initState();
+_f.forEach((sub, node) {
+node.addListener(() {
+if (node.hasFocus) {
+widget.onStart();
+} else {
+_chain = _chain.then((_) => _run());
+}
+});
+});
+}
+
+@override
+void dispose() {
+for (final c in _c.values) {
+c.dispose();
+}
+for (final f in _f.values) {
+f.dispose();
+}
+super.dispose();
+}
+
+bool _isBad(String text) {
+final t = text.trim();
+if (t.isEmpty) return false;
+final v = double.tryParse(t);
+return v == null || v < 0 || v > kMaxMark;
+}
+
+Future<void> _run() async {
+final typed = <String, double>{};
+for (final sub in widget.subjects) {
+final t = _c[sub]!.text.trim();
+if (t.isEmpty || t == (_saved[sub] ?? '') || _isBad(t)) continue;
+typed[sub] = double.parse(t);
+}
+if (typed.isEmpty) return;
+if (mounted) setState(() => _saving = true);
+try {
+// read the stored marks first so no other subject is lost
+final cur = await _svc.get(widget.student.id, widget.exam);
+await _svc.save(widget.student, widget.exam, {...cur.marks, ...typed});
+for (final e in typed.keys) {
+_saved[e] = _c[e]!.text.trim();
+}
+if (mounted) {
+setState(() {
+_saving = false;
+_ok = true;
+});
+}
+} catch (e) {
+if (!mounted) return;
+setState(() => _saving = false);
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('Could not save ${widget.student.name}: '
+'${'$e'.replaceFirst('Exception: ', '')}')));
+}
+}
+
+@override
+Widget build(BuildContext context) {
+final single = widget.subjects.length == 1;
+const red = OutlineInputBorder(
+borderSide: BorderSide(color: Color(0xFFC62828), width: 1.5));
+Widget box(String sub) => SizedBox(
+width: single ? 92 : 84,
+child: TextField(
+controller: _c[sub],
+focusNode: _f[sub],
+textAlign: TextAlign.center,
+textInputAction: TextInputAction.next,
+keyboardType: const TextInputType.numberWithOptions(decimal: true),
+inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+onChanged: (_) => setState(() => _ok = false),
+onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+decoration: InputDecoration(
+isDense: true,
+labelText: single ? 'Mark' : sub,
+labelStyle: const TextStyle(fontSize: 11),
+floatingLabelBehavior: FloatingLabelBehavior.auto,
+contentPadding:
+const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+border: const OutlineInputBorder(),
+enabledBorder: _isBad(_c[sub]!.text) ? red : null,
+focusedBorder: _isBad(_c[sub]!.text) ? red : null,
+),
+),
+);
+final status = _saving
+? const SizedBox(
+width: 16,
+height: 16,
+child: CircularProgressIndicator(strokeWidth: 2))
+    : _ok
+? const Icon(Icons.check_circle, size: 18, color: Color(0xFF2E7D32))
+    : null;
+if (single) {
+return Row(mainAxisSize: MainAxisSize.min, children: [
+box(widget.subjects.first),
+SizedBox(width: 26, child: status == null ? null : Center(child: status)),
+]);
+}
+return Wrap(
+spacing: 8,
+runSpacing: 8,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [for (final sub in widget.subjects) box(sub), if (status != null) status],
+);
+}
 }
 
 // ---------------- Mark entry for one student ----------------
