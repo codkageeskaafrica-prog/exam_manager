@@ -7149,17 +7149,57 @@ String docxLogoPngDefault(String place) => schoolLogo.value.uses(place)
 /// The general settings of the app. They are saved once for the whole school
 /// (Firestore: settings/app), so every teacher sees the same values.
 /// A missing or invalid value falls back to the default given below.
+/// Mark limits of ONE exam.
+class ExamLimits {
+  /// Lowest / highest mark of one subject.
+  final double minMark, maxMark;
+
+  /// Lowest / highest TOTAL (sum of the subject marks) of a student.
+  /// 0 = no limit. The highest is enforced when saving; a total below the
+  /// lowest is shown in red.
+  final double totalMin, totalMax;
+  const ExamLimits({
+    this.minMark = 0,
+    this.maxMark = 100,
+    this.totalMin = 0,
+    this.totalMax = 0,
+  });
+
+  Map<String, Object?> toMap() => {
+    'minMark': minMark,
+    'maxMark': maxMark,
+    'totalMin': totalMin,
+    'totalMax': totalMax,
+  };
+
+  factory ExamLimits.fromMap(Map m, double defMax) {
+    double v(String k, double def) {
+      final x = m[k];
+      return x is num ? x.toDouble() : def;
+    }
+
+    return ExamLimits(
+      minMark: v('minMark', 0),
+      maxMark: v('maxMark', defMax),
+      totalMin: v('totalMin', 0),
+      totalMax: v('totalMax', 0),
+    );
+  }
+
+  String get summary =>
+      'Subject ${_fmtMark(minMark)}-${_fmtMark(maxMark)}'
+          '${totalMin > 0 || totalMax > 0 ? ' · Total ${_fmtMark(totalMin)}-${totalMax > 0 ? _fmtMark(totalMax) : 'no limit'}' : ''}';
+}
+
 class AppSettings {
   /// First day of the week in the attendance report (DateTime.monday ... sunday).
   final int weekStart;
 
-  /// Highest / lowest mark a subject can have.
-  final double maxMark, minMark;
+  /// Highest subject mark of an exam that has no limits of its own yet.
+  final double maxMark;
 
-  /// Highest / lowest TOTAL (sum of the subject marks) of a student in one
-  /// exam. 0 = no limit. The highest is enforced when saving; a total below
-  /// the lowest is shown in red in Result.
-  final double examMaxTotal, examMinTotal;
+  /// The mark limits of each exam (Settings > Exams), by [SchoolService.subjectKey].
+  final Map<String, ExamLimits> examLimits;
 
   /// Lowest average mark for the grades A, B, C, D and E (below E is an F).
   final List<double> grades;
@@ -7189,9 +7229,7 @@ class AppSettings {
   const AppSettings({
     this.weekStart = DateTime.monday,
     this.maxMark = 100.0,
-    this.minMark = 0.0,
-    this.examMaxTotal = 0.0,
-    this.examMinTotal = 0.0,
+    this.examLimits = const {},
     this.grades = const [80.0, 70.0, 60.0, 50.0, 40.0],
     this.rateGood = 90.0,
     this.rateWarn = 75.0,
@@ -7229,6 +7267,16 @@ class AppSettings {
     final pref = 'Mid-term ${DateTime.now().year}';
     return o.contains(pref) ? pref : o.first;
   }
+
+  /// The mark limits of [exam] (the defaults when none were set).
+  ExamLimits limitsFor(String exam) =>
+      examLimits[SchoolService.subjectKey(exam)] ?? ExamLimits(maxMark: maxMark);
+
+  /// The highest subject mark of any exam.
+  double get largestMax => [
+    maxMark,
+    for (final l in examLimits.values) l.maxMark,
+  ].reduce((a, b) => a > b ? a : b);
 
   bool isExamOpen(String e) => !closedExams.contains(e);
 
@@ -7275,9 +7323,14 @@ class AppSettings {
     return AppSettings(
       weekStart: wd is num && wd >= 1 && wd <= 7 ? wd.toInt() : d.weekStart,
       maxMark: dbl('maxMark', d.maxMark),
-      minMark: dbl('minMark', d.minMark),
-      examMaxTotal: dbl('examMaxTotal', d.examMaxTotal),
-      examMinTotal: dbl('examMinTotal', d.examMinTotal),
+      examLimits: m['examLimits'] is Map
+          ? {
+        for (final e in (m['examLimits'] as Map).entries)
+          if (e.value is Map)
+            '${e.key}': ExamLimits.fromMap(
+                e.value as Map, dbl('maxMark', d.maxMark)),
+      }
+          : d.examLimits,
       grades: grades,
       rateGood: dbl('rateGood', d.rateGood),
       rateWarn: dbl('rateWarn', d.rateWarn),
@@ -7363,14 +7416,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   TextEditingController(text: _fmtMark(appSettings.value.rateGood));
   late final _warn =
   TextEditingController(text: _fmtMark(appSettings.value.rateWarn));
-  late final _top =
-  TextEditingController(text: _fmtMark(appSettings.value.maxMark));
-  late final _subMin =
-  TextEditingController(text: _fmtMark(appSettings.value.minMark));
-  late final _examMax =
-  TextEditingController(text: _fmtMark(appSettings.value.examMaxTotal));
-  late final _examMin =
-  TextEditingController(text: _fmtMark(appSettings.value.examMinTotal));
   late final _grade = [
     for (final g in appSettings.value.grades)
       TextEditingController(text: _fmtMark(g)),
@@ -7380,9 +7425,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    for (final c in [
-      _good, _warn, _top, _subMin, _examMax, _examMin, _newExam, ..._grade
-    ]) {
+    for (final c in [_good, _warn, _newExam, ..._grade]) {
       c.dispose();
     }
     super.dispose();
@@ -7426,7 +7469,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _saveResults() async {
-    final top = appSettings.value.maxMark;
+    final top = appSettings.value.largestMax;
     final limits = [for (final c in _grade) _num(c)];
     if (limits.any((v) => v == null)) {
       _toast('Enter a number for every grade.');
@@ -7445,42 +7488,121 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _save({'grades': v}, 'Results settings saved');
   }
 
-  /// Highest / lowest mark of a subject and highest / lowest exam total.
-  Future<void> _saveLimits() async {
-    final top = _num(_top);
-    final low = _num(_subMin) ?? 0;
-    final exMax = _num(_examMax) ?? 0;
-    final exMin = _num(_examMin) ?? 0;
-    if (top == null || top <= 0) {
-      _toast('Enter the highest subject mark. It must be more than 0.');
-      return;
+  /// Mark limits of ONE exam: subject lowest / highest, exam total
+  /// lowest / highest.
+  Future<void> _editLimits(String exam) async {
+    final cur = appSettings.value.limitsFor(exam);
+    final low = TextEditingController(text: _fmtMark(cur.minMark));
+    final top = TextEditingController(text: _fmtMark(cur.maxMark));
+    final tMin = TextEditingController(text: _fmtMark(cur.totalMin));
+    final tMax = TextEditingController(text: _fmtMark(cur.totalMax));
+    String? err;
+    final saved = await showDialog<ExamLimits>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Mark limits - $exam'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                      'Subject marks: the lowest and highest mark one subject '
+                          'can have in this exam.',
+                      style: _hint),
+                ),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(child: _numField(low, 'Subject - lowest')),
+                  const SizedBox(width: 10),
+                  Expanded(child: _numField(top, 'Subject - highest')),
+                ]),
+                const SizedBox(height: 16),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                      'Exam total: the sum of all the subject marks of a '
+                          'student in this exam. The highest total cannot be '
+                          'exceeded when saving; a total below the lowest is '
+                          'shown in red. Use 0 for no limit.',
+                      style: _hint),
+                ),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(child: _numField(tMin, 'Total - lowest')),
+                  const SizedBox(width: 10),
+                  Expanded(child: _numField(tMax, 'Total - highest')),
+                ]),
+                const SizedBox(height: 8),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Marks that are already saved are not changed.',
+                      style: _hint),
+                ),
+                if (err != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(err!,
+                          style: const TextStyle(color: Color(0xFFC62828))),
+                    ),
+                  ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final lo = _num(low) ?? 0;
+                final hi = _num(top);
+                final tl = _num(tMin) ?? 0;
+                final th = _num(tMax) ?? 0;
+                String? e;
+                if (hi == null || hi <= 0) {
+                  e = 'Enter the highest subject mark (more than 0).';
+                } else if (lo < 0 || lo >= hi) {
+                  e = 'The lowest subject mark must be 0 or more and below '
+                      'the highest.';
+                } else if (th > 0 && th < hi) {
+                  e = 'The highest exam total cannot be below the highest '
+                      'subject mark (${_fmtMark(hi)}). Use 0 for no limit.';
+                } else if (tl < 0 || (th > 0 && tl > th)) {
+                  e = 'The lowest exam total must be 0 or more and not above '
+                      'the highest exam total.';
+                } else if (appSettings.value.grades.first > hi &&
+                    hi >= appSettings.value.largestMax) {
+                  e = 'Grade A starts at '
+                      '${_fmtMark(appSettings.value.grades.first)}, above this '
+                      'highest mark. Change the grades first.';
+                }
+                if (e != null) {
+                  setD(() => err = e);
+                  return;
+                }
+                Navigator.pop(
+                    ctx,
+                    ExamLimits(
+                        minMark: lo, maxMark: hi!, totalMin: tl, totalMax: th));
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    for (final c in [low, top, tMin, tMax]) {
+      c.dispose();
     }
-    if (low < 0 || low >= top) {
-      _toast('The lowest subject mark must be 0 or more and below the '
-          'highest subject mark.');
-      return;
-    }
-    if (exMax > 0 && exMax < top) {
-      _toast('The highest exam total cannot be below the highest subject '
-          'mark (${_fmtMark(top)}). Use 0 for no limit.');
-      return;
-    }
-    if (exMin < 0 || (exMax > 0 && exMin > exMax)) {
-      _toast('The lowest exam total must be 0 or more and not above the '
-          'highest exam total.');
-      return;
-    }
-    if (appSettings.value.grades.first > top) {
-      _toast('Grade A starts at ${_fmtMark(appSettings.value.grades.first)}, '
-          'which is above this highest mark. Change the grades first.');
-      return;
-    }
+    if (saved == null) return;
     await _save({
-      'maxMark': top,
-      'minMark': low,
-      'examMaxTotal': exMax,
-      'examMinTotal': exMin,
-    }, 'Mark limits saved');
+      'examLimits': {SchoolService.subjectKey(exam): saved.toMap()}
+    }, 'Mark limits of "$exam" saved');
   }
 
   Future<void> _addExam(List<String> current) async {
@@ -7687,7 +7809,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       const Text(
           'Tick an exam to open it in Result, untick it to close it (teachers '
               'and students no longer see it). At least one exam stays open. '
-              'Removing an exam only hides it; its saved marks are kept.',
+              'Removing an exam only hides it; its saved marks are kept. Use the '
+              'sliders button of an exam to set its own mark limits (lowest '
+              'and highest subject mark, lowest and highest exam total).',
           style: _hint),
       const SizedBox(height: 6),
       for (final e in list)
@@ -7700,12 +7824,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: Text(e),
           subtitle: Text(
               '${e == s.currentExam ? 'Current exam - ' : ''}'
-                  '${s.isExamOpen(e) ? 'Open' : 'Closed'}'),
-          secondary: IconButton(
-            tooltip: 'Remove',
-            icon: const Icon(Icons.close),
-            onPressed: _busy ? null : () => _removeExam(list, e),
-          ),
+                  '${s.isExamOpen(e) ? 'Open' : 'Closed'}\n'
+                  '${s.limitsFor(e).summary}'),
+          isThreeLine: true,
+          secondary: Row(mainAxisSize: MainAxisSize.min, children: [
+            IconButton(
+              tooltip: 'Mark limits',
+              icon: const Icon(Icons.tune),
+              onPressed: _busy ? null : () => _editLimits(e),
+            ),
+            IconButton(
+              tooltip: 'Remove',
+              icon: const Icon(Icons.close),
+              onPressed: _busy ? null : () => _removeExam(list, e),
+            ),
+          ]),
         ),
       const SizedBox(height: 12),
       Row(children: [
@@ -7738,30 +7871,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: const Text('Reset to default list'),
         ),
       ),
-      const Divider(height: 28),
-      const Text('Mark limits', style: TextStyle(fontWeight: FontWeight.w600)),
-      const SizedBox(height: 2),
-      const Text(
-          'Subject marks: the lowest and highest mark one subject can have. '
-              'Exam total: the sum of all the subject marks of a student in one '
-              'exam. The highest total cannot be exceeded when saving; a total '
-              'below the lowest is shown in red. Use 0 for no exam limit. Marks '
-              'that are already saved are not changed.',
-          style: _hint),
-      const SizedBox(height: 12),
-      Row(children: [
-        Expanded(child: _numField(_subMin, 'Subject mark - lowest')),
-        const SizedBox(width: 10),
-        Expanded(child: _numField(_top, 'Subject mark - highest')),
-      ]),
-      const SizedBox(height: 10),
-      Row(children: [
-        Expanded(child: _numField(_examMin, 'Exam total - lowest')),
-        const SizedBox(width: 10),
-        Expanded(child: _numField(_examMax, 'Exam total - highest')),
-      ]),
-      const SizedBox(height: 8),
-      _saveButton('Save mark limits', _saveLimits),
     ]);
   }
 
@@ -15019,11 +15128,11 @@ children: [_content(snap.data!, sections)],
 
 // ======================= RESULTS (exam marks per student) =======================
 
-/// Highest mark a subject can have (set in Settings).
-double get kMaxMark => appSettings.value.maxMark;
+/// Highest mark a subject can have in [exam] (set in Settings > Exams).
+double maxMarkOf(String exam) => appSettings.value.limitsFor(exam).maxMark;
 
-/// Lowest mark a subject can have (set in Settings > Exams).
-double get kMinMark => appSettings.value.minMark;
+/// Lowest mark a subject can have in [exam] (set in Settings > Exams).
+double minMarkOf(String exam) => appSettings.value.limitsFor(exam).minMark;
 
 String _fmtMark(double n) =>
 n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
@@ -15387,8 +15496,8 @@ if (twins[id] != null && raw[twins[id]] != null) raw[twins[id]]!,
 /// Saves the marks of many students in one go (an empty map removes the
 /// result of that student).
 /// The highest exam total (Settings > Exams) cannot be exceeded.
-static void _checkTotal(String name, Map<String, double> marks) {
-final top = appSettings.value.examMaxTotal;
+static void _checkTotal(String exam, String name, Map<String, double> marks) {
+final top = appSettings.value.limitsFor(exam).totalMax;
 if (top <= 0 || marks.isEmpty) return;
 final total = marks.values.fold(0.0, (a, b) => a + b);
 if (total > top + 1e-9) {
@@ -15400,7 +15509,7 @@ throw Exception('The total of $name is ${_fmtMark(total)}, more than '
 Future<void> saveMany(String exam,
 List<(StudentInfo, Map<String, double>)> items) async {
 for (final it in items) {
-_checkTotal(it.$1.name, it.$2);
+_checkTotal(exam, it.$1.name, it.$2);
 }
 Future<void> write(List<(String, String, Map<String, double>)> rows) async {
 for (var i = 0; i < rows.length; i += 400) {
@@ -15456,7 +15565,7 @@ return ResultMarks(_merge(docs));
 
 /// Saves the marks (an empty map removes the result).
 Future<void> save(StudentInfo s, String exam, Map<String, double> marks) async {
-_checkTotal(s.name, marks);
+_checkTotal(exam, s.name, marks);
 Future<void> put(String id, String sectionId) {
 final ref = _col.doc(_id(id, exam));
 if (marks.isEmpty) return ref.delete();
@@ -16293,15 +16402,15 @@ fontWeight: FontWeight.w800)),
 const SizedBox(height: 2),
 Text(
 'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}'
-'${appSettings.value.examMinTotal > 0 && r.total < appSettings.value.examMinTotal ? ' · below min' : ''}',
+'${appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 && r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin ? ' · below min' : ''}',
 style: TextStyle(
 fontSize: 11.5,
-fontWeight: appSettings.value.examMinTotal > 0 &&
-r.total < appSettings.value.examMinTotal
+fontWeight: appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 &&
+r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin
 ? FontWeight.w700
     : FontWeight.normal,
-color: appSettings.value.examMinTotal > 0 &&
-r.total < appSettings.value.examMinTotal
+color: appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 &&
+r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin
 ? const Color(0xFFC62828)
     : Colors.grey.shade600)),
 ],
@@ -16448,7 +16557,7 @@ bool _isBad(String text) {
 final t = text.trim();
 if (t.isEmpty) return false;
 final v = double.tryParse(t);
-return v == null || v < kMinMark || v > kMaxMark;
+return v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam);
 }
 
 int get _changedRows {
@@ -16477,7 +16586,7 @@ final t = row[sub]!.text.trim();
 if (t != _orig['${s.id}|$sub']) changed = true;
 if (t.isEmpty) continue;
 final v = double.tryParse(t);
-if (v == null || v < kMinMark || v > kMaxMark) {
+if (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam)) {
 bad = true;
 continue;
 }
@@ -16487,7 +16596,7 @@ if (changed) items.add((s, {..._hidden[s.id]!, ...marks}));
 }
 if (bad) {
 setState(() =>
-_error = 'Fix the marks shown in red (${_fmtMark(kMinMark)} to ${_fmtMark(kMaxMark)}).');
+_error = 'Fix the marks shown in red (${_fmtMark(minMarkOf(widget.exam))} to ${_fmtMark(maxMarkOf(widget.exam))}).');
 return;
 }
 if (items.isEmpty) {
@@ -16775,7 +16884,7 @@ bool _isBad(String text) {
 final t = text.trim();
 if (t.isEmpty) return false;
 final v = double.tryParse(t);
-return v == null || v < kMinMark || v > kMaxMark;
+return v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam);
 }
 
 Future<void> _run() async {
@@ -17031,7 +17140,7 @@ _ctrl.forEach((k, c) {
 final t = c.text.trim();
 if (t.isEmpty) return;
 final v = double.tryParse(t);
-if (v == null || v < kMinMark || v > kMaxMark) {
+if (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam)) {
 ok = false;
 } else {
 out[k] = v;
@@ -17043,7 +17152,7 @@ return (marks: out, ok: ok);
 Future<void> _save() async {
 final r = _read();
 if (!r.ok) {
-setState(() => _error = 'Fix the marks shown in red (${_fmtMark(kMinMark)} to ${_fmtMark(kMaxMark)}).');
+setState(() => _error = 'Fix the marks shown in red (${_fmtMark(minMarkOf(widget.exam))} to ${_fmtMark(maxMarkOf(widget.exam))}).');
 return;
 }
 setState(() {
@@ -17095,7 +17204,7 @@ final c = _ctrl[subject]!;
 final t = c.text.trim();
 final v = double.tryParse(t);
 final bad =
-t.isNotEmpty && (v == null || v < kMinMark || v > kMaxMark);
+t.isNotEmpty && (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam));
 return TextField(
 controller: c,
 enabled: !_saving,
@@ -17109,7 +17218,7 @@ decoration: InputDecoration(
 labelText: subject,
 border: const OutlineInputBorder(),
 isDense: true,
-errorText: bad ? '${_fmtMark(kMinMark)}–${_fmtMark(kMaxMark)}' : null,
+errorText: bad ? '${_fmtMark(minMarkOf(widget.exam))}–${_fmtMark(maxMarkOf(widget.exam))}' : null,
 ),
 );
 }),
