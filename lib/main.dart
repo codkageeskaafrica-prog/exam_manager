@@ -7153,8 +7153,13 @@ class AppSettings {
   /// First day of the week in the attendance report (DateTime.monday ... sunday).
   final int weekStart;
 
-  /// Highest mark a subject can have.
-  final double maxMark;
+  /// Highest / lowest mark a subject can have.
+  final double maxMark, minMark;
+
+  /// Highest / lowest TOTAL (sum of the subject marks) of a student in one
+  /// exam. 0 = no limit. The highest is enforced when saving; a total below
+  /// the lowest is shown in red in Result.
+  final double examMaxTotal, examMinTotal;
 
   /// Lowest average mark for the grades A, B, C, D and E (below E is an F).
   final List<double> grades;
@@ -7184,6 +7189,9 @@ class AppSettings {
   const AppSettings({
     this.weekStart = DateTime.monday,
     this.maxMark = 100.0,
+    this.minMark = 0.0,
+    this.examMaxTotal = 0.0,
+    this.examMinTotal = 0.0,
     this.grades = const [80.0, 70.0, 60.0, 50.0, 40.0],
     this.rateGood = 90.0,
     this.rateWarn = 75.0,
@@ -7267,6 +7275,9 @@ class AppSettings {
     return AppSettings(
       weekStart: wd is num && wd >= 1 && wd <= 7 ? wd.toInt() : d.weekStart,
       maxMark: dbl('maxMark', d.maxMark),
+      minMark: dbl('minMark', d.minMark),
+      examMaxTotal: dbl('examMaxTotal', d.examMaxTotal),
+      examMinTotal: dbl('examMinTotal', d.examMinTotal),
       grades: grades,
       rateGood: dbl('rateGood', d.rateGood),
       rateWarn: dbl('rateWarn', d.rateWarn),
@@ -7354,6 +7365,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   TextEditingController(text: _fmtMark(appSettings.value.rateWarn));
   late final _top =
   TextEditingController(text: _fmtMark(appSettings.value.maxMark));
+  late final _subMin =
+  TextEditingController(text: _fmtMark(appSettings.value.minMark));
+  late final _examMax =
+  TextEditingController(text: _fmtMark(appSettings.value.examMaxTotal));
+  late final _examMin =
+  TextEditingController(text: _fmtMark(appSettings.value.examMinTotal));
   late final _grade = [
     for (final g in appSettings.value.grades)
       TextEditingController(text: _fmtMark(g)),
@@ -7363,7 +7380,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    for (final c in [_good, _warn, _top, _newExam, ..._grade]) {
+    for (final c in [
+      _good, _warn, _top, _subMin, _examMax, _examMin, _newExam, ..._grade
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -7407,12 +7426,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _saveResults() async {
-    final top = _num(_top);
+    final top = appSettings.value.maxMark;
     final limits = [for (final c in _grade) _num(c)];
-    if (top == null || top <= 0) {
-      _toast('Enter the highest mark. It must be more than 0.');
-      return;
-    }
     if (limits.any((v) => v == null)) {
       _toast('Enter a number for every grade.');
       return;
@@ -7424,10 +7439,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (!ok) {
       _toast('The limits must go down from A to E (for example 80, 70, 60, '
-          '50, 40) and cannot be higher than the highest mark.');
+          '50, 40) and cannot be higher than the highest subject mark.');
       return;
     }
-    await _save({'maxMark': top, 'grades': v}, 'Results settings saved');
+    await _save({'grades': v}, 'Results settings saved');
+  }
+
+  /// Highest / lowest mark of a subject and highest / lowest exam total.
+  Future<void> _saveLimits() async {
+    final top = _num(_top);
+    final low = _num(_subMin) ?? 0;
+    final exMax = _num(_examMax) ?? 0;
+    final exMin = _num(_examMin) ?? 0;
+    if (top == null || top <= 0) {
+      _toast('Enter the highest subject mark. It must be more than 0.');
+      return;
+    }
+    if (low < 0 || low >= top) {
+      _toast('The lowest subject mark must be 0 or more and below the '
+          'highest subject mark.');
+      return;
+    }
+    if (exMax > 0 && exMax < top) {
+      _toast('The highest exam total cannot be below the highest subject '
+          'mark (${_fmtMark(top)}). Use 0 for no limit.');
+      return;
+    }
+    if (exMin < 0 || (exMax > 0 && exMin > exMax)) {
+      _toast('The lowest exam total must be 0 or more and not above the '
+          'highest exam total.');
+      return;
+    }
+    if (appSettings.value.grades.first > top) {
+      _toast('Grade A starts at ${_fmtMark(appSettings.value.grades.first)}, '
+          'which is above this highest mark. Change the grades first.');
+      return;
+    }
+    await _save({
+      'maxMark': top,
+      'minMark': low,
+      'examMaxTotal': exMax,
+      'examMinTotal': exMin,
+    }, 'Mark limits saved');
   }
 
   Future<void> _addExam(List<String> current) async {
@@ -7598,8 +7651,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ]);
 
   Widget _resultsCard() => _card('Results', Icons.emoji_events, [
-    _numField(_top, 'Highest mark of a subject'),
-    const SizedBox(height: 14),
     const Text('Grades', style: TextStyle(fontWeight: FontWeight.w600)),
     const SizedBox(height: 2),
     const Text('The lowest average mark for each grade. Below E is F.',
@@ -7687,6 +7738,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: const Text('Reset to default list'),
         ),
       ),
+      const Divider(height: 28),
+      const Text('Mark limits', style: TextStyle(fontWeight: FontWeight.w600)),
+      const SizedBox(height: 2),
+      const Text(
+          'Subject marks: the lowest and highest mark one subject can have. '
+              'Exam total: the sum of all the subject marks of a student in one '
+              'exam. The highest total cannot be exceeded when saving; a total '
+              'below the lowest is shown in red. Use 0 for no exam limit. Marks '
+              'that are already saved are not changed.',
+          style: _hint),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: _numField(_subMin, 'Subject mark - lowest')),
+        const SizedBox(width: 10),
+        Expanded(child: _numField(_top, 'Subject mark - highest')),
+      ]),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(child: _numField(_examMin, 'Exam total - lowest')),
+        const SizedBox(width: 10),
+        Expanded(child: _numField(_examMax, 'Exam total - highest')),
+      ]),
+      const SizedBox(height: 8),
+      _saveButton('Save mark limits', _saveLimits),
     ]);
   }
 
@@ -14947,6 +15022,9 @@ children: [_content(snap.data!, sections)],
 /// Highest mark a subject can have (set in Settings).
 double get kMaxMark => appSettings.value.maxMark;
 
+/// Lowest mark a subject can have (set in Settings > Exams).
+double get kMinMark => appSettings.value.minMark;
+
 String _fmtMark(double n) =>
 n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
 
@@ -15308,8 +15386,22 @@ if (twins[id] != null && raw[twins[id]] != null) raw[twins[id]]!,
 
 /// Saves the marks of many students in one go (an empty map removes the
 /// result of that student).
+/// The highest exam total (Settings > Exams) cannot be exceeded.
+static void _checkTotal(String name, Map<String, double> marks) {
+final top = appSettings.value.examMaxTotal;
+if (top <= 0 || marks.isEmpty) return;
+final total = marks.values.fold(0.0, (a, b) => a + b);
+if (total > top + 1e-9) {
+throw Exception('The total of $name is ${_fmtMark(total)}, more than '
+'the highest exam total (${_fmtMark(top)}).');
+}
+}
+
 Future<void> saveMany(String exam,
 List<(StudentInfo, Map<String, double>)> items) async {
+for (final it in items) {
+_checkTotal(it.$1.name, it.$2);
+}
 Future<void> write(List<(String, String, Map<String, double>)> rows) async {
 for (var i = 0; i < rows.length; i += 400) {
 final batch = _db.batch();
@@ -15364,6 +15456,7 @@ return ResultMarks(_merge(docs));
 
 /// Saves the marks (an empty map removes the result).
 Future<void> save(StudentInfo s, String exam, Map<String, double> marks) async {
+_checkTotal(s.name, marks);
 Future<void> put(String id, String sectionId) {
 final ref = _col.doc(_id(id, exam));
 if (marks.isEmpty) return ref.delete();
@@ -16199,10 +16292,18 @@ fontWeight: FontWeight.w800)),
 ]),
 const SizedBox(height: 2),
 Text(
-'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}',
+'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}'
+'${appSettings.value.examMinTotal > 0 && r.total < appSettings.value.examMinTotal ? ' · below min' : ''}',
 style: TextStyle(
 fontSize: 11.5,
-color: Colors.grey.shade600)),
+fontWeight: appSettings.value.examMinTotal > 0 &&
+r.total < appSettings.value.examMinTotal
+? FontWeight.w700
+    : FontWeight.normal,
+color: appSettings.value.examMinTotal > 0 &&
+r.total < appSettings.value.examMinTotal
+? const Color(0xFFC62828)
+    : Colors.grey.shade600)),
 ],
 ),
 if (!teacherScope.value.isStudent) ...[
@@ -16347,7 +16448,7 @@ bool _isBad(String text) {
 final t = text.trim();
 if (t.isEmpty) return false;
 final v = double.tryParse(t);
-return v == null || v < 0 || v > kMaxMark;
+return v == null || v < kMinMark || v > kMaxMark;
 }
 
 int get _changedRows {
@@ -16376,7 +16477,7 @@ final t = row[sub]!.text.trim();
 if (t != _orig['${s.id}|$sub']) changed = true;
 if (t.isEmpty) continue;
 final v = double.tryParse(t);
-if (v == null || v < 0 || v > kMaxMark) {
+if (v == null || v < kMinMark || v > kMaxMark) {
 bad = true;
 continue;
 }
@@ -16386,7 +16487,7 @@ if (changed) items.add((s, {..._hidden[s.id]!, ...marks}));
 }
 if (bad) {
 setState(() =>
-_error = 'Fix the marks shown in red (0 to ${_fmtMark(kMaxMark)}).');
+_error = 'Fix the marks shown in red (${_fmtMark(kMinMark)} to ${_fmtMark(kMaxMark)}).');
 return;
 }
 if (items.isEmpty) {
@@ -16674,7 +16775,7 @@ bool _isBad(String text) {
 final t = text.trim();
 if (t.isEmpty) return false;
 final v = double.tryParse(t);
-return v == null || v < 0 || v > kMaxMark;
+return v == null || v < kMinMark || v > kMaxMark;
 }
 
 Future<void> _run() async {
@@ -16930,7 +17031,7 @@ _ctrl.forEach((k, c) {
 final t = c.text.trim();
 if (t.isEmpty) return;
 final v = double.tryParse(t);
-if (v == null || v < 0 || v > kMaxMark) {
+if (v == null || v < kMinMark || v > kMaxMark) {
 ok = false;
 } else {
 out[k] = v;
@@ -16942,7 +17043,7 @@ return (marks: out, ok: ok);
 Future<void> _save() async {
 final r = _read();
 if (!r.ok) {
-setState(() => _error = 'Fix the marks shown in red (0 to ${_fmtMark(kMaxMark)}).');
+setState(() => _error = 'Fix the marks shown in red (${_fmtMark(kMinMark)} to ${_fmtMark(kMaxMark)}).');
 return;
 }
 setState(() {
@@ -16994,7 +17095,7 @@ final c = _ctrl[subject]!;
 final t = c.text.trim();
 final v = double.tryParse(t);
 final bad =
-t.isNotEmpty && (v == null || v < 0 || v > kMaxMark);
+t.isNotEmpty && (v == null || v < kMinMark || v > kMaxMark);
 return TextField(
 controller: c,
 enabled: !_saving,
@@ -17008,7 +17109,7 @@ decoration: InputDecoration(
 labelText: subject,
 border: const OutlineInputBorder(),
 isDense: true,
-errorText: bad ? '0–${_fmtMark(kMaxMark)}' : null,
+errorText: bad ? '${_fmtMark(kMinMark)}–${_fmtMark(kMaxMark)}' : null,
 ),
 );
 }),
