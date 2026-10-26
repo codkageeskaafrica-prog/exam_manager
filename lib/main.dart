@@ -11783,10 +11783,19 @@ Widget _summary(List<SectionInfo> secs, List<StudentInfo> visible) {
 final cs = Theme.of(context).colorScheme;
 final secById = {for (final s in secs) s.id: s};
 final formCount = <String, int>{};
+final classCount = <String, int>{}; // "1A" -> students (counted once)
+final classForm = <String, String>{};
+for (final sec in secs) {
+final k = SectionInfo.code(sec.form, sec.classKey);
+classCount.putIfAbsent(k, () => 0);
+classForm[k] = sec.form;
+}
 for (final st in visible) {
 final sec = secById[st.sectionId];
 if (sec == null) continue;
 formCount[sec.form] = (formCount[sec.form] ?? 0) + 1;
+final k = SectionInfo.code(sec.form, sec.classKey);
+classCount[k] = (classCount[k] ?? 0) + 1;
 }
 final noPhone = visible.where((x) => x.phoneText.isEmpty).length;
 final forms = [
@@ -11809,6 +11818,7 @@ Text(text, style: const TextStyle(fontSize: 14)),
 
 return LayoutBuilder(builder: (context, box) {
 final cardW = box.maxWidth < 372 ? box.maxWidth - 32 : 340.0;
+final btnW = (cardW - 28 - 8) / 2;
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
 children: [
@@ -11832,6 +11842,7 @@ color: cs.surface,
 borderRadius: BorderRadius.circular(8),
 border: Border.all(color: cs.outlineVariant)),
 child: Wrap(spacing: 16, runSpacing: 6, children: [
+stat(Icons.school_outlined, '${classCount.length} Classes'),
 stat(Icons.people_alt_outlined, '${visible.length} Students'),
 if (noPhone > 0)
 stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
@@ -11864,6 +11875,34 @@ const Icon(Icons.chevron_right, size: 20),
 ]),
 ),
 ),
+Padding(
+padding: const EdgeInsets.all(14),
+child: Wrap(spacing: 8, runSpacing: 8, children: [
+for (final k in (classCount.keys
+    .where((k) => classForm[k] == f)
+    .toList()
+..sort()))
+SizedBox(
+width: btnW,
+child: OutlinedButton(
+onPressed: () => open(f, k),
+style: OutlinedButton.styleFrom(
+padding: const EdgeInsets.symmetric(
+horizontal: 12, vertical: 12),
+alignment: Alignment.centerLeft),
+child: Row(children: [
+Text(k),
+const SizedBox(width: 6),
+Text('(${classCount[k]})',
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+const Spacer(),
+const Icon(Icons.chevron_right, size: 18),
+]),
+),
+),
+]),
+),
 ]),
 ),
 ),
@@ -11877,10 +11916,33 @@ Widget _page(List<SectionInfo> secs, List<StudentInfo> all) {
 final cs = Theme.of(context).colorScheme;
 final secById = {for (final s in secs) s.id: s};
 // Only students of the sections this person may see.
-final visible = [
+// Each student is counted ONCE. The whole class (1A) holds the student;
+// its sections (1A-A, 1A-B ...) are copies of the same name, so a section
+// student is added only when the whole class does not have that name
+// (a student who exists only in a section is still counted).
+String nameKey(StudentInfo s) {
+final x = secById[s.sectionId]!;
+return '${SectionInfo.code(x.form, x.classKey)}|'
+'${s.name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
+}
+
+final seen = <String>{};
+final visible = <StudentInfo>[];
+final inScope = [
 for (final s in all)
 if (secById.containsKey(s.sectionId)) s,
 ];
+for (final s in inScope) {
+if (!secById[s.sectionId]!.isSub) {
+seen.add(nameKey(s));
+visible.add(s);
+}
+}
+for (final s in inScope) {
+if (secById[s.sectionId]!.isSub && seen.add(nameKey(s))) {
+visible.add(s);
+}
+}
 final forms = [
 for (final f in ExamService.forms)
 if (secs.any((s) => s.form == f)) f,
@@ -15923,13 +15985,142 @@ onTap: onTap,
 ),
 );
 
+/// Summary of the chosen exam: for each subject, how many students have the
+/// mark entered in Form1, Form2, Form3 and Form4, and the totals entered /
+/// not entered.
+Widget _summaryCard(List<SectionInfo> sections, List<StudentInfo> students,
+Map<String, ResultMarks> results) {
+final cs = Theme.of(context).colorScheme;
+final secById = {for (final s in sections) s.id: s};
+final inScope = {
+for (final st in students)
+if (secById.containsKey(st.sectionId)) st.id
+};
+// every student once (a copy in a section of the same class is skipped)
+final people = [
+for (final st in students)
+if (inScope.contains(st.id) && !_isDupCopy(st, _twins, secById, inScope))
+st
+];
+final forms = [
+for (final f in ExamService.forms)
+if (sections.any((x) => x.form == f)) f,
+];
+final subjects = teacherScope.value.subjectList;
+
+// subject -> form -> students with a mark, and subject -> total entered
+final byForm = <String, Map<String, int>>{};
+final entered = <String, int>{};
+for (final sub in subjects) {
+final g = {for (final f in forms) f: 0};
+var e = 0;
+for (final st in people) {
+if (results[st.id]?.marks[sub] == null) continue;
+e++;
+final f = secById[st.sectionId]!.form;
+g[f] = (g[f] ?? 0) + 1;
+}
+byForm[sub] = g;
+entered[sub] = e;
+}
+
+Widget cell(String t,
+{Color? color,
+bool bold = false,
+TextAlign align = TextAlign.center,
+double size = 12.5}) =>
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 3),
+child: Text(t,
+textAlign: align,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: TextStyle(
+fontSize: size,
+color: color,
+fontWeight: bold ? FontWeight.w700 : FontWeight.w500)),
+);
+
+final totalF = {for (final f in forms) f: 0};
+var totalE = 0;
+for (final sub in subjects) {
+for (final f in forms) {
+totalF[f] = totalF[f]! + byForm[sub]![f]!;
+}
+totalE += entered[sub]!;
+}
+final totalAll = people.length * subjects.length;
+
+TableRow row(String name, Map<String, int> g, int e, int n,
+{bool total = false}) =>
+TableRow(
+decoration: total
+? BoxDecoration(color: cs.primaryContainer.withAlpha(70))
+    : null,
+children: [
+cell(name, align: TextAlign.left, bold: total),
+for (final f in forms) cell('${g[f]}', bold: total),
+cell('$e', color: const Color(0xFF2E7D32), bold: true),
+cell('$n', color: const Color(0xFFC62828), bold: true),
+]);
+
+return Card(
+margin: const EdgeInsets.symmetric(vertical: 4),
+child: Padding(
+padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Row(children: [
+Icon(Icons.bar_chart_rounded, color: cs.primary),
+const SizedBox(width: 8),
+const Expanded(
+child: Text('Summary by subject',
+style:
+TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+]),
+const SizedBox(height: 2),
+Text('${_ResultPrefs.exam} · ${_n(people.length, 'student')}',
+style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 8),
+Table(
+columnWidths: {
+0: const FlexColumnWidth(2.4),
+for (var i = 0; i < forms.length; i++)
+i + 1: const FlexColumnWidth(1.3),
+forms.length + 1: const FlexColumnWidth(1.5),
+forms.length + 2: const FlexColumnWidth(1.9),
+},
+defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+border: TableBorder(
+horizontalInside:
+BorderSide(color: Colors.grey.withAlpha(60), width: 0.8)),
+children: [
+TableRow(
+decoration:
+BoxDecoration(color: cs.surfaceContainerHighest.withAlpha(120)),
+children: [
+cell('Subject', align: TextAlign.left, bold: true),
+for (final f in forms) cell(f, bold: true, size: 11.5),
+cell('Entered', bold: true, size: 11.5),
+cell('Not entered', bold: true, size: 11.5),
+]),
+for (final sub in subjects)
+row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!),
+row('Total', totalF, totalE, totalAll - totalE, total: true),
+],
+),
+]),
+),
+);
+}
+
 Widget _hint(String text) => Padding(
 padding: const EdgeInsets.all(32),
 child: Center(child: Text(text, textAlign: TextAlign.center)),
 );
 
 Widget _body(List<SectionInfo> sections, List<StudentInfo> students,
-Map<String, ResultMarks> results) {
+Map<String, ResultMarks> results,
+{Widget? summary}) {
 final count = <String, int>{};
 for (final s in students) {
 count[s.sectionId] = (count[s.sectionId] ?? 0) + 1;
@@ -15996,6 +16187,7 @@ _n(countOf(sections), 'student'),
 null,
 extra: status(sections, 'School'),
 ),
+if (summary != null && _query.trim().isEmpty) summary,
 if (searching) ...[
 if (found.isEmpty) _hint('No student matches "${_query.trim()}".'),
 for (final s in found.take(60))
@@ -16136,25 +16328,11 @@ buildDocx: _buildReportDocx,
 ),
 ],
 ),
-body: Align(
-alignment: Alignment.topCenter,
-child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 720),
-child: Column(children: [
-if (widget.form == null)
-Padding(
-padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-child: Column(children: [
-_ExamPicker(
-value: _ResultPrefs.exam,
-onChanged: (v) => setState(() => _ResultPrefs.exam = v),
-),
-const SizedBox(height: 10),
-_searchField(_q, (v) => setState(() => _query = v)),
-]),
-),
-Expanded(
-child: StreamBuilder<List<SectionInfo>>(
+body: LayoutBuilder(builder: (context, box) {
+final level1 = widget.form == null && !teacherScope.value.isStudent;
+// wide screen: the summary goes in the empty space on the right
+final wide = level1 && box.maxWidth >= 1500;
+Widget content() => StreamBuilder<List<SectionInfo>>(
 stream: _secStream,
 builder: (context, secSnap) => StreamBuilder<List<StudentInfo>>(
 stream: _stuStream,
@@ -16163,24 +16341,76 @@ StreamBuilder<Map<String, ResultMarks>>(
 stream: _resStream,
 builder: (context, resSnap) {
 if (secSnap.hasError || stuSnap.hasError) {
-return _hint(
-'Error: ${secSnap.error ?? stuSnap.error}');
+return _hint('Error: ${secSnap.error ?? stuSnap.error}');
 }
 if (!secSnap.hasData ||
 !stuSnap.hasData ||
 (!resSnap.hasData && !resSnap.hasError)) {
 return const Center(child: CircularProgressIndicator());
 }
-return _body(secSnap.data!, stuSnap.data!,
-resSnap.data ?? const <String, ResultMarks>{});
+final res =
+resSnap.data ?? const <String, ResultMarks>{};
+final card = level1 && secSnap.data!.isNotEmpty
+? _summaryCard(secSnap.data!, stuSnap.data!, res)
+    : null;
+final main = _body(secSnap.data!, stuSnap.data!, res,
+summary: wide ? null : card);
+if (!wide || card == null) return main;
+return Row(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Expanded(child: SizedBox()),
+SizedBox(width: 720, child: main),
+Expanded(
+child: SingleChildScrollView(
+padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+child: Align(
+alignment: Alignment.topLeft,
+child: ConstrainedBox(
+constraints:
+const BoxConstraints(maxWidth: 560),
+child: card),
+),
+),
+),
+],
+);
 },
 ),
 ),
+);
+return Column(children: [
+if (widget.form == null)
+Align(
+alignment: Alignment.topCenter,
+child: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 720),
+child: Padding(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+child: Column(children: [
+_ExamPicker(
+value: _ResultPrefs.exam,
+onChanged: (v) =>
+setState(() => _ResultPrefs.exam = v),
 ),
-),
+const SizedBox(height: 10),
+_searchField(_q, (v) => setState(() => _query = v)),
 ]),
 ),
 ),
+),
+Expanded(
+child: wide
+? content()
+    : Align(
+alignment: Alignment.topCenter,
+child: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 720),
+child: content()),
+),
+),
+]);
+}),
 );
 }
 }
