@@ -11279,7 +11279,8 @@ class _StudentsScreenState extends State<StudentsScreen> {
   late final Stream<List<StudentInfo>> _studentsStream =
   _service.watchAllStudents();
   String _form = 'All';
-  String _classId = 'All';
+  String _classKey = ''; // e.g. "1B" (all sections of the class), '' = every class
+  bool _showList = false; // false = totals page, true = list of students
   bool _busy = false;
 
   @override
@@ -11776,6 +11777,141 @@ class _StudentsScreenState extends State<StudentsScreen> {
     );
   }
 
+// Totals page: whole school, each form and each class. Tap a form or a
+// class (or "Show all students") to open the list of students.
+  Widget _summary(List<SectionInfo> secs, List<StudentInfo> visible) {
+    final cs = Theme.of(context).colorScheme;
+    final secById = {for (final s in secs) s.id: s};
+    final formCount = <String, int>{};
+    final classCount = <String, int>{}; // e.g. "1B" (its sections add up)
+    final classForm = <String, String>{};
+    for (final st in visible) {
+      final sec = secById[st.sectionId];
+      if (sec == null) continue;
+      formCount[sec.form] = (formCount[sec.form] ?? 0) + 1;
+      final cKey = SectionInfo.code(sec.form, sec.classKey);
+      classCount[cKey] = (classCount[cKey] ?? 0) + 1;
+    }
+    for (final sec in secs) {
+      final cKey = SectionInfo.code(sec.form, sec.classKey);
+      classCount.putIfAbsent(cKey, () => 0);
+      classForm[cKey] = sec.form;
+    }
+    final noPhone = visible.where((x) => x.phoneText.isEmpty).length;
+    final forms = [
+      for (final f in ExamService.forms)
+        if (secs.any((s) => s.form == f)) f,
+    ];
+
+    void open(String form, String classKey) => setState(() {
+      _showList = true;
+      _form = form;
+      _classKey = classKey;
+    });
+
+    Widget stat(IconData icon, String text) =>
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 18, color: cs.primary),
+          const SizedBox(width: 6),
+          Text(text, style: const TextStyle(fontSize: 14)),
+        ]);
+
+    return LayoutBuilder(builder: (context, box) {
+      final cardW = box.maxWidth < 372 ? box.maxWidth - 32 : 340.0;
+      final btnW = (cardW - 28 - 8) / 2;
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => open('All', ''),
+              icon: const Icon(Icons.groups_2_outlined),
+              label: const Text('Show all students',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+          ),
+          const Divider(height: 1),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                  color: cs.surface,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: cs.outlineVariant)),
+              child: Wrap(spacing: 16, runSpacing: 6, children: [
+                stat(Icons.school_outlined, '${classCount.length} Classes'),
+                stat(Icons.people_alt_outlined, '${visible.length} Students'),
+                if (noPhone > 0)
+                  stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(spacing: 12, runSpacing: 12, children: [
+            for (final f in forms)
+              SizedBox(
+                width: cardW,
+                child: Card(
+                  margin: EdgeInsets.zero,
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    InkWell(
+                      onTap: () => open(f, ''),
+                      child: Container(
+                        color: cs.primaryContainer.withOpacity(0.35),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 14),
+                        child: Row(children: [
+                          Text(f, style: const TextStyle(fontSize: 14.5)),
+                          const SizedBox(width: 6),
+                          Text('(${formCount[f] ?? 0})',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.black54)),
+                          const Spacer(),
+                          const Icon(Icons.chevron_right, size: 20),
+                        ]),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Wrap(spacing: 8, runSpacing: 8, children: [
+                        for (final k in (classCount.keys
+                            .where((k) => classForm[k] == f)
+                            .toList()
+                          ..sort()))
+                          SizedBox(
+                            width: btnW,
+                            child: OutlinedButton(
+                              onPressed: () => open(f, k),
+                              style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 12),
+                                  alignment: Alignment.centerLeft),
+                              child: Row(children: [
+                                Text(k),
+                                const SizedBox(width: 6),
+                                Text('(${classCount[k]})',
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.black54)),
+                                const Spacer(),
+                                const Icon(Icons.chevron_right, size: 18),
+                              ]),
+                            ),
+                          ),
+                      ]),
+                    ),
+                  ]),
+                ),
+              ),
+          ]),
+        ],
+      );
+    });
+  }
+
   Widget _page(List<SectionInfo> secs, List<StudentInfo> all) {
     final cs = Theme.of(context).colorScheme;
     final secById = {for (final s in secs) s.id: s};
@@ -11789,18 +11925,20 @@ class _StudentsScreenState extends State<StudentsScreen> {
         if (secs.any((s) => s.form == f)) f,
     ];
     final form = forms.contains(_form) ? _form : 'All';
-    final classOptions = [
-      for (final s in secs)
-        if (form == 'All' || s.form == form) s,
-    ];
-    final classId =
-    classOptions.any((s) => s.id == _classId) ? _classId : 'All';
+    final classKey = _classKey;
     final q = _search.text.trim().toLowerCase();
+    final listMode = _showList || q.isNotEmpty;
+    final filterTitle = classKey.isNotEmpty
+        ? 'Class $classKey'
+        : (form != 'All' ? form : 'All students');
 
     final shown = [
       for (final s in visible)
         if ((form == 'All' || secById[s.sectionId]!.form == form) &&
-            (classId == 'All' || s.sectionId == classId) &&
+            (classKey.isEmpty ||
+                SectionInfo.code(secById[s.sectionId]!.form,
+                    secById[s.sectionId]!.classKey) ==
+                    classKey) &&
             (q.isEmpty ||
                 s.name.toLowerCase().contains(q) ||
                 s.phoneText.replaceAll(' ', '').contains(q.replaceAll(' ', '')) ||
@@ -11817,11 +11955,19 @@ class _StudentsScreenState extends State<StudentsScreen> {
           : a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
 
+    final presetMatches = classKey.isEmpty
+        ? <SectionInfo>[]
+        : secs
+        .where((x) => SectionInfo.code(x.form, x.classKey) == classKey)
+        .toList();
+    final String? presetId =
+    presetMatches.isEmpty ? null : presetMatches.first.id;
+
     return _frame(
       Align(
         alignment: Alignment.topCenter,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
+          constraints: BoxConstraints(maxWidth: listMode ? 760 : 1100),
           child: Column(children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -11842,63 +11988,46 @@ class _StudentsScreenState extends State<StudentsScreen> {
                 ),
               ),
             ),
-            if (forms.isNotEmpty)
+            if (_showList)
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(children: [
-                    for (final f in ['All', ...forms])
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: ChoiceChip(
-                          label: Text(f == 'All' ? 'All forms' : f),
-                          selected: form == f,
-                          onSelected: (_) => setState(() {
-                            _form = f;
-                            _classId = 'All';
-                          }),
-                        ),
-                      ),
-                  ]),
+                padding: const EdgeInsets.fromLTRB(8, 4, 16, 0),
+                child: Row(children: [
+                  TextButton.icon(
+                    onPressed: () => setState(() {
+                      _showList = false;
+                      _form = 'All';
+                      _classKey = '';
+                      _search.clear();
+                    }),
+                    icon: const Icon(Icons.arrow_back, size: 18),
+                    label: const Text('Back to classes'),
+                  ),
+                  const Spacer(),
+                  Text(filterTitle,
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w700)),
+                ]),
+              ),
+            if (listMode)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                      shown.length == visible.length
+                          ? '${visible.length} student'
+                          '${visible.length == 1 ? '' : 's'}'
+                          '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}'
+                          : '${shown.length} of ${visible.length} students'
+                          '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}',
+                      style:
+                      const TextStyle(fontSize: 12, color: Colors.black54)),
                 ),
               ),
-            if (classOptions.length > 1)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: DropdownButtonFormField<String>(
-                  value: classId,
-                  isDense: true,
-                  decoration: const InputDecoration(
-                      labelText: 'Class / section',
-                      border: OutlineInputBorder(),
-                      isDense: true),
-                  items: [
-                    const DropdownMenuItem(
-                        value: 'All', child: Text('All classes')),
-                    for (final s in classOptions)
-                      DropdownMenuItem(value: s.id, child: Text(s.fullName)),
-                  ],
-                  onChanged: (v) => setState(() => _classId = v ?? 'All'),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                    shown.length == visible.length
-                        ? '${visible.length} student'
-                        '${visible.length == 1 ? '' : 's'}'
-                        '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}'
-                        : '${shown.length} of ${visible.length} students'
-                        '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}',
-                    style:
-                    const TextStyle(fontSize: 12, color: Colors.black54)),
-              ),
-            ),
             Expanded(
-              child: shown.isEmpty
+              child: !listMode
+                  ? _summary(secs, visible)
+                  : shown.isEmpty
                   ? Center(
                 child: Padding(
                   padding: const EdgeInsets.all(24),
@@ -12049,7 +12178,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
       ],
       fab: FloatingActionButton.extended(
         onPressed: () =>
-            _add(secs, all, classId == 'All' ? null : classId),
+            _add(secs, all, presetId),
         icon: const Icon(Icons.person_add),
         label: const Text('Add'),
       ),
