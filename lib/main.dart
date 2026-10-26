@@ -11783,19 +11783,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
     final cs = Theme.of(context).colorScheme;
     final secById = {for (final s in secs) s.id: s};
     final formCount = <String, int>{};
-    final classCount = <String, int>{}; // e.g. "1B" (its sections add up)
-    final classForm = <String, String>{};
     for (final st in visible) {
       final sec = secById[st.sectionId];
       if (sec == null) continue;
       formCount[sec.form] = (formCount[sec.form] ?? 0) + 1;
-      final cKey = SectionInfo.code(sec.form, sec.classKey);
-      classCount[cKey] = (classCount[cKey] ?? 0) + 1;
-    }
-    for (final sec in secs) {
-      final cKey = SectionInfo.code(sec.form, sec.classKey);
-      classCount.putIfAbsent(cKey, () => 0);
-      classForm[cKey] = sec.form;
     }
     final noPhone = visible.where((x) => x.phoneText.isEmpty).length;
     final forms = [
@@ -11818,7 +11809,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
 
     return LayoutBuilder(builder: (context, box) {
       final cardW = box.maxWidth < 372 ? box.maxWidth - 32 : 340.0;
-      final btnW = (cardW - 28 - 8) / 2;
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
         children: [
@@ -11842,7 +11832,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: cs.outlineVariant)),
               child: Wrap(spacing: 16, runSpacing: 6, children: [
-                stat(Icons.school_outlined, '${classCount.length} Classes'),
                 stat(Icons.people_alt_outlined, '${visible.length} Students'),
                 if (noPhone > 0)
                   stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
@@ -11875,34 +11864,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
                         ]),
                       ),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Wrap(spacing: 8, runSpacing: 8, children: [
-                        for (final k in (classCount.keys
-                            .where((k) => classForm[k] == f)
-                            .toList()
-                          ..sort()))
-                          SizedBox(
-                            width: btnW,
-                            child: OutlinedButton(
-                              onPressed: () => open(f, k),
-                              style: OutlinedButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 12),
-                                  alignment: Alignment.centerLeft),
-                              child: Row(children: [
-                                Text(k),
-                                const SizedBox(width: 6),
-                                Text('(${classCount[k]})',
-                                    style: const TextStyle(
-                                        fontSize: 12, color: Colors.black54)),
-                                const Spacer(),
-                                const Icon(Icons.chevron_right, size: 18),
-                              ]),
-                            ),
-                          ),
-                      ]),
-                    ),
                   ]),
                 ),
               ),
@@ -11916,29 +11877,10 @@ class _StudentsScreenState extends State<StudentsScreen> {
     final cs = Theme.of(context).colorScheme;
     final secById = {for (final s in secs) s.id: s};
 // Only students of the sections this person may see.
-// A student who is also saved in a section of his class (1A and 1A-A)
-// is ONE student: count him once per class (same name = same student,
-// the upload already refuses the same name twice in one class).
-    final uniq = <String, StudentInfo>{};
-    for (final s in all) {
-      final sec = secById[s.sectionId];
-      if (sec == null) continue;
-      final key = '${SectionInfo.code(sec.form, sec.classKey)}|'
-          '${s.name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
-      final old = uniq[key];
-      if (old == null) {
-        uniq[key] = s;
-        continue;
-      }
-// keep the better copy: the one in the whole class, then the one with a phone
-      final oldSub = secById[old.sectionId]!.isSub;
-      final newSub = sec.isSub;
-      if ((oldSub && !newSub) ||
-          (oldSub == newSub && old.phoneText.isEmpty && s.phoneText.isNotEmpty)) {
-        uniq[key] = s;
-      }
-    }
-    final visible = uniq.values.toList();
+    final visible = [
+      for (final s in all)
+        if (secById.containsKey(s.sectionId)) s,
+    ];
     final forms = [
       for (final f in ExamService.forms)
         if (secs.any((s) => s.form == f)) f,
