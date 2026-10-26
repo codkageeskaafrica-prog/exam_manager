@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
@@ -11278,7 +11279,8 @@ _service.watchSections();
 late final Stream<List<StudentInfo>> _studentsStream =
 _service.watchAllStudents();
 String _form = 'All';
-String _classId = 'All';
+String _classKey = ''; // e.g. "1B" (all sections of the class), '' = every class
+bool _showList = false; // false = totals page, true = list of students
 bool _busy = false;
 
 @override
@@ -11775,6 +11777,102 @@ return _page(secSnap.data!, stuSnap.data!);
 );
 }
 
+// Totals page: whole school, each form and each class. Tap a form or a
+// class (or "Show all students") to open the list of students.
+Widget _summary(List<SectionInfo> secs, List<StudentInfo> visible) {
+final cs = Theme.of(context).colorScheme;
+final secById = {for (final s in secs) s.id: s};
+final formCount = <String, int>{};
+for (final st in visible) {
+final sec = secById[st.sectionId];
+if (sec == null) continue;
+formCount[sec.form] = (formCount[sec.form] ?? 0) + 1;
+}
+final noPhone = visible.where((x) => x.phoneText.isEmpty).length;
+final forms = [
+for (final f in ExamService.forms)
+if (secs.any((s) => s.form == f)) f,
+];
+
+void open(String form, String classKey) => setState(() {
+_showList = true;
+_form = form;
+_classKey = classKey;
+});
+
+Widget stat(IconData icon, String text) =>
+Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(icon, size: 18, color: cs.primary),
+const SizedBox(width: 6),
+Text(text, style: const TextStyle(fontSize: 14)),
+]);
+
+return LayoutBuilder(builder: (context, box) {
+final cardW = box.maxWidth < 372 ? box.maxWidth - 32 : 340.0;
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+children: [
+Align(
+alignment: Alignment.centerLeft,
+child: TextButton.icon(
+onPressed: () => open('All', ''),
+icon: const Icon(Icons.groups_2_outlined),
+label: const Text('Show all students',
+style: TextStyle(fontWeight: FontWeight.w600)),
+),
+),
+const Divider(height: 1),
+const SizedBox(height: 10),
+Align(
+alignment: Alignment.centerLeft,
+child: Container(
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+decoration: BoxDecoration(
+color: cs.surface,
+borderRadius: BorderRadius.circular(8),
+border: Border.all(color: cs.outlineVariant)),
+child: Wrap(spacing: 16, runSpacing: 6, children: [
+stat(Icons.people_alt_outlined, '${visible.length} Students'),
+if (noPhone > 0)
+stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
+]),
+),
+),
+const SizedBox(height: 12),
+Wrap(spacing: 12, runSpacing: 12, children: [
+for (final f in forms)
+SizedBox(
+width: cardW,
+child: Card(
+margin: EdgeInsets.zero,
+clipBehavior: Clip.antiAlias,
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+InkWell(
+onTap: () => open(f, ''),
+child: Container(
+color: cs.primaryContainer.withOpacity(0.35),
+padding: const EdgeInsets.symmetric(
+horizontal: 14, vertical: 14),
+child: Row(children: [
+Text(f, style: const TextStyle(fontSize: 14.5)),
+const SizedBox(width: 6),
+Text('(${formCount[f] ?? 0})',
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+const Spacer(),
+const Icon(Icons.chevron_right, size: 20),
+]),
+),
+),
+]),
+),
+),
+]),
+],
+);
+});
+}
+
 Widget _page(List<SectionInfo> secs, List<StudentInfo> all) {
 final cs = Theme.of(context).colorScheme;
 final secById = {for (final s in secs) s.id: s};
@@ -11788,18 +11886,20 @@ for (final f in ExamService.forms)
 if (secs.any((s) => s.form == f)) f,
 ];
 final form = forms.contains(_form) ? _form : 'All';
-final classOptions = [
-for (final s in secs)
-if (form == 'All' || s.form == form) s,
-];
-final classId =
-classOptions.any((s) => s.id == _classId) ? _classId : 'All';
+final classKey = _classKey;
 final q = _search.text.trim().toLowerCase();
+final listMode = _showList || q.isNotEmpty;
+final filterTitle = classKey.isNotEmpty
+? 'Class $classKey'
+    : (form != 'All' ? form : 'All students');
 
 final shown = [
 for (final s in visible)
 if ((form == 'All' || secById[s.sectionId]!.form == form) &&
-(classId == 'All' || s.sectionId == classId) &&
+(classKey.isEmpty ||
+SectionInfo.code(secById[s.sectionId]!.form,
+secById[s.sectionId]!.classKey) ==
+classKey) &&
 (q.isEmpty ||
 s.name.toLowerCase().contains(q) ||
 s.phoneText.replaceAll(' ', '').contains(q.replaceAll(' ', '')) ||
@@ -11816,11 +11916,19 @@ return c != 0
     : a.name.toLowerCase().compareTo(b.name.toLowerCase());
 });
 
+final presetMatches = classKey.isEmpty
+? <SectionInfo>[]
+    : secs
+    .where((x) => SectionInfo.code(x.form, x.classKey) == classKey)
+    .toList();
+final String? presetId =
+presetMatches.isEmpty ? null : presetMatches.first.id;
+
 return _frame(
 Align(
 alignment: Alignment.topCenter,
 child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 760),
+constraints: BoxConstraints(maxWidth: listMode ? 760 : 1100),
 child: Column(children: [
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -11841,46 +11949,27 @@ isDense: true,
 ),
 ),
 ),
-if (forms.isNotEmpty)
+if (_showList)
 Padding(
-padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-child: SingleChildScrollView(
-scrollDirection: Axis.horizontal,
+padding: const EdgeInsets.fromLTRB(8, 4, 16, 0),
 child: Row(children: [
-for (final f in ['All', ...forms])
-Padding(
-padding: const EdgeInsets.only(right: 8),
-child: ChoiceChip(
-label: Text(f == 'All' ? 'All forms' : f),
-selected: form == f,
-onSelected: (_) => setState(() {
-_form = f;
-_classId = 'All';
+TextButton.icon(
+onPressed: () => setState(() {
+_showList = false;
+_form = 'All';
+_classKey = '';
+_search.clear();
 }),
+icon: const Icon(Icons.arrow_back, size: 18),
+label: const Text('Back to classes'),
 ),
-),
+const Spacer(),
+Text(filterTitle,
+style: const TextStyle(
+fontSize: 14, fontWeight: FontWeight.w700)),
 ]),
 ),
-),
-if (classOptions.length > 1)
-Padding(
-padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-child: DropdownButtonFormField<String>(
-value: classId,
-isDense: true,
-decoration: const InputDecoration(
-labelText: 'Class / section',
-border: OutlineInputBorder(),
-isDense: true),
-items: [
-const DropdownMenuItem(
-value: 'All', child: Text('All classes')),
-for (final s in classOptions)
-DropdownMenuItem(value: s.id, child: Text(s.fullName)),
-],
-onChanged: (v) => setState(() => _classId = v ?? 'All'),
-),
-),
+if (listMode)
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
 child: Align(
@@ -11897,7 +11986,9 @@ const TextStyle(fontSize: 12, color: Colors.black54)),
 ),
 ),
 Expanded(
-child: shown.isEmpty
+child: !listMode
+? _summary(secs, visible)
+    : shown.isEmpty
 ? Center(
 child: Padding(
 padding: const EdgeInsets.all(24),
@@ -12048,7 +12139,7 @@ const SizedBox(width: 8),
 ],
 fab: FloatingActionButton.extended(
 onPressed: () =>
-_add(secs, all, classId == 'All' ? null : classId),
+_add(secs, all, presetId),
 icon: const Icon(Icons.person_add),
 label: const Text('Add'),
 ),
@@ -14330,6 +14421,24 @@ color: t.a > 0 ? kRed : Colors.grey.shade500)),
 );
 }
 
+Future<void> _callPhone(String raw) async {
+var number = raw.replaceAll(RegExp(r'[^0-9+]'), '');
+if (number.isEmpty) return;
+// Somalia numbers saved without "+": add it so the dialer accepts them
+if (!number.startsWith('+') && number.startsWith('252')) {
+number = '+$number';
+}
+final uri = Uri(scheme: 'tel', path: number);
+var ok = false;
+try {
+ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+} catch (_) {}
+if (!ok && mounted) {
+ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+content: Text('Could not open the phone dialer')));
+}
+}
+
 Widget _attention(List<MapEntry<String, _Tally>> list,
 Map<String, StudentInfo> students, Map<String, String> secLabel) {
 final isDay = _period == _Period.day;
@@ -14341,7 +14450,7 @@ child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 Row(children: [
 const Icon(Icons.warning_amber_rounded, size: 20, color: kRed),
 const SizedBox(width: 8),
-Text(isDay ? 'Absent students' : 'Needs attention',
+Text(isDay ? 'Absent students' : 'Absent students (${list.length})',
 style:
 const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
 ]),
@@ -14349,7 +14458,7 @@ const SizedBox(height: 2),
 Text(
 isDay
 ? 'Students who were absent on this day'
-    : 'Students with the most absences in this period',
+    : 'All students absent in this period, most absences first',
 style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
 const SizedBox(height: 4),
 if (list.isEmpty)
@@ -14378,21 +14487,15 @@ if (students[e.key]!.phoneText.isNotEmpty)
 '📞 ${students[e.key]!.phoneText}',
 ].join('   '),
 style: const TextStyle(fontSize: 12.5)),
-// tap = copy the phone number, to call or message the family
+// tap = open the phone dialer with the number ready to call
 onTap: students[e.key]!.phoneText.isEmpty
 ? null
-    : () async {
-await Clipboard.setData(ClipboardData(
-text: students[e.key]!.phones.isNotEmpty
+    : () => _callPhone(
+students[e.key]!.phones.isNotEmpty
 ? students[e.key]!.phones.first
-    : students[e.key]!.phone));
-if (!mounted) return;
-ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-duration: const Duration(seconds: 2),
-content: Text(
-'Copied ${students[e.key]!.name}\'s phone number')));
-},
-trailing: Text('Absent ${e.value.a}',
+    : students[e.key]!.phone),
+trailing: Text(
+'Absent ${e.value.a} ${e.value.a == 1 ? 'day' : 'days'}',
 style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
 ),
 ]),
@@ -14503,7 +14606,13 @@ for (final e in byStudent.entries)
 if (data.students.containsKey(e.key) &&
 e.value.a > 0)
 e,
-]..sort((x, y) => y.value.a.compareTo(x.value.a));
+]..sort((x, y) {
+final c = y.value.a.compareTo(x.value.a);
+if (c != 0) return c;
+return data.students[x.key]!.name
+    .toLowerCase()
+    .compareTo(data.students[y.key]!.name.toLowerCase());
+});
 // The daily list of absent students is ordered by class: Form1 first,
 // then 1A, 1B, 1C... and the sections of a class (1A-A, 1A-B...), and by
 // name inside a section. The weekly / monthly list stays by most absences.
@@ -14530,7 +14639,8 @@ c = data.students[x.key]!.name
 return c;
 });
 }
-final attShown = _period == _Period.day ? att : att.take(10).toList();
+// Daily, weekly and monthly: list EVERY absent student (no top-10 cut)
+final attShown = att;
 
 return _Analysis(overall, registerCount, dayRows, subjectRows, sectionRows,
 attShown, insights);
@@ -14654,7 +14764,9 @@ if (_section == _all && a.sectionRows.isNotEmpty)
 _ExTable('By section', ['Section', ...head.skip(1)],
 [for (final r in a.sectionRows) line(r)], w),
 _ExTable(
-isDay ? 'Absent students' : 'Needs attention (most absences)',
+isDay
+? 'Absent students (${a.attention.length})'
+    : 'Absent students - total absences each (${a.attention.length})',
 ['#', 'Student', 'Section', 'Phone', 'Absent'],
 [
 for (var i = 0; i < a.attention.length; i++)
