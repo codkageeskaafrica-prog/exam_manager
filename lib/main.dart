@@ -14360,7 +14360,7 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
           Row(children: [
             const Icon(Icons.warning_amber_rounded, size: 20, color: kRed),
             const SizedBox(width: 8),
-            Text(isDay ? 'Absent students' : 'Needs attention',
+            Text(isDay ? 'Absent students' : 'Absent students (${list.length})',
                 style:
                 const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
           ]),
@@ -14368,7 +14368,7 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
           Text(
               isDay
                   ? 'Students who were absent on this day'
-                  : 'Students with the most absences in this period',
+                  : 'All students absent in this period, most absences first',
               style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600)),
           const SizedBox(height: 4),
           if (list.isEmpty)
@@ -14404,7 +14404,8 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
                   students[e.key]!.phones.isNotEmpty
                       ? students[e.key]!.phones.first
                       : students[e.key]!.phone),
-              trailing: Text('Absent ${e.value.a}',
+              trailing: Text(
+                  'Absent ${e.value.a} ${e.value.a == 1 ? 'day' : 'days'}',
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
             ),
         ]),
@@ -14515,7 +14516,13 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
         if (data.students.containsKey(e.key) &&
             e.value.a > 0)
           e,
-    ]..sort((x, y) => y.value.a.compareTo(x.value.a));
+    ]..sort((x, y) {
+      final c = y.value.a.compareTo(x.value.a);
+      if (c != 0) return c;
+      return data.students[x.key]!.name
+          .toLowerCase()
+          .compareTo(data.students[y.key]!.name.toLowerCase());
+    });
 // The daily list of absent students is ordered by class: Form1 first,
 // then 1A, 1B, 1C... and the sections of a class (1A-A, 1A-B...), and by
 // name inside a section. The weekly / monthly list stays by most absences.
@@ -14542,7 +14549,8 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
         return c;
       });
     }
-    final attShown = _period == _Period.day ? att : att.take(10).toList();
+// Daily, weekly and monthly: list EVERY absent student (no top-10 cut)
+    final attShown = att;
 
     return _Analysis(overall, registerCount, dayRows, subjectRows, sectionRows,
         attShown, insights);
@@ -14666,7 +14674,9 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
           _ExTable('By section', ['Section', ...head.skip(1)],
               [for (final r in a.sectionRows) line(r)], w),
         _ExTable(
-          isDay ? 'Absent students' : 'Needs attention (most absences)',
+          isDay
+              ? 'Absent students (${a.attention.length})'
+              : 'Absent students - total absences each (${a.attention.length})',
           ['#', 'Student', 'Section', 'Phone', 'Absent'],
           [
             for (var i = 0; i < a.attention.length; i++)
