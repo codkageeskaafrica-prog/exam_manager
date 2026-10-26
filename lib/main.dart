@@ -11916,10 +11916,29 @@ class _StudentsScreenState extends State<StudentsScreen> {
     final cs = Theme.of(context).colorScheme;
     final secById = {for (final s in secs) s.id: s};
 // Only students of the sections this person may see.
-    final visible = [
-      for (final s in all)
-        if (secById.containsKey(s.sectionId)) s,
-    ];
+// A student who is also saved in a section of his class (1A and 1A-A)
+// is ONE student: count him once per class (same name = same student,
+// the upload already refuses the same name twice in one class).
+    final uniq = <String, StudentInfo>{};
+    for (final s in all) {
+      final sec = secById[s.sectionId];
+      if (sec == null) continue;
+      final key = '${SectionInfo.code(sec.form, sec.classKey)}|'
+          '${s.name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
+      final old = uniq[key];
+      if (old == null) {
+        uniq[key] = s;
+        continue;
+      }
+// keep the better copy: the one in the whole class, then the one with a phone
+      final oldSub = secById[old.sectionId]!.isSub;
+      final newSub = sec.isSub;
+      if ((oldSub && !newSub) ||
+          (oldSub == newSub && old.phoneText.isEmpty && s.phoneText.isNotEmpty)) {
+        uniq[key] = s;
+      }
+    }
+    final visible = uniq.values.toList();
     final forms = [
       for (final f in ExamService.forms)
         if (secs.any((s) => s.form == f)) f,
