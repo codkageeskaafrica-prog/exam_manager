@@ -15605,6 +15605,22 @@ double minMarkOf(String exam) => appSettings.value.limitsFor(exam).minMark;
 String _fmtMark(double n) =>
 n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
 
+/// "Chemistry 5 · Geography 14": how many of these students were absent in
+/// EACH subject (never one lump across subjects). Empty when nobody was.
+String _absentBySubject(
+Iterable<String> studentIds, Map<String, Set<String>> absent) {
+final c = <String, int>{};
+for (final id in studentIds) {
+for (final sub in absent[id] ?? const <String>{}) {
+c[sub] = (c[sub] ?? 0) + 1;
+}
+}
+return [
+for (final sub in teacherScope.value.subjectList)
+if ((c[sub] ?? 0) > 0) '$sub ${c[sub]}'
+].join(' · ');
+}
+
 /// Shown (not saved) in a mark box when attendance says the student was absent
 /// in that subject. It is never a mark, so totals and averages ignore it.
 const kAbsentText = 'Absent';
@@ -16258,6 +16274,21 @@ for (final sub in subjects)
 sub: people.where((st) => absent[st.id]?.contains(sub) ?? false).length,
 };
 final totalAbsent = absentBy.values.fold<int>(0, (a, b) => a + b);
+// subject -> form -> students absent (e.g. Chemistry · Form1)
+final absentForm = <String, Map<String, int>>{};
+for (final sub in subjects) {
+final g = {for (final f in forms) f: 0};
+for (final st in people) {
+if (!(absent[st.id]?.contains(sub) ?? false)) continue;
+final f = secById[st.sectionId]!.form;
+g[f] = (g[f] ?? 0) + 1;
+}
+absentForm[sub] = g;
+}
+final totalAF = {
+for (final f in forms)
+f: absentForm.values.fold<int>(0, (a, m) => a + (m[f] ?? 0))
+};
 
 // days left to return the results of one subject (exam date + N days)
 Widget deadlineCell(String sub, int notEntered) {
@@ -16279,7 +16310,24 @@ final t = left < 0
 return cell(t, color: c, bold: true, size: 12);
 }
 
+// entered count of a form, with the absent count of that subject + form
+// under it in orange
+Widget formCell(int n, int ab, bool total) => ab == 0
+? cell('$n', bold: total)
+    : Column(mainAxisSize: MainAxisSize.min, children: [
+cell('$n', bold: total),
+Padding(
+padding: const EdgeInsets.only(bottom: 5),
+child: Text('$ab absent',
+maxLines: 1,
+style: const TextStyle(
+fontSize: 10,
+fontWeight: FontWeight.w700,
+color: Color(0xFFE67E22)))),
+]);
+
 TableRow row(String name, Map<String, int> g, int e, int n, int ab,
+Map<String, int> ag,
 {bool total = false}) =>
 TableRow(
 decoration: total
@@ -16287,7 +16335,7 @@ decoration: total
     : null,
 children: [
 cell(name, align: TextAlign.left, bold: total),
-for (final f in forms) cell('${g[f]}', bold: total),
+for (final f in forms) formCell(g[f]!, ag[f] ?? 0, total),
 cell('$e', color: const Color(0xFF2E7D32), bold: true),
 cell('$n', color: const Color(0xFFC62828), bold: true),
 cell('$ab', color: const Color(0xFFE67E22), bold: true),
@@ -16341,8 +16389,9 @@ if (deadlines) cell('Days left', bold: true, size: 11.5),
 ]),
 for (final sub in subjects)
 row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!,
-absentBy[sub]!),
-row('Total', totalF, totalE, totalAll - totalE, totalAbsent, total: true),
+absentBy[sub]!, absentForm[sub]!),
+row('Total', totalF, totalE, totalAll - totalE, totalAbsent, totalAF,
+total: true),
 ],
 ),
 ]),
@@ -16920,7 +16969,7 @@ super.dispose();
 /// Tap "entered" / "not entered" to open the students of that scope,
 /// filtered.
 Widget _statusLine(int entered, int notEntered,
-{void Function(int filter)? onTap, int? absent}) {
+{void Function(int filter)? onTap, String? absent}) {
 Widget part(String text, Color c, int filter) => InkWell(
 onTap: onTap == null ? null : () => onTap(filter),
 borderRadius: BorderRadius.circular(6),
@@ -16937,13 +16986,13 @@ decoration: onTap == null
 decorationColor: c.withAlpha(110))),
 ),
 );
-return Row(mainAxisSize: MainAxisSize.min, children: [
+return Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
 part('$entered entered', const Color(0xFF2E7D32), 1),
 const Text(' · ', style: TextStyle(color: Colors.grey)),
 part('$notEntered not entered', const Color(0xFFC62828), 2),
-if (absent != null) ...[
+if (absent != null && absent.isNotEmpty) ...[
 const Text(' · ', style: TextStyle(color: Colors.grey)),
-Text('$absent absent',
+Text('Absent: $absent',
 style: const TextStyle(
 fontSize: 13,
 fontWeight: FontWeight.w600,
@@ -17081,7 +17130,8 @@ final inScope = {
 for (final st in students)
 if (secIds.contains(st.sectionId)) st.id
 };
-var total = 0, entered = 0, absentN = 0;
+var total = 0, entered = 0;
+final seen = <String>[];
 for (final st in students) {
 if (!inScope.contains(st.id) ||
 _isDupCopy(st, _twins, secById, inScope)) {
@@ -17089,10 +17139,10 @@ continue;
 }
 total++;
 if (results[st.id]?.average != null) entered++;
-absentN += _absent?[st.id]?.length ?? 0;
+seen.add(st.id);
 }
 return _statusLine(entered, total - entered,
-absent: _absent == null ? null : absentN,
+absent: _absent == null ? null : _absentBySubject(seen, _absent!),
 onTap: (f) => _go(ResultStudentsScreen(
 title: title, sectionIds: secIds, initialFilter: f)));
 }
@@ -17503,11 +17553,12 @@ text: '${students.length - scored.length} not entered',
 style: const TextStyle(
 color: Color(0xFFC62828),
 fontWeight: FontWeight.w600)),
-if (_absent.isNotEmpty) ...[
+if (_absentBySubject([for (final st in students) st.id], _absent)
+    .isNotEmpty) ...[
 const TextSpan(text: ' · '),
 TextSpan(
 text:
-'${students.fold<int>(0, (a, st) => a + (_absent[st.id]?.length ?? 0))} absent',
+'Absent: ${_absentBySubject([for (final st in students) st.id], _absent)}',
 style: const TextStyle(
 color: Color(0xFFE67E22),
 fontWeight: FontWeight.w600)),
