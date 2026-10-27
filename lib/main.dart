@@ -15605,6 +15605,11 @@ double minMarkOf(String exam) => appSettings.value.limitsFor(exam).minMark;
 String _fmtMark(double n) =>
 n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
 
+/// Shown (not saved) in a mark box when attendance says the student was absent
+/// in that subject. It is never a mark, so totals and averages ignore it.
+const kAbsentText = 'Absent';
+bool _isAbsentText(String t) => t.trim().toLowerCase() == 'absent';
+
 /// Grade of an average mark. The limits are set in Settings.
 String _gradeOf(double avg) {
 final limits = appSettings.value.grades;
@@ -15942,6 +15947,53 @@ return out;
 });
 
 /// studentId -> ALL marks (every subject), for one exam.
+/// studentId -> the subjects the student was ABSENT in, read from attendance:
+/// the register of that subject on the day of its exam (date set in the Exam
+/// tab). If the subject has no register that day, the whole-day register is
+/// used. Subjects without an exam date are skipped.
+Future<Map<String, Set<String>>> absentSubjects(
+Iterable<String>? studentIds, Iterable<String> subjects) async {
+final out = <String, Set<String>>{};
+final ids = studentIds?.toSet(); // null = every student
+if (ids != null && ids.isEmpty) return out;
+final twins = await twinMap();
+final byDate = <String, List<String>>{};
+for (final sub in subjects) {
+final d = appSettings.value.subjectDateOf(sub);
+if (d != null) {
+byDate.putIfAbsent(DateFormat('yyyy-MM-dd').format(d), () => []).add(sub);
+}
+}
+final school = SchoolService();
+for (final e in byDate.entries) {
+final docs = await school.getAttendanceRange(e.key, e.key);
+for (final sub in e.value) {
+final sk = SchoolService.subjectKey(sub);
+final specific = [
+for (final d in docs)
+if (d.subject.trim().isNotEmpty &&
+SchoolService.subjectKey(d.subject) == sk)
+d
+];
+final src = specific.isNotEmpty
+? specific
+    : [for (final d in docs) if (d.subject.trim().isEmpty) d];
+for (final d in src) {
+for (final e in d.records.entries) {
+if (e.value != 'absent') continue;
+final twin = twins[e.key];
+for (final id in <String>{e.key, if (twin != null) twin}) {
+if (ids == null || ids.contains(id)) {
+out.putIfAbsent(id, () => <String>{}).add(sub);
+}
+}
+}
+}
+}
+}
+return out;
+}
+
 Future<Map<String, Map<String, double>>> getAllForExam(String exam) async {
 final twins = await twinMap();
 final q = await _col.where('exam', isEqualTo: exam).get();
@@ -17299,6 +17351,8 @@ late int _filter = widget.initialFilter;
 /// from "not entered" to "entered".
 final Set<String> _pinned = {};
 Map<String, String> _twins = const {};
+// studentId -> subjects the student was absent in on the exam day
+Map<String, Set<String>> _absent = const {};
 
 @override
 void initState() {
@@ -17306,6 +17360,11 @@ super.initState();
 _service.twinMap().then((t) {
 if (mounted) setState(() => _twins = t);
 });
+_service
+    .absentSubjects(null, teacherScope.value.subjectList)
+    .then((a) {
+if (mounted) setState(() => _absent = a);
+}).catchError((Object _) {}); // no access to attendance: no pre-fill
 }
 
 @override
@@ -17509,6 +17568,7 @@ key: ValueKey('${s.id}|${_ResultPrefs.exam}'),
 student: s,
 subjects: inlineSubs,
 exam: _ResultPrefs.exam,
+absent: _absent[s.id] ?? const <String>{},
 onStart: () => _pinned.add(s.id),
 );
 return Card(
@@ -17700,6 +17760,11 @@ _load();
 Future<void> _load() async {
 try {
 final all = await _service.getAllForExam(widget.exam);
+var absent = <String, Set<String>>{};
+try {
+absent = await _service.absentSubjects(
+[for (final s in widget.students) s.id], _subjects);
+} catch (_) {} // no access to attendance: no pre-fill
 for (final s in widget.students) {
 final m = all[s.id] ?? const <String, double>{};
 final hid = <String, double>{};
@@ -17709,7 +17774,11 @@ if (!_subjects.contains(e.key)) hid[e.key] = e.value;
 final row = <String, TextEditingController>{};
 for (final sub in _subjects) {
 final v = m[sub];
-final t = v == null ? '' : _fmtMark(v);
+final t = v != null
+? _fmtMark(v)
+    : (absent[s.id]?.contains(sub) ?? false)
+? kAbsentText
+    : '';
 row[sub] = TextEditingController(text: t);
 _orig['${s.id}|$sub'] = t;
 }
@@ -17746,7 +17815,7 @@ return f.isEmpty || teacherScope.value.allows(subject, f);
 
 bool _isBad(String text) {
 final t = text.trim();
-if (t.isEmpty) return false;
+if (t.isEmpty || _isAbsentText(t)) return false;
 final v = double.tryParse(t);
 return v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam);
 }
@@ -17775,7 +17844,7 @@ final marks = <String, double>{};
 for (final sub in _subjects) {
 final t = row[sub]!.text.trim();
 if (t != _orig['${s.id}|$sub']) changed = true;
-if (t.isEmpty) continue;
+if (t.isEmpty || _isAbsentText(t)) continue;
 final v = double.tryParse(t);
 if (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam)) {
 bad = true;
@@ -17866,6 +17935,7 @@ final row = _c[s.id]!;
 final vals = <double>[
 for (final sub in _subjects)
 if (!_isBad(row[sub]!.text) &&
+!_isAbsentText(row[sub]!.text) &&
 row[sub]!.text.trim().isNotEmpty)
 double.parse(row[sub]!.text.trim()),
 ];
@@ -17908,7 +17978,13 @@ padding: const EdgeInsets.only(right: 8),
 child: TextField(
 controller: row[sub],
 enabled: !_saving && _can(s.id, sub),
+readOnly: _isAbsentText(row[sub]!.text),
+canRequestFocus: !_isAbsentText(row[sub]!.text),
 textAlign: TextAlign.center,
+style: _isAbsentText(row[sub]!.text)
+? const TextStyle(
+color: kRed, fontWeight: FontWeight.w700, fontSize: 13)
+    : null,
 textInputAction: TextInputAction.next,
 keyboardType:
 const TextInputType.numberWithOptions(
@@ -17920,10 +17996,13 @@ RegExp(r'[0-9.]')),
 onChanged: (_) => setState(() => _error = null),
 decoration: InputDecoration(
 isDense: true,
+filled: _isAbsentText(row[sub]!.text),
+fillColor: const Color(0xFFFDECEA),
 border: const OutlineInputBorder(),
 enabledBorder: OutlineInputBorder(
 borderSide: BorderSide(
-color: _isBad(row[sub]!.text)
+color: (_isBad(row[sub]!.text) ||
+_isAbsentText(row[sub]!.text))
 ? Colors.red
     : Colors.grey.shade400,
 width: _isBad(row[sub]!.text) ? 2 : 1,
@@ -18022,12 +18101,16 @@ final StudentInfo student;
 final List<String> subjects;
 final String exam;
 final VoidCallback onStart;
+
+/// Subjects the student was absent in (attendance): shown as Absent, locked.
+final Set<String> absent;
 const _InlineMarks({
 super.key,
 required this.student,
 required this.subjects,
 required this.exam,
 required this.onStart,
+this.absent = const {},
 });
 
 @override
@@ -18037,7 +18120,9 @@ State<_InlineMarks> createState() => _InlineMarksState();
 class _InlineMarksState extends State<_InlineMarks> {
 final _svc = ResultService();
 late final Map<String, TextEditingController> _c = {
-for (final s in widget.subjects) s: TextEditingController(),
+for (final s in widget.subjects)
+s: TextEditingController(
+text: widget.absent.contains(s) ? kAbsentText : ''),
 };
 late final Map<String, FocusNode> _f = {
 for (final s in widget.subjects) s: FocusNode(),
@@ -18073,7 +18158,7 @@ super.dispose();
 
 bool _isBad(String text) {
 final t = text.trim();
-if (t.isEmpty) return false;
+if (t.isEmpty || _isAbsentText(t)) return false;
 final v = double.tryParse(t);
 return v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam);
 }
@@ -18082,7 +18167,12 @@ Future<void> _run() async {
 final typed = <String, double>{};
 for (final sub in widget.subjects) {
 final t = _c[sub]!.text.trim();
-if (t.isEmpty || t == (_saved[sub] ?? '') || _isBad(t)) continue;
+if (t.isEmpty ||
+_isAbsentText(t) ||
+t == (_saved[sub] ?? '') ||
+_isBad(t)) {
+continue;
+}
 typed[sub] = double.parse(t);
 }
 if (typed.isEmpty) return;
@@ -18119,23 +18209,32 @@ width: single ? 92 : 84,
 child: TextField(
 controller: _c[sub],
 focusNode: _f[sub],
+readOnly: widget.absent.contains(sub),
+canRequestFocus: !widget.absent.contains(sub),
 textAlign: TextAlign.center,
 textInputAction: TextInputAction.next,
 keyboardType: const TextInputType.numberWithOptions(decimal: true),
 inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+style: widget.absent.contains(sub)
+? const TextStyle(
+fontSize: 13, fontWeight: FontWeight.w700, color: kRed)
+    : const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
 onChanged: (_) => setState(() => _ok = false),
 onSubmitted: (_) => FocusScope.of(context).nextFocus(),
 decoration: InputDecoration(
 isDense: true,
+filled: widget.absent.contains(sub),
+fillColor: const Color(0xFFFDECEA),
 labelText: single ? 'Mark' : sub,
 labelStyle: const TextStyle(fontSize: 11),
 floatingLabelBehavior: FloatingLabelBehavior.auto,
 contentPadding:
 const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
 border: const OutlineInputBorder(),
-enabledBorder: _isBad(_c[sub]!.text) ? red : null,
-focusedBorder: _isBad(_c[sub]!.text) ? red : null,
+enabledBorder:
+(_isBad(_c[sub]!.text) || widget.absent.contains(sub)) ? red : null,
+focusedBorder:
+(_isBad(_c[sub]!.text) || widget.absent.contains(sub)) ? red : null,
 ),
 ),
 );
@@ -18294,7 +18393,12 @@ String? _error;
 @override
 void initState() {
 super.initState();
-_service.get(widget.student.id, widget.exam).then((r) {
+_service.get(widget.student.id, widget.exam).then((r) async {
+var absent = <String, Set<String>>{};
+try {
+absent = await _service.absentSubjects(
+[widget.student.id], _ctrl.keys.toList());
+} catch (_) {} // no access to attendance: no pre-fill
 if (!mounted) return;
 setState(() {
 r.marks.forEach((k, v) {
@@ -18305,6 +18409,11 @@ _hidden[k] = v;
 c.text = _fmtMark(v);
 }
 });
+// absent in attendance and no mark yet: show Absent (never saved)
+for (final sub in absent[widget.student.id] ?? const <String>{}) {
+final c = _ctrl[sub];
+if (c != null && c.text.trim().isEmpty) c.text = kAbsentText;
+}
 _loading = false;
 });
 }).catchError((Object e) {
@@ -18329,7 +18438,7 @@ final out = <String, double>{};
 var ok = true;
 _ctrl.forEach((k, c) {
 final t = c.text.trim();
-if (t.isEmpty) return;
+if (t.isEmpty || _isAbsentText(t)) return;
 final v = double.tryParse(t);
 if (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam)) {
 ok = false;
@@ -18395,10 +18504,15 @@ final c = _ctrl[subject]!;
 final t = c.text.trim();
 final v = double.tryParse(t);
 final bad =
-t.isNotEmpty && (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam));
+t.isNotEmpty && !_isAbsentText(t) && (v == null || v < minMarkOf(widget.exam) || v > maxMarkOf(widget.exam));
 return TextField(
 controller: c,
 enabled: !_saving,
+readOnly: _isAbsentText(t),
+canRequestFocus: !_isAbsentText(t),
+style: _isAbsentText(t)
+? const TextStyle(color: kRed, fontWeight: FontWeight.w700)
+    : null,
 keyboardType: const TextInputType.numberWithOptions(
 decimal: true),
 inputFormatters: [
@@ -18408,6 +18522,12 @@ onChanged: (_) => setState(() => _error = null),
 decoration: InputDecoration(
 labelText: subject,
 border: const OutlineInputBorder(),
+filled: _isAbsentText(t),
+fillColor: const Color(0xFFFDECEA),
+enabledBorder: _isAbsentText(t)
+? const OutlineInputBorder(
+borderSide: BorderSide(color: kRed, width: 1.5))
+    : null,
 isDense: true,
 errorText: bad ? '${_fmtMark(minMarkOf(widget.exam))}–${_fmtMark(maxMarkOf(widget.exam))}' : null,
 ),
