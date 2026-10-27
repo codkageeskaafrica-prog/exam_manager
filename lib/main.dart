@@ -16188,9 +16188,7 @@ List<StudentInfo> students,
 Map<String, ResultMarks> results,
 Map<String, String> twins,
 String exam,
-{Widget? banner,
-bool deadlines = false,
-Map<String, Set<String>> absent = const {}}) {
+{Widget? banner, bool deadlines = false}) {
 final cs = Theme.of(context).colorScheme;
 final secById = {for (final s in sections) s.id: s};
 final inScope = {
@@ -16252,28 +16250,6 @@ totalE += entered[sub]!;
 }
 final totalAll = people.length * subjects.length;
 
-// students absent in a subject on its exam day (from attendance)
-final absentBy = <String, int>{
-for (final sub in subjects)
-sub: people.where((st) => absent[st.id]?.contains(sub) ?? false).length,
-};
-final totalAbsent = absentBy.values.fold<int>(0, (a, b) => a + b);
-// subject -> form -> students absent (e.g. Chemistry · Form1)
-final absentForm = <String, Map<String, int>>{};
-for (final sub in subjects) {
-final g = {for (final f in forms) f: 0};
-for (final st in people) {
-if (!(absent[st.id]?.contains(sub) ?? false)) continue;
-final f = secById[st.sectionId]!.form;
-g[f] = (g[f] ?? 0) + 1;
-}
-absentForm[sub] = g;
-}
-final totalAF = {
-for (final f in forms)
-f: absentForm.values.fold<int>(0, (a, m) => a + (m[f] ?? 0))
-};
-
 // days left to return the results of one subject (exam date + N days)
 Widget deadlineCell(String sub, int notEntered) {
 final due = appSettings.value.subjectDeadline(sub);
@@ -16294,24 +16270,7 @@ final t = left < 0
 return cell(t, color: c, bold: true, size: 12);
 }
 
-// entered count of a form, with the absent count of that subject + form
-// under it in orange
-Widget formCell(int n, int ab, bool total) => ab == 0
-? cell('$n', bold: total)
-    : Column(mainAxisSize: MainAxisSize.min, children: [
-cell('$n', bold: total),
-Padding(
-padding: const EdgeInsets.only(bottom: 5),
-child: Text('$ab absent',
-maxLines: 1,
-style: const TextStyle(
-fontSize: 10,
-fontWeight: FontWeight.w700,
-color: Color(0xFFE67E22)))),
-]);
-
-TableRow row(String name, Map<String, int> g, int e, int n, int ab,
-Map<String, int> ag,
+TableRow row(String name, Map<String, int> g, int e, int n,
 {bool total = false}) =>
 TableRow(
 decoration: total
@@ -16319,10 +16278,9 @@ decoration: total
     : null,
 children: [
 cell(name, align: TextAlign.left, bold: total),
-for (final f in forms) formCell(g[f]!, ag[f] ?? 0, total),
+for (final f in forms) cell('${g[f]}', bold: total),
 cell('$e', color: const Color(0xFF2E7D32), bold: true),
 cell('$n', color: const Color(0xFFC62828), bold: true),
-cell('$ab', color: const Color(0xFFE67E22), bold: true),
 if (deadlines) total ? cell('') : deadlineCell(name, n),
 ]);
 
@@ -16352,8 +16310,7 @@ for (var i = 0; i < forms.length; i++)
 i + 1: const FlexColumnWidth(1.3),
 forms.length + 1: const FlexColumnWidth(1.5),
 forms.length + 2: const FlexColumnWidth(1.9),
-forms.length + 3: const FlexColumnWidth(1.4),
-if (deadlines) forms.length + 4: const FlexColumnWidth(1.8),
+if (deadlines) forms.length + 3: const FlexColumnWidth(1.8),
 },
 defaultVerticalAlignment: TableCellVerticalAlignment.middle,
 border: TableBorder(
@@ -16368,14 +16325,11 @@ cell('Subject', align: TextAlign.left, bold: true),
 for (final f in forms) cell(f, bold: true, size: 11.5),
 cell('Entered', bold: true, size: 11.5),
 cell('Not entered', bold: true, size: 11.5),
-cell('Absent', bold: true, size: 11.5),
 if (deadlines) cell('Days left', bold: true, size: 11.5),
 ]),
 for (final sub in subjects)
-row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!,
-absentBy[sub]!, absentForm[sub]!),
-row('Total', totalF, totalE, totalAll - totalE, totalAbsent, totalAF,
-total: true),
+row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!),
+row('Total', totalF, totalE, totalAll - totalE, total: true),
 ],
 ),
 ]),
@@ -16599,7 +16553,6 @@ Map<String, String> _twins = const {};
 List<SectionInfo>? _secs;
 List<StudentInfo>? _stus;
 Map<String, ResultMarks> _res = const {};
-Map<String, Set<String>> _absent = const {};
 
 @override
 void initState() {
@@ -16607,11 +16560,6 @@ super.initState();
 _service.twinMap().then((t) {
 if (mounted) setState(() => _twins = t);
 });
-_service
-    .absentSubjects(null, teacherScope.value.subjectList)
-    .then((a) {
-if (mounted) setState(() => _absent = a);
-}).catchError((Object _) {});
 }
 
 /// Sends the reminder: every teacher of a subject whose deadline is set and
@@ -16806,7 +16754,6 @@ const <String, ResultMarks>{},
 _twins,
 _ResultPrefs.exam,
 banner: const _DeadlineNote(),
-absent: _absent,
 deadlines: true),
 ],
 );
@@ -17076,7 +17023,7 @@ Widget _summaryCard(List<SectionInfo> sections, List<StudentInfo> students,
 Map<String, ResultMarks> results) =>
 _subjectSummaryCard(
 context, sections, students, results, _twins, _ResultPrefs.exam,
-absent: _absent ?? const {});
+);
 
 Widget _hint(String text) => Padding(
 padding: const EdgeInsets.all(32),
