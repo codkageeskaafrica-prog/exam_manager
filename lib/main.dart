@@ -15605,22 +15605,6 @@ double minMarkOf(String exam) => appSettings.value.limitsFor(exam).minMark;
 String _fmtMark(double n) =>
 n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
 
-/// "Chemistry 5 · Geography 14": how many of these students were absent in
-/// EACH subject (never one lump across subjects). Empty when nobody was.
-String _absentBySubject(
-Iterable<String> studentIds, Map<String, Set<String>> absent) {
-final c = <String, int>{};
-for (final id in studentIds) {
-for (final sub in absent[id] ?? const <String>{}) {
-c[sub] = (c[sub] ?? 0) + 1;
-}
-}
-return [
-for (final sub in teacherScope.value.subjectList)
-if ((c[sub] ?? 0) > 0) '$sub ${c[sub]}'
-].join(' · ');
-}
-
 /// Shown (not saved) in a mark box when attendance says the student was absent
 /// in that subject. It is never a mark, so totals and averages ignore it.
 const kAbsentText = 'Absent';
@@ -16969,7 +16953,7 @@ super.dispose();
 /// Tap "entered" / "not entered" to open the students of that scope,
 /// filtered.
 Widget _statusLine(int entered, int notEntered,
-{void Function(int filter)? onTap, String? absent}) {
+{void Function(int filter)? onTap, int? absent}) {
 Widget part(String text, Color c, int filter) => InkWell(
 onTap: onTap == null ? null : () => onTap(filter),
 borderRadius: BorderRadius.circular(6),
@@ -16990,13 +16974,9 @@ return Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
 part('$entered entered', const Color(0xFF2E7D32), 1),
 const Text(' · ', style: TextStyle(color: Colors.grey)),
 part('$notEntered not entered', const Color(0xFFC62828), 2),
-if (absent != null && absent.isNotEmpty) ...[
+if (absent != null) ...[
 const Text(' · ', style: TextStyle(color: Colors.grey)),
-Text('Absent: $absent',
-style: const TextStyle(
-fontSize: 13,
-fontWeight: FontWeight.w600,
-color: Color(0xFFE67E22))),
+part('$absent absent', const Color(0xFFE67E22), 3),
 ],
 ]);
 }
@@ -17130,8 +17110,7 @@ final inScope = {
 for (final st in students)
 if (secIds.contains(st.sectionId)) st.id
 };
-var total = 0, entered = 0;
-final seen = <String>[];
+var total = 0, entered = 0, absentN = 0;
 for (final st in students) {
 if (!inScope.contains(st.id) ||
 _isDupCopy(st, _twins, secById, inScope)) {
@@ -17139,10 +17118,10 @@ continue;
 }
 total++;
 if (results[st.id]?.average != null) entered++;
-seen.add(st.id);
+if (_absent?[st.id]?.isNotEmpty ?? false) absentN++;
 }
 return _statusLine(entered, total - entered,
-absent: _absent == null ? null : _absentBySubject(seen, _absent!),
+absent: _absent == null ? null : absentN,
 onTap: (f) => _go(ResultStudentsScreen(
 title: title, sectionIds: secIds, initialFilter: f)));
 }
@@ -17500,11 +17479,15 @@ final groupAvg = scored.isEmpty
     : scored.fold(0.0, (a, s) => a + results[s.id]!.average!) / scored.length;
 
 bool hasMarks(StudentInfo s) => results[s.id]?.average != null;
+bool isAbs(StudentInfo s) => _absent[s.id]?.isNotEmpty ?? false;
+final absentCount = students.where(isAbs).length;
 final shown = [
 for (final s in students)
 if (_nameMatches(s.name, _query) &&
 (_filter == 0 ||
-(_filter == 1 ? hasMarks(s) : !hasMarks(s)) ||
+(_filter == 3
+? isAbs(s)
+    : (_filter == 1 ? hasMarks(s) : !hasMarks(s))) ||
 _pinned.contains(s.id)))
 s,
 ];
@@ -17553,12 +17536,10 @@ text: '${students.length - scored.length} not entered',
 style: const TextStyle(
 color: Color(0xFFC62828),
 fontWeight: FontWeight.w600)),
-if (_absentBySubject([for (final st in students) st.id], _absent)
-    .isNotEmpty) ...[
+if (absentCount > 0) ...[
 const TextSpan(text: ' · '),
 TextSpan(
-text:
-'Absent: ${_absentBySubject([for (final st in students) st.id], _absent)}',
+text: '$absentCount absent',
 style: const TextStyle(
 color: Color(0xFFE67E22),
 fontWeight: FontWeight.w600)),
@@ -17613,14 +17594,15 @@ padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
 child: Align(
 alignment: Alignment.centerLeft,
 child: Wrap(spacing: 8, runSpacing: 4, children: [
-for (final f in const [
+for (final f in [
 (0, 'All'),
 (1, 'Entered'),
 (2, 'Not entered'),
+if (absentCount > 0) (3, 'Absent'),
 ])
 ChoiceChip(
 label: Text(
-'${f.$2} ${f.$1 == 0 ? students.length : f.$1 == 1 ? scored.length : students.length - scored.length}'),
+'${f.$2} ${f.$1 == 0 ? students.length : f.$1 == 1 ? scored.length : f.$1 == 3 ? absentCount : students.length - scored.length}'),
 selected: _filter == f.$1,
 onSelected: (_) => setState(() {
 _filter = f.$1;
@@ -17638,6 +17620,8 @@ child: students.isEmpty
 child: Text(_query.trim().isEmpty
 ? (_filter == 1
 ? 'No student has marks entered yet.'
+    : _filter == 3
+? 'No student was absent.'
     : 'Every student has marks entered.')
     : 'No student matches "${_query.trim()}".'))
     : ListView.builder(
