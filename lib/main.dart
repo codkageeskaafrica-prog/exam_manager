@@ -16188,7 +16188,9 @@ List<StudentInfo> students,
 Map<String, ResultMarks> results,
 Map<String, String> twins,
 String exam,
-{Widget? banner, bool deadlines = false}) {
+{Widget? banner,
+bool deadlines = false,
+Map<String, Set<String>> absent = const {}}) {
 final cs = Theme.of(context).colorScheme;
 final secById = {for (final s in sections) s.id: s};
 final inScope = {
@@ -16250,6 +16252,13 @@ totalE += entered[sub]!;
 }
 final totalAll = people.length * subjects.length;
 
+// students absent in a subject on its exam day (from attendance)
+final absentBy = <String, int>{
+for (final sub in subjects)
+sub: people.where((st) => absent[st.id]?.contains(sub) ?? false).length,
+};
+final totalAbsent = absentBy.values.fold<int>(0, (a, b) => a + b);
+
 // days left to return the results of one subject (exam date + N days)
 Widget deadlineCell(String sub, int notEntered) {
 final due = appSettings.value.subjectDeadline(sub);
@@ -16270,7 +16279,7 @@ final t = left < 0
 return cell(t, color: c, bold: true, size: 12);
 }
 
-TableRow row(String name, Map<String, int> g, int e, int n,
+TableRow row(String name, Map<String, int> g, int e, int n, int ab,
 {bool total = false}) =>
 TableRow(
 decoration: total
@@ -16281,6 +16290,7 @@ cell(name, align: TextAlign.left, bold: total),
 for (final f in forms) cell('${g[f]}', bold: total),
 cell('$e', color: const Color(0xFF2E7D32), bold: true),
 cell('$n', color: const Color(0xFFC62828), bold: true),
+cell('$ab', color: const Color(0xFFE67E22), bold: true),
 if (deadlines) total ? cell('') : deadlineCell(name, n),
 ]);
 
@@ -16310,7 +16320,8 @@ for (var i = 0; i < forms.length; i++)
 i + 1: const FlexColumnWidth(1.3),
 forms.length + 1: const FlexColumnWidth(1.5),
 forms.length + 2: const FlexColumnWidth(1.9),
-if (deadlines) forms.length + 3: const FlexColumnWidth(1.8),
+forms.length + 3: const FlexColumnWidth(1.4),
+if (deadlines) forms.length + 4: const FlexColumnWidth(1.8),
 },
 defaultVerticalAlignment: TableCellVerticalAlignment.middle,
 border: TableBorder(
@@ -16325,11 +16336,13 @@ cell('Subject', align: TextAlign.left, bold: true),
 for (final f in forms) cell(f, bold: true, size: 11.5),
 cell('Entered', bold: true, size: 11.5),
 cell('Not entered', bold: true, size: 11.5),
+cell('Absent', bold: true, size: 11.5),
 if (deadlines) cell('Days left', bold: true, size: 11.5),
 ]),
 for (final sub in subjects)
-row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!),
-row('Total', totalF, totalE, totalAll - totalE, total: true),
+row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!,
+absentBy[sub]!),
+row('Total', totalF, totalE, totalAll - totalE, totalAbsent, total: true),
 ],
 ),
 ]),
@@ -16553,6 +16566,7 @@ Map<String, String> _twins = const {};
 List<SectionInfo>? _secs;
 List<StudentInfo>? _stus;
 Map<String, ResultMarks> _res = const {};
+Map<String, Set<String>> _absent = const {};
 
 @override
 void initState() {
@@ -16560,6 +16574,11 @@ super.initState();
 _service.twinMap().then((t) {
 if (mounted) setState(() => _twins = t);
 });
+_service
+    .absentSubjects(null, teacherScope.value.subjectList)
+    .then((a) {
+if (mounted) setState(() => _absent = a);
+}).catchError((Object _) {});
 }
 
 /// Sends the reminder: every teacher of a subject whose deadline is set and
@@ -16754,6 +16773,7 @@ const <String, ResultMarks>{},
 _twins,
 _ResultPrefs.exam,
 banner: const _DeadlineNote(),
+absent: _absent,
 deadlines: true),
 ],
 );
@@ -16875,6 +16895,7 @@ String _exam = _ResultPrefs.exam;
 final _q = TextEditingController();
 String _query = '';
 Map<String, String> _twins = const {};
+Map<String, Set<String>>? _absent; // null until read from attendance
 
 @override
 void initState() {
@@ -16882,6 +16903,11 @@ super.initState();
 _service.twinMap().then((t) {
 if (mounted) setState(() => _twins = t);
 });
+_service
+    .absentSubjects(null, teacherScope.value.subjectList)
+    .then((a) {
+if (mounted) setState(() => _absent = a);
+}).catchError((Object _) {});
 }
 
 @override
@@ -16894,7 +16920,7 @@ super.dispose();
 /// Tap "entered" / "not entered" to open the students of that scope,
 /// filtered.
 Widget _statusLine(int entered, int notEntered,
-{void Function(int filter)? onTap}) {
+{void Function(int filter)? onTap, int? absent}) {
 Widget part(String text, Color c, int filter) => InkWell(
 onTap: onTap == null ? null : () => onTap(filter),
 borderRadius: BorderRadius.circular(6),
@@ -16915,6 +16941,14 @@ return Row(mainAxisSize: MainAxisSize.min, children: [
 part('$entered entered', const Color(0xFF2E7D32), 1),
 const Text(' · ', style: TextStyle(color: Colors.grey)),
 part('$notEntered not entered', const Color(0xFFC62828), 2),
+if (absent != null) ...[
+const Text(' · ', style: TextStyle(color: Colors.grey)),
+Text('$absent absent',
+style: const TextStyle(
+fontSize: 13,
+fontWeight: FontWeight.w600,
+color: Color(0xFFE67E22))),
+],
 ]);
 }
 
@@ -17012,7 +17046,8 @@ onTap: onTap,
 Widget _summaryCard(List<SectionInfo> sections, List<StudentInfo> students,
 Map<String, ResultMarks> results) =>
 _subjectSummaryCard(
-context, sections, students, results, _twins, _ResultPrefs.exam);
+context, sections, students, results, _twins, _ResultPrefs.exam,
+absent: _absent ?? const {});
 
 Widget _hint(String text) => Padding(
 padding: const EdgeInsets.all(32),
@@ -17046,7 +17081,7 @@ final inScope = {
 for (final st in students)
 if (secIds.contains(st.sectionId)) st.id
 };
-var total = 0, entered = 0;
+var total = 0, entered = 0, absentN = 0;
 for (final st in students) {
 if (!inScope.contains(st.id) ||
 _isDupCopy(st, _twins, secById, inScope)) {
@@ -17054,8 +17089,10 @@ continue;
 }
 total++;
 if (results[st.id]?.average != null) entered++;
+absentN += _absent?[st.id]?.length ?? 0;
 }
 return _statusLine(entered, total - entered,
+absent: _absent == null ? null : absentN,
 onTap: (f) => _go(ResultStudentsScreen(
 title: title, sectionIds: secIds, initialFilter: f)));
 }
@@ -17466,6 +17503,15 @@ text: '${students.length - scored.length} not entered',
 style: const TextStyle(
 color: Color(0xFFC62828),
 fontWeight: FontWeight.w600)),
+if (_absent.isNotEmpty) ...[
+const TextSpan(text: ' · '),
+TextSpan(
+text:
+'${students.fold<int>(0, (a, st) => a + (_absent[st.id]?.length ?? 0))} absent',
+style: const TextStyle(
+color: Color(0xFFE67E22),
+fontWeight: FontWeight.w600)),
+],
 if (groupAvg != null)
 TextSpan(
 text:
