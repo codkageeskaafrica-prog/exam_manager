@@ -965,7 +965,8 @@ class ExamService {
         for (final x in g.students)
           if (g.results[x.id]?.average == null) x
       ]..sort(byName);
-      final ordered = [...scored, ...unscored];
+      // A-Z by name; the Pos column still shows each student's rank
+      final ordered = [...scored, ...unscored]..sort(byName);
 
       final groupAvg = scored.isEmpty
           ? null
@@ -997,8 +998,9 @@ class ExamService {
       final widths = <int, pw.TableColumnWidth>{
         0: const pw.FixedColumnWidth(28),
         1: const pw.FlexColumnWidth(4.2),
+        2: const pw.FixedColumnWidth(50),
       };
-      var col = 2;
+      var col = 3;
       if (multi) widths[col++] = const pw.FixedColumnWidth(38);
       for (final _ in subjects) {
         widths[col++] = const pw.FlexColumnWidth(1.25);
@@ -1014,6 +1016,7 @@ class ExamService {
           children: [
             cell('Pos', bold: true),
             cell('Student name', bold: true, left: true),
+            cell('ID', bold: true),
             if (multi) cell('Class', bold: true),
             for (final sub in subjects) cell(sub, bold: true),
             cell('Total', bold: true),
@@ -1032,6 +1035,7 @@ class ExamService {
               return [
                 cell(rank[x.id]?.toString() ?? '-'),
                 cell(x.name, left: true),
+                cell(x.studentNo.isEmpty ? '-' : x.studentNo),
                 if (multi) cell(g.sectionLabels[x.id] ?? ''),
                 for (final sub in subjects)
                   cell(r?.marks.containsKey(sub) ?? false
@@ -1064,6 +1068,7 @@ class ExamService {
       ].join('   ');
 
       doc.addPage(pw.MultiPage(
+        maxPages: 100000,
         pageTheme: pw.PageTheme(
           pageFormat: PdfPageFormat.a4.landscape,
           margin: const pw.EdgeInsets.fromLTRB(28, 20, 28, 20),
@@ -1164,7 +1169,7 @@ class ExamService {
     }
     return (
     subjects: subjects,
-    ordered: [...scored, ...unscored],
+    ordered: [...scored, ...unscored]..sort(byName), // A-Z by name
     rank: rank,
     groupAvg: groupAvg,
     scoredCount: scored.length,
@@ -1243,7 +1248,7 @@ class ExamService {
 
     for (final g in usable) {
       final d = _rankResultGroup(g);
-      final cols = 2 + (d.multi ? 1 : 0) + d.subjects.length + 3;
+      final cols = 3 + (d.multi ? 1 : 0) + d.subjects.length + 3;
       final rows = StringBuffer();
       final merges = <String>[];
 
@@ -1271,6 +1276,7 @@ class ExamService {
       var c = 0;
       head.write(sc(c++, 5, 'Pos', 1));
       head.write(sc(c++, 5, 'Student name', 1));
+      head.write(sc(c++, 5, 'ID', 1));
       if (d.multi) head.write(sc(c++, 5, 'Class', 1));
       for (final sub in d.subjects) {
         head.write(sc(c++, 5, sub, 1));
@@ -1292,6 +1298,7 @@ class ExamService {
             ? sc(k++, r, '-', 2)
             : nc(k++, r, d.rank[x.id]!, 2));
         line.write(sc(k++, r, x.name, 3));
+        line.write(sc(k++, r, x.studentNo.isEmpty ? '-' : x.studentNo, 2));
         if (d.multi) line.write(sc(k++, r, g.sectionLabels[x.id] ?? '', 2));
         for (final sub in d.subjects) {
           final m = res?.marks[sub];
@@ -1328,6 +1335,8 @@ class ExamService {
           12, (m, s) => s.name.length > m ? s.name.length : m);
       colsXml.write(
           '<col min="$ci" max="$ci" width="${(longest + 4).clamp(24, 50)}" customWidth="1"/>');
+      ci++;
+      colsXml.write('<col min="$ci" max="$ci" width="12" customWidth="1"/>');
       ci++;
       if (d.multi) {
         colsXml.write('<col min="$ci" max="$ci" width="9" customWidth="1"/>');
@@ -1503,8 +1512,8 @@ class ExamService {
       final d = _rankResultGroup(g);
 
       // column widths (twips) that always add up to the page width
-      const posW = 650, totW = 1100, avgW = 1100, gradeW = 850, clsW = 900;
-      final fixed = posW + totW + avgW + gradeW + (d.multi ? clsW : 0);
+      const posW = 650, idW = 1000, totW = 1100, avgW = 1100, gradeW = 850, clsW = 900;
+      final fixed = posW + idW + totW + avgW + gradeW + (d.multi ? clsW : 0);
       var nameW = 3800;
       var subW = 0;
       if (d.subjects.isEmpty) {
@@ -1521,6 +1530,7 @@ class ExamService {
       final widths = <int>[
         posW,
         nameW,
+        idW,
         if (d.multi) clsW,
         for (final _ in d.subjects) subW,
         totW,
@@ -1544,6 +1554,7 @@ class ExamService {
       final rows = StringBuffer(tr([
         tc(widths[0], 'Pos', head: true, sz: sz),
         tc(widths[1], 'Student name', head: true, jc: 'left', sz: sz),
+        tc(idW, 'ID', head: true, sz: sz),
         if (d.multi) tc(clsW, 'Class', head: true, sz: sz),
         for (final sub in d.subjects) tc(subW, sub, head: true, sz: sz),
         tc(totW, 'Total', head: true, sz: sz),
@@ -1559,6 +1570,8 @@ class ExamService {
         rows.write(tr([
           tc(posW, d.rank[s.id]?.toString() ?? '-', sz: sz, zebraRow: z),
           tc(nameW, s.name, jc: 'left', sz: sz, zebraRow: z),
+          tc(idW, s.studentNo.isEmpty ? '-' : s.studentNo,
+              sz: sz, zebraRow: z),
           if (d.multi)
             tc(clsW, g.sectionLabels[s.id] ?? '', sz: sz, zebraRow: z),
           for (final sub in d.subjects)
@@ -8334,6 +8347,62 @@ class SectionInfo {
 }
 
 /// One duplicate found while uploading a student list.
+/// What an upload did (shown to the person afterwards).
+typedef ImportOutcome = ({
+int sections,
+int students,
+int skipped,
+int updated,
+int noPhone,
+List<ImportDuplicate> dups,
+int unchanged,
+int idsSet,
+int idsGenerated,
+int idConflicts,
+int phonesReplaced,
+int namesFixed,
+int loginKept
+});
+
+String importSummaryText(ImportOutcome r) {
+  final l = <String>[
+    r.students == 0 && r.sections == 0
+        ? '\u2022 No new students were added.'
+        : '\u2022 ${r.students} new students added'
+        '${r.sections > 0 ? ', ${r.sections} new sections created' : ''}.',
+    '\u2022 ${r.updated} existing students updated with the data in the file'
+        '${r.unchanged > 0 ? ' (${r.unchanged} were already the same)' : ''}.',
+    if (r.idsSet > 0) '\u2022 Student ID from the file saved for ${r.idsSet}.',
+    if (r.idsGenerated > 0)
+      '\u2022 ${r.idsGenerated} students had no ID: a new one was generated.',
+    if (r.phonesReplaced > 0)
+      '\u2022 Phone numbers replaced for ${r.phonesReplaced}.',
+    if (r.namesFixed > 0) '\u2022 Name corrected for ${r.namesFixed}.',
+    if (r.loginKept > 0)
+      '\u2022 ${r.loginKept} students already have a login: the phone number '
+          'they log in with was kept as the first one.',
+    if (r.idConflicts > 0)
+      '\u2022 ${r.idConflicts} IDs were not changed because another student '
+          'already has that ID.',
+    if (r.noPhone > 0)
+      '\u2022 ${r.noPhone} new students have no phone number (they cannot log in).',
+    if (r.skipped > 0)
+      '\u2022 ${r.skipped} rows skipped (empty, invalid or repeated).',
+  ];
+  return l.join('\n');
+}
+
+/// Shows what the upload did.
+Future<void> showImportOutcome(BuildContext context, ImportOutcome r) =>
+    showImportResult(context,
+        students: r.students,
+        sections: r.sections,
+        skipped: r.skipped,
+        updated: r.updated,
+        noPhone: r.noPhone,
+        dups: r.dups,
+        summary: importSummaryText(r));
+
 class ImportDuplicate {
   final String name;
 
@@ -8364,6 +8433,7 @@ Future<void> showImportResult(
       required List<ImportDuplicate> dups,
       int updated = 0,
       int noPhone = 0,
+      String summary = '',
     }) {
   final same = dups.where((d) => d.skipped).toList();
   final other = dups.where((d) => !d.skipped).toList();
@@ -8395,13 +8465,15 @@ Future<void> showImportResult(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('Added $students students and $sections new sections.\n'
+                Text(summary.isNotEmpty
+                    ? summary
+                    : 'Added $students students and $sections new sections.\n'
                     '$skipped rows skipped (duplicates or invalid).'
                     '${updated > 0 ? '\nPhone number saved for $updated existing students.' : ''}'
                     '${noPhone > 0 ? '\n$noPhone new students have no phone number.' : ''}'),
                 group(
-                  'Duplicates skipped',
-                  'Already in the same class, so they were not added again.',
+                  'Repeated rows in the file',
+                  'The same student is in the file twice, so the second row was ignored.',
                   same,
                       (d) => 'class ${d.className}',
                 ),
@@ -8435,13 +8507,17 @@ class StudentInfo {
 
   /// Login account linked to this student ('' = none yet).
   final String accountUid;
+
+  /// The student's own ID number ('' = not generated yet). Shown in reports.
+  final String studentNo;
   const StudentInfo(
       {required this.id,
         required this.name,
         required this.sectionId,
         this.phone = '',
         this.phones = const [],
-        this.accountUid = ''});
+        this.accountUid = '',
+        this.studentNo = ''});
 
   /// For lists and reports: all numbers on one line, '' when there is none.
   String get phoneText =>
@@ -8479,6 +8555,10 @@ List<String> phonesIn(String cell) => [
 ];
 
 String studentEmailFor(String digits) => '$digits@$kStudentEmailDomain';
+
+/// A Student ID read from an uploaded file ("1023", "1023.0" from Excel).
+String cleanStudentNo(String raw) =>
+    raw.trim().replaceFirst(RegExp(r'\.0+$'), '');
 
 class StudentAccountsResult {
   int created = 0, noPhone = 0, failed = 0;
@@ -9542,9 +9622,10 @@ class SchoolService {
   }
 
   /// Adds the students of a CSV / Excel file (columns: Form, Section,
-  /// Student name). Missing sections are created; duplicates are skipped.
-  Future<({int sections, int students, int skipped, int updated, int noPhone, List<ImportDuplicate> dups})>
-  importFile(PlatformFile file) async {
+  /// Student name). Missing sections are created. A student that is already
+  /// saved (same class + name) is NOT added again: it is updated with the
+  /// data of the file (Student ID, phone numbers, name).
+  Future<ImportOutcome> importFile(PlatformFile file) async {
     final bytes = file.bytes;
     if (bytes == null) throw Exception('Could not read the file.');
     final ext = (file.extension ?? '').toLowerCase();
@@ -9596,6 +9677,37 @@ class SchoolService {
           .putIfAbsent(nm, () => <String>{})
           .add(secLabel['${m['sectionId']}'] ?? '?');
     }
+    // Student IDs already saved: doc id -> (id, was it generated?)
+    final stuData = {for (final d in stuSnap.docs) d.id: d.data()};
+    final handled = <String>{}; // students already updated by an earlier row
+    var idsSet = 0, idsGenerated = 0, idConflicts = 0;
+    var phonesReplaced = 0, namesFixed = 0, unchanged = 0, loginKept = 0;
+    final stuNo = <String, ({String no, bool auto})>{};
+    final usedNos = <String>{};
+    var nextNum = 0;
+    final genRe = RegExp(r'^ST(\d+)$', caseSensitive: false);
+    for (final d in stuSnap.docs) {
+      final m = d.data();
+      final no = '${m['studentNo'] ?? ''}'.trim();
+      if (no.isEmpty) continue;
+      stuNo[d.id] = (no: no, auto: m['studentNoAuto'] == true);
+      usedNos.add(no.toLowerCase());
+      final g = genRe.firstMatch(no);
+      if (g != null) {
+        final v = int.parse(g[1]!);
+        if (v > nextNum) nextNum = v;
+      }
+    }
+    String genNo() {
+      String no;
+      do {
+        nextNum++;
+        no = 'ST${nextNum.toString().padLeft(4, '0')}';
+      } while (usedNos.contains(no.toLowerCase()));
+      usedNos.add(no.toLowerCase());
+      return no;
+    }
+
     final dups = <ImportDuplicate>[];
 
     // Look at the header row: ignore the MOTHER name column(s) and remember
@@ -9652,9 +9764,105 @@ class SchoolService {
       return out;
     }
 
+    // Student ID column: only a clear header counts (a plain "No" / "#" is
+    // normally just the row number).
+    final idHeadRe = RegExp(
+        r'student\s*(id|no|number|code)|\bid\b|id\s*(no|number)|admission|\badm\b|reg(istration)?\s*(no|number)|\broll\b|رقم الطالب',
+        caseSensitive: false);
+    final idCols = <int>{};
+    for (var i = 0; i < table.length && i < 5; i++) {
+      for (var j = 0; j < table[i].length; j++) {
+        if (!phoneCols.contains(j) && idHeadRe.hasMatch(table[i][j])) {
+          idCols.add(j);
+        }
+      }
+      if (idCols.isNotEmpty) break;
+    }
+    String idOfRow(List<String> row) {
+      for (final j in idCols) {
+        if (j >= row.length) continue;
+        final v = cleanStudentNo(row[j]);
+        if (v.isNotEmpty && !idHeadRe.hasMatch(v)) return v;
+      }
+      return '';
+    }
+
+    // The ID of a NEW student: the uploaded one, or a generated one.
+    ({String no, bool auto}) noForNew(List<String> row) {
+      final file = idOfRow(row);
+      if (file.isNotEmpty && usedNos.add(file.toLowerCase())) {
+        return (no: file, auto: false);
+      }
+      return (no: genNo(), auto: true);
+    }
+
+    // For a student that is already saved: fields to write ({} = nothing).
+    // An uploaded ID replaces a generated one; a missing ID is generated.
+    Map<String, Object?> noFields(String docId, List<String> row) {
+      final cur = stuNo[docId];
+      final file = idOfRow(row);
+      if (file.isNotEmpty && !usedNos.contains(file.toLowerCase())) {
+        usedNos.add(file.toLowerCase());
+        stuNo[docId] = (no: file, auto: false);
+        idsSet++;
+      } else if (file.isNotEmpty &&
+          cur != null &&
+          cur.no.toLowerCase() == file.toLowerCase()) {
+        return const {}; // already this ID
+      } else {
+        if (file.isNotEmpty) idConflicts++; // used by another student
+        if (cur != null) return const {};
+        stuNo[docId] = (no: genNo(), auto: true);
+        idsGenerated++;
+      }
+      return {
+        'studentNo': stuNo[docId]!.no,
+        'studentNoAuto': stuNo[docId]!.auto,
+      };
+    }
+
     final writes = <void Function(WriteBatch)>[];
     var newSections = 0, newStudents = 0, skipped = 0;
     var updated = 0, noPhone = 0;
+
+    // A student that is already saved is updated with the data of the file.
+    void syncExisting(
+        String docId, String fileName, List<String> phones, List<String> row) {
+      final d = stuData[docId] ?? const <String, dynamic>{};
+      final upd = <String, Object?>{};
+      if (fileName.isNotEmpty && '${d['name'] ?? ''}' != fileName) {
+        upd['name'] = fileName;
+        namesFixed++;
+      }
+      if (phones.isNotEmpty) {
+        final curPhones = _phoneList(d['phones'], d['phone']);
+        var next = [...phones];
+        if ('${d['accountUid'] ?? ''}'.isNotEmpty && curPhones.isNotEmpty) {
+          // the phone a student with a login signs in with stays the first
+          final login = curPhones.first;
+          next = [login, ...phones.where((p) => p != login)];
+          if (phones.first != login) loginKept++;
+        }
+        if (next.join(',') != curPhones.join(',')) {
+          upd['phones'] = next;
+          upd['phone'] = next.first;
+          upd['username'] = next.first;
+          phonesReplaced++;
+        }
+      }
+      upd.addAll(noFields(docId, row));
+      if (upd.isEmpty) {
+        unchanged++;
+        return;
+      }
+      updated++;
+      writes.add((b) => b.update(_students.doc(docId), {
+        ...upd,
+        'updatedBy': _uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }));
+    }
+
     for (var i = 0; i < table.length; i++) {
       final row = table[i];
       if (row.every((c) => c.trim().isEmpty)) continue;
@@ -9674,17 +9882,8 @@ class SchoolService {
         final ck = '$form|${section.toUpperCase()}|${name.toLowerCase()}';
         final alt = classStudents[ck];
         if (alt != null) {
-          final ph = phonesOfRow(row);
-          if (!alt.hasPhone && ph.isNotEmpty) {
-            updated++;
-            classStudents[ck] = (id: alt.id, hasPhone: true);
-            writes.add((b) => b.update(_students.doc(alt.id), {
-              'phone': ph.first,
-              'phones': ph,
-              'username': ph.first,
-              'updatedBy': _uid,
-              'updatedAt': FieldValue.serverTimestamp(),
-            }));
+          if (handled.add(alt.id)) {
+            syncExisting(alt.id, name, phonesOfRow(row), row);
           } else {
             skipped++;
           }
@@ -9712,18 +9911,10 @@ class SchoolService {
       final phones = phonesOfRow(row);
       final classesWithName = nameClasses.putIfAbsent(lname, () => <String>{});
       if (!existing.add('$sid|$lname')) {
-        // Already in this section: only fill in a phone that is missing.
+        // Already saved in this section: it is UPDATED, not added again.
         final old = existingDocs['$sid|$lname'];
-        if (old != null && !old.hasPhone && phones.isNotEmpty) {
-          updated++;
-          existingDocs['$sid|$lname'] = (id: old.id, hasPhone: true);
-          writes.add((b) => b.update(_students.doc(old.id), {
-            'phone': phones.first,
-            'phones': phones,
-            'username': phones.first,
-            'updatedBy': _uid,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }));
+        if (old != null && handled.add(old.id)) {
+          syncExisting(old.id, name, phones, row);
           continue;
         }
         skipped++;
@@ -9747,7 +9938,10 @@ class SchoolService {
       classesWithName.add(thisClass);
       newStudents++;
       if (phones.isEmpty) noPhone++;
+      final nn = noForNew(row);
       writes.add((b) => b.set(_students.doc(), {
+        'studentNo': nn.no,
+        'studentNoAuto': nn.auto,
         'sectionId': sid,
         'name': name,
         'phone': phones.isEmpty ? '' : phones.first,
@@ -9758,7 +9952,7 @@ class SchoolService {
         'createdAt': FieldValue.serverTimestamp(),
       }));
     }
-    if (writes.isEmpty && skipped == 0) {
+    if (writes.isEmpty && skipped == 0 && unchanged == 0) {
       throw Exception(
           'No valid rows found. The columns must be: Form, Section, Student name.');
     }
@@ -9775,7 +9969,14 @@ class SchoolService {
     skipped: skipped,
     updated: updated,
     noPhone: noPhone,
-    dups: dups);
+    dups: dups,
+    unchanged: unchanged,
+    idsSet: idsSet,
+    idsGenerated: idsGenerated,
+    idConflicts: idConflicts,
+    phonesReplaced: phonesReplaced,
+    namesFixed: namesFixed,
+    loginKept: loginKept);
   }
 
   /// Deletes the section together with its students and attendance records.
@@ -9800,7 +10001,8 @@ class SchoolService {
         StudentInfo(
             id: d.id,
             name: d.data()['name'] ?? '',
-            sectionId: sectionId),
+            sectionId: sectionId,
+            studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
     ];
     l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     return l;
@@ -9817,10 +10019,36 @@ class SchoolService {
         return out;
       });
 
-  Future<void> addStudents(String sectionId, List<String> names) {
+  /// The next free generated Student IDs: ST0001, ST0002 ...
+  Future<List<String>> freshStudentNos(int n) async {
+    final snap = await _students.get();
+    final re = RegExp(r'^ST(\d+)$', caseSensitive: false);
+    var max = 0;
+    for (final d in snap.docs) {
+      final m = re.firstMatch('${d.data()['studentNo'] ?? ''}'.trim());
+      if (m != null) {
+        final v = int.parse(m[1]!);
+        if (v > max) max = v;
+      }
+    }
+    return [for (var i = 1; i <= n; i++) 'ST${(max + i).toString().padLeft(4, '0')}'];
+  }
+
+  /// Gives a student that has no Student ID a generated one.
+  Future<String> generateStudentNo(String docId) async {
+    final no = (await freshStudentNos(1)).first;
+    await _students.doc(docId).update({'studentNo': no, 'studentNoAuto': true});
+    return no;
+  }
+
+  Future<void> addStudents(String sectionId, List<String> names) async {
+    final nos = await freshStudentNos(names.length);
+    var k = 0;
     final batch = _db.batch();
     for (final n in names) {
       batch.set(_students.doc(), {
+        'studentNo': nos[k++],
+        'studentNoAuto': true,
         'sectionId': sectionId,
         'name': n,
         'createdBy': _uid,
@@ -9832,6 +10060,7 @@ class SchoolService {
 
   /// Adds students that may have a phone number. Returns the new ids.
   Future<List<String>> addStudentsWithPhones(
+<<<<<<< HEAD
       String sectionId, List<({String name, String phone})> list) async {
     final batch = _db.batch();
     final ids = <String>[];
@@ -9851,6 +10080,28 @@ class SchoolService {
     }
     await batch.commit();
     return ids;
+=======
+  String sectionId, List<({String name, String phone})> list) async {
+  final batch = _db.batch();
+  final ids = <String>[];
+  final nos = await freshStudentNos(list.length);
+  var k = 0;
+  for (final e in list) {
+  final ref = _students.doc();
+  ids.add(ref.id);
+  final phones = phonesIn(e.phone);
+  batch.set(ref, {
+  'studentNo': nos[k++],
+  'studentNoAuto': true,
+  'sectionId': sectionId,
+  'name': e.name,
+  'phone': phones.isEmpty ? '' : phones.first,
+  'phones': phones,
+  'username': phones.isEmpty ? '' : phones.first,
+  'createdBy': _uid,
+  'createdAt': FieldValue.serverTimestamp(),
+  });
+>>>>>>> a7e555d (update)
   }
 
   Future<void> deleteStudent(String id) => _students.doc(id).delete();
@@ -9973,8 +10224,95 @@ class SchoolService {
             name: '${d.data()['name'] ?? ''}',
             sectionId: '${d.data()['sectionId'] ?? ''}',
             phone: '${d.data()['phone'] ?? ''}',
+<<<<<<< HEAD
             phones: _phoneList(d.data()['phones'], d.data()['phone'])),
     };
+=======
+            phones: _phoneList(d.data()['phones'], d.data()['phone']),
+            accountUid: '${d.data()['accountUid'] ?? ''}',
+            studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+    ]);
+
+// ---------------- Attendance ----------------
+/// Subject '' means "Whole day" (the old behaviour, so old records still work).
+static String subjectKey(String subject) =>
+subject.trim().replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
+
+String _attId(String sectionId, String dateKey, [String subject = '']) {
+final k = subjectKey(subject);
+return k.isEmpty ? '${sectionId}_$dateKey' : '${sectionId}_${dateKey}_$k';
+}
+
+static Map<String, String> _recordsOf(Object? r) =>
+r is Map ? r.map((k, v) => MapEntry('$k', '$v')) : <String, String>{};
+
+/// studentId -> 'present' | 'absent' | 'late'
+Future<Map<String, String>> getAttendance(String sectionId, String dateKey,
+{String subject = ''}) async {
+final d = await _attendance.doc(_attId(sectionId, dateKey, subject)).get();
+return _recordsOf(d.data()?['records']);
+}
+
+Future<void> saveAttendance(
+String sectionId, String dateKey, Map<String, String> records,
+{String subject = ''}) {
+return _attendance.doc(_attId(sectionId, dateKey, subject)).set({
+'sectionId': sectionId,
+'date': dateKey,
+'subject': subject.trim(),
+'records': records,
+'updatedBy': _uid,
+'updatedAt': FieldValue.serverTimestamp(),
+}).timeout(const Duration(seconds: 30), onTimeout: () {
+throw Exception('Saving timed out. Check the internet connection.');
+});
+}
+
+/// Every register between two dates (yyyy-MM-dd, inclusive). One range
+/// filter on one field, so no extra Firestore index is needed.
+Future<List<AttendanceDoc>> getAttendanceRange(
+String fromKey, String toKey) async {
+final q = await _attendance
+    .where('date', isGreaterThanOrEqualTo: fromKey)
+    .where('date', isLessThanOrEqualTo: toKey)
+    .get();
+return [
+for (final d in q.docs)
+AttendanceDoc(
+id: d.id,
+sectionId: '${d.data()['sectionId'] ?? ''}',
+dateKey: '${d.data()['date'] ?? ''}',
+subject: '${d.data()['subject'] ?? ''}',
+records: _recordsOf(d.data()['records']),
+),
+];
+}
+
+/// Deletes saved registers (used by "Delete report").
+Future<void> deleteAttendanceDocs(List<String> ids) async {
+for (var i = 0; i < ids.length; i += 400) {
+final batch = _db.batch();
+for (final id in ids.skip(i).take(400)) {
+batch.delete(_attendance.doc(id));
+}
+await batch.commit();
+}
+}
+
+/// studentId -> student (used by the report for names).
+Future<Map<String, StudentInfo>> getAllStudents() async {
+final q = await _students.get();
+final map = {
+for (final d in q.docs)
+d.id: StudentInfo(
+id: d.id,
+name: '${d.data()['name'] ?? ''}',
+sectionId: '${d.data()['sectionId'] ?? ''}',
+phone: '${d.data()['phone'] ?? ''}',
+phones: _phoneList(d.data()['phones'], d.data()['phone']),
+studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+};
+>>>>>>> a7e555d (update)
 // A student without a phone takes the phone of the student with the same
 // name in the same class (1A and 1A-A / 1A-B are the same class), as
 // shown in the Students tab.
@@ -9987,6 +10325,7 @@ class SchoolService {
             '${s.name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
       }
 
+<<<<<<< HEAD
       final withPhone = <String, StudentInfo>{};
       for (final s in map.values) {
         if (s.phoneText.isNotEmpty) withPhone.putIfAbsent(k(s), () => s);
@@ -10005,6 +10344,28 @@ class SchoolService {
     } catch (_) {}
     return map;
   }
+=======
+final withPhone = <String, StudentInfo>{};
+for (final s in map.values) {
+if (s.phoneText.isNotEmpty) withPhone.putIfAbsent(k(s), () => s);
+}
+for (final e in map.entries.toList()) {
+if (e.value.phoneText.isNotEmpty) continue;
+final o = withPhone[k(e.value)];
+if (o == null) continue;
+map[e.key] = StudentInfo(
+id: e.value.id,
+name: e.value.name,
+sectionId: e.value.sectionId,
+phone: o.phone,
+phones: o.phones,
+accountUid: e.value.accountUid,
+studentNo: e.value.studentNo);
+}
+} catch (_) {}
+return map;
+}
+>>>>>>> a7e555d (update)
 }
 
 // ======================= SECTIONS SCREEN =======================
@@ -11150,6 +11511,7 @@ class _SectionsToolsState extends State<_SectionsTools> {
     }
   }
 
+<<<<<<< HEAD
   Future<void> _upload() async {
     final go = await showDialog<bool>(
       context: context,
@@ -11217,6 +11579,57 @@ class _SectionsToolsState extends State<_SectionsTools> {
               '${r.noPhone > 0 ? ' ${r.noPhone} new students have no phone number (they cannot log in).' : ''}'),
         ));
       }
+=======
+Future<void> _upload() async {
+final go = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Upload student list'),
+content: const SizedBox(
+width: 400,
+child: Text(
+'Choose an Excel (.xlsx) or CSV file for ALL classes. '
+'Use these columns: the class, the student name and the phone number:\n\n'
+'Class  |  Student name  |  Phone\n'
+'1A  |  Ali Hassan  |  0634123456\n'
+'1B  |  Amina Yusuf  |  0634765432\n'
+'2C  |  Omar Abdi  |  0634111222\n'
+'4B  |  Hodan Warsame  |  0634333444\n\n'
+'Separate Form | Section | Student name columns also work.\n\n'
+'Add a Phone column (Phone, Mobile or Tel) to save the phone '
+'numbers. Several numbers in one cell can be separated by a '
+'comma. The FIRST phone number becomes the student\'s '
+'username and password.\n\n'
+'Every class in the file (1A, 1B, 2C, 4B...) is created '
+'automatically if it does not exist yet. '
+'Students that are already in a section are skipped.',
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton.icon(
+onPressed: () => Navigator.pop(ctx, true),
+icon: const Icon(Icons.attach_file),
+label: const Text('Choose file'),
+),
+],
+),
+);
+if (go != true || !mounted) return;
+final res = await FilePicker.platform.pickFiles(
+withData: true,
+type: FileType.custom,
+allowedExtensions: ['xlsx', 'csv', 'txt'],
+);
+if (res == null || res.files.isEmpty || !mounted) return;
+setState(() => _busy = true);
+final messenger = ScaffoldMessenger.of(context);
+try {
+final r = await widget.service.importFile(res.files.first);
+if (mounted) await showImportOutcome(context, r);
+>>>>>>> a7e555d (update)
 // every uploaded student with a phone number gets the login now
       if (mounted) {
         await runAccountCreation(context);
@@ -11944,6 +12357,7 @@ class _StudentsScreenState extends State<StudentsScreen> {
   }
 
 // ---------------- Upload / download ----------------
+<<<<<<< HEAD
   Future<void> _upload() async {
     final go = await showDialog<bool>(
       context: context,
@@ -12008,6 +12422,55 @@ class _StudentsScreenState extends State<StudentsScreen> {
                 '${r.noPhone > 0 ? ' ${r.noPhone} new students have no phone number (they cannot log in).' : ''}',
             seconds: 8);
       }
+=======
+Future<void> _upload() async {
+final go = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Upload student list'),
+content: const SizedBox(
+width: 400,
+child: Text(
+'Choose an Excel (.xlsx) or CSV file. '
+'Use these columns: the class, the student name and the phone number:\n\n'
+'Class  |  Student name  |  Phone\n'
+'1A  |  Ali Hassan  |  0634123456\n'
+'1B  |  Amina Yusuf  |  0634765432\n'
+'2C  |  Omar Abdi  |  0634111222\n\n'
+'Separate Form | Section | Student name columns also work.\n\n'
+'Add a Phone column (Phone, Mobile or Tel) to save the phone '
+'numbers. The FIRST phone number becomes the student\'s '
+'username and password.\n\n'
+'A class that does not exist yet (1A, 2C, 4B...) is created '
+'automatically. Students that are already in a section are '
+'skipped, so it is safe to upload the same file again.\n\n'
+'Tip: use the download button to get an empty template.',
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton.icon(
+onPressed: () => Navigator.pop(ctx, true),
+icon: const Icon(Icons.attach_file),
+label: const Text('Choose file'),
+),
+],
+),
+);
+if (go != true || !mounted) return;
+final res = await FilePicker.platform.pickFiles(
+withData: true,
+type: FileType.custom,
+allowedExtensions: ['xlsx', 'csv', 'txt'],
+);
+if (res == null || res.files.isEmpty || !mounted) return;
+setState(() => _busy = true);
+try {
+final r = await _service.importFile(res.files.first);
+if (mounted) await showImportOutcome(context, r);
+>>>>>>> a7e555d (update)
 // every uploaded student with a phone number gets the login now
       if (mounted) {
         await runAccountCreation(context);
@@ -13312,6 +13775,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
             color: Colors.black87)),
   );
 
+<<<<<<< HEAD
   Widget _profile(ColorScheme cs) {
     final sec = widget.section;
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -13388,6 +13852,171 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       },
     );
   }
+=======
+/// Compact label + value cell used in the two-column details grid.
+Widget _cell(IconData icon, String label, Widget value, double width) =>
+SizedBox(
+width: width,
+child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Padding(
+padding: const EdgeInsets.only(top: 2),
+child: Icon(icon, size: 16, color: Colors.black54),
+),
+const SizedBox(width: 8),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(label,
+style: const TextStyle(fontSize: 11, color: Colors.black54)),
+value,
+]),
+),
+]),
+);
+
+Widget _val(String v) => Text(v,
+style: const TextStyle(
+fontSize: 13, fontWeight: FontWeight.w600, color: Colors.black87));
+
+Widget _smallBtn(IconData icon, String label, VoidCallback onTap) =>
+Padding(
+padding: const EdgeInsets.only(top: 4),
+child: FilledButton.tonalIcon(
+style: FilledButton.styleFrom(
+visualDensity: VisualDensity.compact,
+padding: const EdgeInsets.symmetric(horizontal: 10),
+textStyle: const TextStyle(fontSize: 12),
+),
+onPressed: onTap,
+icon: Icon(icon, size: 16),
+label: Text(label),
+),
+);
+
+Widget _profile(ColorScheme cs) {
+final sec = widget.section;
+return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+stream: _docStream,
+builder: (context, snap) {
+final m = snap.data?.data() ?? {};
+final linked = (m['accountUid'] is String) &&
+(m['accountUid'] as String).isNotEmpty;
+final name = '${m['name'] ?? widget.student.name}';
+final hasPhone = '${m['phone'] ?? ''}'.isNotEmpty;
+final noId = '${m['studentNo'] ?? ''}'.trim().isEmpty;
+return Card(
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Row(children: [
+CircleAvatar(
+radius: 22,
+backgroundColor: cs.primaryContainer,
+child: Text(
+name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase(),
+style: TextStyle(
+fontSize: 20,
+fontWeight: FontWeight.bold,
+color: cs.onPrimaryContainer),
+),
+),
+const SizedBox(width: 12),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(name,
+style: const TextStyle(
+fontSize: 17, fontWeight: FontWeight.bold)),
+Text(sec.fullName,
+style: TextStyle(
+color: cs.primary,
+fontWeight: FontWeight.w600,
+fontSize: 13)),
+]),
+),
+]),
+const Divider(height: 16),
+LayoutBuilder(builder: (context, c) {
+final w = (c.maxWidth - 12) / 2;
+return Wrap(spacing: 12, runSpacing: 10, children: [
+_cell(Icons.school_outlined, 'Form', _val(sec.form), w),
+_cell(Icons.class_outlined, 'Class',
+_val(SectionInfo.code(sec.form, sec.classKey)), w),
+_cell(
+Icons.groups_outlined,
+'Section',
+_val(sec.isSub
+? 'Section ${sec.subName}'
+    : 'Whole class (no sections)'),
+w),
+_cell(
+Icons.tag,
+'Student ID',
+noId
+? Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+children: [
+_val('Not set yet'),
+_smallBtn(Icons.auto_fix_high, 'Generate', () async {
+final messenger = ScaffoldMessenger.of(context);
+try {
+await SchoolService()
+    .generateStudentNo(widget.student.id);
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content:
+Text('Could not generate the ID: $e')));
+}
+}),
+])
+    : _val('${m['studentNo']}'.trim()),
+w),
+_cell(
+Icons.phone_outlined,
+'Phone number(s)',
+_val((m['phones'] is List && (m['phones'] as List).isNotEmpty)
+? (m['phones'] as List).join('  ·  ')
+    : 'Not saved'),
+w),
+_cell(
+Icons.person_outline,
+'Username / password',
+_val(!hasPhone
+? 'No phone number, cannot log in'
+    : '${m['phone']}  (same for both)'),
+w),
+_cell(
+Icons.link,
+'Student account',
+Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+children: [
+_val(linked ? 'Linked' : 'Not linked'),
+if (!linked && hasPhone)
+_smallBtn(Icons.key, 'Create login', () {
+runAccountCreation(context,
+ids: [widget.student.id], quiet: true);
+}),
+]),
+w),
+_cell(Icons.event_available_outlined, 'Added',
+_val(_fmtDate(m['createdAt'] as Timestamp?)), w),
+if (m['updatedAt'] != null)
+_cell(Icons.update, 'Last updated',
+_val(_fmtDate(m['updatedAt'] as Timestamp?)), w),
+]);
+}),
+]),
+),
+);
+},
+);
+}
+>>>>>>> a7e555d (update)
 
   Widget _summary(List<_AttEntry> all) {
     final t = _Tally();
@@ -15209,6 +15838,7 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
         ),
     ];
 
+<<<<<<< HEAD
     final doc = pw.Document();
     final logoImg = pdfLogoImage(LogoPlace.attendance);
     doc.addPage(pw.MultiPage(
@@ -15254,6 +15884,54 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
     ));
     return doc.save();
   }
+=======
+final doc = pw.Document();
+final logoImg = pdfLogoImage(LogoPlace.attendance);
+doc.addPage(pw.MultiPage(
+maxPages: 100000,
+pageTheme: pdfPageTheme(const pw.EdgeInsets.all(36),
+background: pdfWatermark(LogoPlace.attendance)),
+footer: (ctx) => pw.Align(
+alignment: pw.Alignment.centerRight,
+child: pw.Text('Page ${ctx.pageNumber} of ${ctx.pagesCount}',
+style: const pw.TextStyle(fontSize: 8)),
+),
+build: (ctx) => [
+if (logoImg != null) pdfLogoBlock(logoImg),
+if (d.logo != null) ...[
+pw.ConstrainedBox(
+constraints: const pw.BoxConstraints(maxHeight: 110),
+child: pw.Image(pw.MemoryImage(d.logo!.data), fit: pw.BoxFit.contain),
+),
+pw.SizedBox(height: 10),
+],
+pw.Text('ATTENDANCE REPORT',
+style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+pw.SizedBox(height: 4),
+pw.Text(c(d.period),
+style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+pw.SizedBox(height: 2),
+pw.Text(c(d.filters), style: const pw.TextStyle(fontSize: 10)),
+pw.Text(
+'Generated ${DateFormat('MMM d, yyyy HH:mm').format(DateTime.now())}',
+style: const pw.TextStyle(fontSize: 9)),
+pw.Text('Rate = present / marked students',
+style: const pw.TextStyle(fontSize: 9)),
+for (final t in d.tables) ...table(t),
+if (d.insights.isNotEmpty) ...[
+pw.SizedBox(height: 14),
+pw.Text('Highlights',
+style:
+pw.TextStyle(fontSize: 12.5, fontWeight: pw.FontWeight.bold)),
+pw.SizedBox(height: 4),
+for (final i in d.insights)
+pw.Text('- ${c(i)}', style: const pw.TextStyle(fontSize: 10)),
+],
+],
+));
+return doc.save();
+}
+>>>>>>> a7e555d (update)
 
   Uint8List _buildDocx(_ExDoc d) {
     String x(String t) => ExamService._xml(t.replaceAll('–', '-'));
@@ -15822,6 +16500,7 @@ class ResultService {
   static String _id(String studentId, String exam) =>
       '${studentId}_${SchoolService.subjectKey(exam)}';
 
+<<<<<<< HEAD
   /// Every student of the school.
   Stream<List<StudentInfo>> watchAllStudents() =>
       _db.collection('students').snapshots().map((s) {
@@ -15837,6 +16516,24 @@ class ResultService {
         l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
         return l;
       });
+=======
+/// Every student of the school.
+Stream<List<StudentInfo>> watchAllStudents() =>
+_db.collection('students').snapshots().map((s) {
+final sc = teacherScope.value;
+final l = [
+for (final d in s.docs)
+if (!sc.isStudent || d.id == sc.studentId)
+StudentInfo(
+id: d.id,
+name: '${d.data()['name'] ?? ''}',
+sectionId: '${d.data()['sectionId'] ?? ''}',
+studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+];
+l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+return l;
+});
+>>>>>>> a7e555d (update)
 
   static Map<String, double> _marksOf(Object? r) {
     final out = <String, double>{};
@@ -16969,6 +17666,7 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
   Future<Uint8List> _buildReportDocx() async => ExamService()
       .buildResultReportDocx(exam: _ResultPrefs.exam, groups: await _reportGroups());
 
+<<<<<<< HEAD
   Future<List<ResultReportGroup>> _reportGroups() async {
     final exam = _ResultPrefs.exam;
     final sections = await _school.watchSections().first;
@@ -16989,6 +17687,34 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
         results: results,
       );
     }
+=======
+Future<List<ResultReportGroup>> _reportGroups() async {
+final exam = _ResultPrefs.exam;
+final sections = await _school.watchSections().first;
+final students = await _service.watchAllStudents().first;
+final results = await _service.watchResults(exam).first;
+final twins = await _service.twinMap();
+final secOf = {for (final s in sections) s.id: s};
+
+ResultReportGroup group(String title, bool Function(SectionInfo) inGroup) {
+final ids = {for (final s in sections) if (inGroup(s)) s.id};
+// a student who exists in the whole class AND in a section is listed once
+final inScope = {
+for (final x in students)
+if (ids.contains(x.sectionId)) x.id
+};
+final list = [
+for (final x in students)
+if (inScope.contains(x.id) && !_isDupCopy(x, twins, secOf, inScope)) x
+];
+return ResultReportGroup(
+title: title,
+students: list,
+sectionLabels: {for (final x in list) x.id: secOf[x.sectionId]?.label ?? ''},
+results: results,
+);
+}
+>>>>>>> a7e555d (update)
 
     final groups = widget.form == null
         ? [
@@ -17593,6 +18319,7 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
             final avg = r?.average;
             final g = avg == null ? null : _gradeOf(avg);
 // Marks are typed straight in the list (not for a student login).
+<<<<<<< HEAD
             final sForm = secOf[s.sectionId]?.form;
             final inlineSubs = teacherScope.value.isStudent
                 ? const <String>[]
@@ -17720,6 +18447,139 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
       ),
     ]);
   }
+=======
+final sForm = secOf[s.sectionId]?.form;
+final inlineSubs = teacherScope.value.isStudent
+? const <String>[]
+    : [
+for (final x in teacherScope.value.subjectList)
+if (sForm == null ||
+teacherScope.value.allows(x, sForm))
+x,
+];
+final inline = inlineSubs.isNotEmpty &&
+(avg == null || _pinned.contains(s.id));
+Widget marksBox() => _InlineMarks(
+key: ValueKey('${s.id}|${_ResultPrefs.exam}'),
+student: s,
+subjects: inlineSubs,
+exam: _ResultPrefs.exam,
+absent: _absent[s.id] ?? const <String>{},
+onStart: () => _pinned.add(s.id),
+);
+return Card(
+margin: const EdgeInsets.symmetric(vertical: 3),
+child: InkWell(
+borderRadius: BorderRadius.circular(12),
+onTap: () => _openResultEditor(
+context, s, secLabel(s), _ResultPrefs.exam,
+form: secOf[s.sectionId]?.form),
+child: Padding(
+padding: const EdgeInsets.symmetric(
+horizontal: 12, vertical: 10),
+child: Row(children: [
+CircleAvatar(
+radius: 14,
+backgroundColor: g == null
+? Colors.grey.shade400
+    : _gradeColor(g),
+child: Text('${number[s.id]}',
+style: const TextStyle(
+fontSize: 11, color: Colors.white)),
+),
+const SizedBox(width: 10),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(s.name,
+maxLines: 2,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 14.5,
+fontWeight: FontWeight.w600)),
+if (multi || s.studentNo.isNotEmpty) ...[
+const SizedBox(height: 2),
+Text(
+[
+if (s.studentNo.isNotEmpty) 'ID ${s.studentNo}',
+if (multi) secLabel(s),
+].join('  ·  '),
+style: TextStyle(
+fontSize: 12,
+color: Colors.grey.shade600)),
+],
+if (inline && inlineSubs.length > 1) ...[
+const SizedBox(height: 8),
+marksBox(),
+],
+],
+),
+),
+if (inline && inlineSubs.length == 1)
+marksBox()
+else if (inline)
+const SizedBox.shrink()
+else if (r == null || avg == null)
+Text('No result',
+style: TextStyle(
+fontSize: 12,
+color: Colors.grey.shade500))
+else
+Column(
+crossAxisAlignment: CrossAxisAlignment.end,
+children: [
+Row(mainAxisSize: MainAxisSize.min, children: [
+Container(
+padding: const EdgeInsets.symmetric(
+horizontal: 8, vertical: 2),
+decoration: BoxDecoration(
+color: _gradeColor(g!).withAlpha(36),
+borderRadius: BorderRadius.circular(8),
+),
+child: Text(g,
+style: TextStyle(
+fontWeight: FontWeight.w800,
+color: _gradeColor(g))),
+),
+const SizedBox(width: 8),
+Text(
+_fmtMark(double.parse(
+avg.toStringAsFixed(1))),
+style: const TextStyle(
+fontSize: 16,
+fontWeight: FontWeight.w800)),
+]),
+const SizedBox(height: 2),
+Text(
+'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}'
+'${appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 && r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin ? ' · below min' : ''}',
+style: TextStyle(
+fontSize: 11.5,
+fontWeight: appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 &&
+r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin
+? FontWeight.w700
+    : FontWeight.normal,
+color: appSettings.value.limitsFor(_ResultPrefs.exam).totalMin > 0 &&
+r.total < appSettings.value.limitsFor(_ResultPrefs.exam).totalMin
+? const Color(0xFFC62828)
+    : Colors.grey.shade600)),
+],
+),
+if (!teacherScope.value.isStudent) ...[
+const SizedBox(width: 4),
+const Icon(Icons.edit_note, size: 20),
+],
+]),
+),
+),
+);
+},
+),
+),
+]);
+}
+>>>>>>> a7e555d (update)
 
   @override
   Widget build(BuildContext context) {
@@ -18993,6 +19853,7 @@ class _LoginScreenState extends State<LoginScreen> {
               _password.text.trim().toLowerCase() == typedEmail.toLowerCase();
           if (wrongLogin && studentPhone != null && typedPassword == studentPhone) {
 // First sign in of an uploaded student: the account is created now.
+<<<<<<< HEAD
             final ok = await _studentPhoneLogin(studentPhone);
             if (!ok) rethrow;
           } else if (wrongLogin && sameAsEmail) {
@@ -19019,6 +19880,34 @@ class _LoginScreenState extends State<LoginScreen> {
           'too-many-requests' => 'Too many attempts. Try again later.',
           _ => e.message ?? e.code,
         };
+=======
+final ok = await _studentPhoneLogin(studentPhone);
+if (!ok) rethrow;
+} else if (wrongLogin && sameAsEmail) {
+final ok = await _teacherEmailLogin(typedEmail);
+if (!ok) rethrow;
+} else {
+rethrow;
+}
+}
+// signed in: let the browser / phone save the login details
+TextInput.finishAutofillContext();
+}
+} on FirebaseAuthException catch (e) {
+setState(() {
+_error = switch (e.code) {
+'invalid-credential' ||
+'wrong-password' ||
+'user-not-found' =>
+'Wrong email or password.',
+'invalid-email' => 'Invalid email address or phone number.',
+'email-already-in-use' =>
+'This email already has an account. Please sign in.',
+'weak-password' => 'Password must be at least 6 characters.',
+'too-many-requests' => 'Too many attempts. Try again later.',
+_ => e.message ?? e.code,
+};
+>>>>>>> a7e555d (update)
 // a problem with the email / password: go back to the first step
         if (_signUp) _step = 0;
       });
@@ -19121,6 +20010,7 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
   ];
 
+<<<<<<< HEAD
   @override
   Widget build(BuildContext context) {
     final profileStep = _signUp && _step == 1;
@@ -19235,6 +20125,122 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
+=======
+@override
+Widget build(BuildContext context) {
+final profileStep = _signUp && _step == 1;
+return Scaffold(
+body: Center(
+child: SingleChildScrollView(
+padding: const EdgeInsets.all(24),
+child: ConstrainedBox(
+constraints: BoxConstraints(maxWidth: profileStep ? 420 : 380),
+child: Card(
+child: Padding(
+padding: const EdgeInsets.all(24),
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+AppLogo(
+place: LogoPlace.login,
+height: profileStep ? 80 : 110,
+fallback: const Icon(Icons.school,
+size: 48, color: Color(0xFF3498DB)),
+),
+const SizedBox(height: 8),
+Text(profileStep ? 'Complete your profile' : 'Exam Manager',
+style: const TextStyle(
+fontSize: 22, fontWeight: FontWeight.bold)),
+const SizedBox(height: 20),
+if (profileStep)
+..._profileForm()
+else ...[
+// AutofillGroup: the browser / phone offers to SAVE the login after
+// signing in, and fills it in the next time.
+AutofillGroup(
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+TextField(
+controller: _email,
+keyboardType: TextInputType.emailAddress,
+textInputAction: TextInputAction.next,
+autofillHints: [
+_signUp ? AutofillHints.email : AutofillHints.username
+],
+decoration: InputDecoration(
+labelText:
+_signUp ? 'Email' : 'Email or phone number',
+border: const OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+TextField(
+controller: _password,
+obscureText: _hide,
+autofillHints: [
+_signUp ? AutofillHints.newPassword : AutofillHints.password
+],
+onSubmitted: (_) => _submit(),
+decoration: InputDecoration(
+labelText: 'Password',
+border: const OutlineInputBorder(),
+suffixIcon: IconButton(
+icon: Icon(
+_hide ? Icons.visibility : Icons.visibility_off),
+onPressed: () => setState(() => _hide = !_hide),
+),
+),
+),
+]),
+),
+],
+ValueListenableBuilder<String?>(
+valueListenable: loginNotice,
+builder: (context, n, _) => n == null
+? const SizedBox.shrink()
+    : Padding(
+padding: const EdgeInsets.only(top: 12),
+child: Text(n,
+style: const TextStyle(color: Colors.red)),
+),
+),
+if (_error != null) ...[
+const SizedBox(height: 12),
+Text(_error!, style: const TextStyle(color: Colors.red)),
+],
+const SizedBox(height: 16),
+SizedBox(
+width: double.infinity,
+child: FilledButton(
+onPressed: _busy ? null : _submit,
+child: _busy
+? const SizedBox(
+height: 20,
+width: 20,
+child: CircularProgressIndicator(strokeWidth: 2))
+    : Text(!_signUp
+? 'Sign in'
+    : (_step == 0 ? 'Next' : 'Create account')),
+),
+),
+if (!profileStep)
+TextButton(
+onPressed: _busy
+? null
+    : () => setState(() {
+_signUp = !_signUp;
+_step = 0;
+_error = null;
+}),
+child: Text(_signUp
+? 'Already have an account? Sign in'
+    : "Don't have an account? Sign up"),
+),
+]),
+),
+),
+),
+),
+),
+);
+}
+>>>>>>> a7e555d (update)
 }
 
 class ExamManagerApp extends StatelessWidget {
@@ -19383,6 +20389,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
         if (mine.data?.isAdmin != true) return const SizedBox.shrink();
         if (!_teachersSynced) {
 // Every teacher / staff member in Teachers must be in this list.
+<<<<<<< HEAD
           _teachersSynced = true;
           TeacherService().syncAllUsers();
         }
@@ -19488,6 +20495,113 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                       }
                       final accounts =
                       snap.data!.docs.map(UserProfile.fromDoc).toList();
+=======
+_teachersSynced = true;
+TeacherService().syncAllUsers();
+}
+final users = FirebaseFirestore.instance.collection('users');
+return Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: Card(
+margin: EdgeInsets.zero,
+child: Padding(
+padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Row(children: [
+Icon(Icons.admin_panel_settings, size: 20, color: kBlue),
+SizedBox(width: 8),
+Text('Users & permissions',
+style: TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+const SizedBox(height: 8),
+const Text(
+'Choose which pages each user can see. Administrators '
+'always see everything. Users only see the pages '
+'ticked for them.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+const SizedBox(height: 14),
+const Text('Default access for new accounts',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Text('Teachers',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.teacherAccess,
+(v) => _run(context,
+() => appSettings.update({'teacherAccess': v}))),
+const SizedBox(height: 10),
+const Text('Students',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.studentAccess,
+(v) => _run(context,
+() => appSettings.update({'studentAccess': v}))),
+const SizedBox(height: 10),
+const Text('Student affairs',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.affairsAccess,
+(v) => _run(context,
+() => appSettings.update({'affairsAccess': v}))),
+],
+),
+),
+const Divider(height: 28),
+const Text('Users',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+TextField(
+controller: _search,
+onChanged: (_) => setState(() {}),
+decoration: InputDecoration(
+hintText: 'Search name, phone or email',
+prefixIcon: const Icon(Icons.search),
+suffixIcon: _search.text.isEmpty
+? null
+    : IconButton(
+icon: const Icon(Icons.clear),
+onPressed: () => setState(_search.clear)),
+border: const OutlineInputBorder(),
+isDense: true,
+),
+),
+const SizedBox(height: 8),
+Wrap(spacing: 8, runSpacing: 4, children: [
+for (final r in ['all', ...UserProfile.roles])
+ChoiceChip(
+label: Text(
+r == 'all' ? 'All roles' : UserProfile.roleLabel(r)),
+selected: _roleFilter == r,
+onSelected: (_) => setState(() => _roleFilter = r),
+),
+]),
+const SizedBox(height: 4),
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: users.snapshots(),
+builder: (context, snap) {
+if (snap.hasError) {
+return Text('Error: ${snap.error}');
+}
+if (!snap.hasData) {
+return const Padding(
+padding: EdgeInsets.all(12),
+child: Center(child: CircularProgressIndicator()),
+);
+}
+final accounts =
+snap.data!.docs.map(UserProfile.fromDoc).toList();
+>>>>>>> a7e555d (update)
 // Everybody in Teachers must be here too: a teacher /
 // staff member without an account yet is listed as
 // "not signed in yet" (set up now, linked at the first
@@ -20107,6 +21221,7 @@ Future<void> editTeacherDialog(BuildContext context,
   void toast(String m) => ScaffoldMessenger.of(context)
       .showSnackBar(SnackBar(content: Text(m)));
 // Only the administrator sets the pages of a person (users/{id}.access).
+<<<<<<< HEAD
   var isAdminMe = false;
   UserProfile? up; // the user of this person, when there is one
   try {
@@ -20142,6 +21257,43 @@ Future<void> editTeacherDialog(BuildContext context,
   final email = TextEditingController(text: t?.email ?? presetEmail);
   var role = t?.role ?? 'Teacher';
   var allSec = t?.allSections ?? false;
+=======
+var isAdminMe = false;
+UserProfile? up; // the user of this person, when there is one
+try {
+final users = FirebaseFirestore.instance.collection('users');
+final meId = FirebaseAuth.instance.currentUser?.uid ?? '';
+if (meId.isNotEmpty) {
+isAdminMe = UserProfile.fromDoc(await users.doc(meId).get()).isAdmin;
+}
+if (isAdminMe) {
+final id = t?.id ?? newId;
+if (id.isNotEmpty) {
+final d = await users.doc(id).get();
+if (d.exists) up = UserProfile.fromDoc(d);
+}
+final mail = (t?.email ?? presetEmail).trim().toLowerCase();
+if (up == null && mail.isNotEmpty) {
+final q = await users.where('email', isEqualTo: mail).limit(1).get();
+if (q.docs.isNotEmpty) up = UserProfile.fromDoc(q.docs.first);
+}
+}
+} catch (_) {}
+if (!context.mounted) return;
+final showPages = isAdminMe && up?.isAdmin != true;
+var access = <String>[
+...(up?.access ??
+(up != null
+? up.effectiveAccess(appSettings.value)
+    : appSettings.value.teacherAccess))
+];
+var accessEdited = false;
+final name = TextEditingController(text: t?.name ?? presetName);
+final phone = TextEditingController(text: t?.phone ?? '');
+final email = TextEditingController(text: t?.email ?? presetEmail);
+var role = t?.role ?? 'Teacher';
+var allSec = t?.allSections ?? false;
+>>>>>>> a7e555d (update)
 // subject -> the forms in which it is taught
   final assign = <String, Set<String>>{
     for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
