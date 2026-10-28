@@ -19002,6 +19002,8 @@ class _LoginScreenState extends State<LoginScreen> {
             rethrow;
           }
         }
+// signed in: let the browser / phone save the login details
+        TextInput.finishAutofillContext();
       }
     } on FirebaseAuthException catch (e) {
       setState(() {
@@ -19146,28 +19148,41 @@ class _LoginScreenState extends State<LoginScreen> {
                   if (profileStep)
                     ..._profileForm()
                   else ...[
-                    TextField(
-                      controller: _email,
-                      keyboardType: TextInputType.emailAddress,
-                      decoration: InputDecoration(
-                          labelText:
-                          _signUp ? 'Email' : 'Email or phone number',
-                          border: const OutlineInputBorder()),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _password,
-                      obscureText: _hide,
-                      onSubmitted: (_) => _submit(),
-                      decoration: InputDecoration(
-                        labelText: 'Password',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          icon: Icon(
-                              _hide ? Icons.visibility : Icons.visibility_off),
-                          onPressed: () => setState(() => _hide = !_hide),
+// AutofillGroup: the browser / phone offers to SAVE the login after
+// signing in, and fills it in the next time.
+                    AutofillGroup(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        TextField(
+                          controller: _email,
+                          keyboardType: TextInputType.emailAddress,
+                          textInputAction: TextInputAction.next,
+                          autofillHints: [
+                            _signUp ? AutofillHints.email : AutofillHints.username
+                          ],
+                          decoration: InputDecoration(
+                              labelText:
+                              _signUp ? 'Email' : 'Email or phone number',
+                              border: const OutlineInputBorder()),
                         ),
-                      ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _password,
+                          obscureText: _hide,
+                          autofillHints: [
+                            _signUp ? AutofillHints.newPassword : AutofillHints.password
+                          ],
+                          onSubmitted: (_) => _submit(),
+                          decoration: InputDecoration(
+                            labelText: 'Password',
+                            border: const OutlineInputBorder(),
+                            suffixIcon: IconButton(
+                              icon: Icon(
+                                  _hide ? Icons.visibility : Icons.visibility_off),
+                              onPressed: () => setState(() => _hide = !_hide),
+                            ),
+                          ),
+                        ),
+                      ]),
                     ),
                   ],
                   ValueListenableBuilder<String?>(
