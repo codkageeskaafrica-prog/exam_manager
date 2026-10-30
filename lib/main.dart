@@ -4828,6 +4828,11 @@ class ExamTableScreen extends StatelessWidget {
             ),
           ),
           IconButton(
+            tooltip: 'Change password',
+            icon: const Icon(Icons.lock_reset),
+            onPressed: () => showChangePasswordDialog(context),
+          ),
+          IconButton(
             tooltip: 'Sign out',
             icon: const Icon(Icons.logout),
             onPressed: () => _signOut(context),
@@ -6214,6 +6219,172 @@ Future<void> _signOut(BuildContext context) async {
   await FirebaseAuth.instance.signOut();
 }
 
+/// Lets the signed-in person (teacher, student, administrator) change their
+/// own password: the current password is asked first.
+Future<void> showChangePasswordDialog(BuildContext context) async {
+  final user = FirebaseAuth.instance.currentUser;
+  final email = user?.email;
+  final messenger = ScaffoldMessenger.of(context);
+  if (user == null || email == null) {
+    messenger.showSnackBar(
+        const SnackBar(content: Text('Sign in first to change the password.')));
+    return;
+  }
+  final current = TextEditingController();
+  final next = TextEditingController();
+  final again = TextEditingController();
+  var hide = true;
+  var busy = false;
+  String? error;
+  final done = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+      Future<void> submit() async {
+        final cur = current.text;
+        final nw = next.text;
+        if (cur.isEmpty) {
+          setD(() => error = 'Enter your current password.');
+          return;
+        }
+        if (nw.length < 6) {
+          setD(() => error = 'The new password must be at least 6 characters.');
+          return;
+        }
+        if (nw != again.text) {
+          setD(() => error = 'The new passwords do not match.');
+          return;
+        }
+        if (nw == cur) {
+          setD(() => error = 'The new password must be different.');
+          return;
+        }
+        setD(() {
+          busy = true;
+          error = null;
+        });
+        try {
+          try {
+            await user.reauthenticateWithCredential(
+                EmailAuthProvider.credential(email: email, password: cur));
+          } on FirebaseAuthException catch (e) {
+            // a student's first password is the phone number: also try it
+            // without spaces, +, dashes
+            final digits = phoneDigits(cur);
+            final wrong = e.code == 'wrong-password' ||
+                e.code == 'invalid-credential';
+            if (wrong && digits != null && digits != cur) {
+              await user.reauthenticateWithCredential(
+                  EmailAuthProvider.credential(email: email, password: digits));
+            } else {
+              rethrow;
+            }
+          }
+          await user.updatePassword(nw);
+          if (ctx.mounted) Navigator.pop(ctx, true);
+        } on FirebaseAuthException catch (e) {
+          setD(() {
+            busy = false;
+            error = switch (e.code) {
+              'wrong-password' ||
+              'invalid-credential' =>
+              'The current password is wrong.',
+              'weak-password' => 'The new password is too weak.',
+              'too-many-requests' =>
+              'Too many attempts. Wait a few minutes and try again.',
+              'requires-recent-login' =>
+              'Please sign out, sign in again and retry.',
+              _ => e.message ?? e.code,
+            };
+          });
+        } catch (e) {
+          setD(() {
+            busy = false;
+            error = 'Failed: $e';
+          });
+        }
+      }
+
+      InputDecoration dec(String label, {bool eye = false}) => InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+        suffixIcon: eye
+            ? IconButton(
+          icon: Icon(hide ? Icons.visibility : Icons.visibility_off),
+          onPressed: () => setD(() => hide = !hide),
+        )
+            : null,
+      );
+
+      return AlertDialog(
+        title: const Text('Change password'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(email,
+                    style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: current,
+                obscureText: hide,
+                autofocus: true,
+                decoration: dec('Current password', eye: true),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: next,
+                obscureText: hide,
+                decoration: dec('New password (6 or more characters)'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: again,
+                obscureText: hide,
+                onSubmitted: (_) => busy ? null : submit(),
+                decoration: dec('Repeat the new password'),
+              ),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(error!,
+                        style: const TextStyle(color: Color(0xFFC62828))),
+                  ),
+                ),
+            ]),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: busy ? null : () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: busy ? null : submit,
+            child: busy
+                ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Change password'),
+          ),
+        ],
+      );
+    }),
+  );
+  current.dispose();
+  next.dispose();
+  again.dispose();
+  if (done == true) {
+    messenger.showSnackBar(
+        const SnackBar(content: Text('Your password was changed.')));
+  }
+}
+
 /// The pages of the app that can be allowed or hidden for each user.
 /// The keys are saved in Firestore, so do not rename them.
 class AppPages {
@@ -6937,6 +7108,11 @@ class HomeScreen extends StatelessWidget {
         ]),
         actions: [
           const AccountBadge(),
+          IconButton(
+            tooltip: 'Change password',
+            icon: const Icon(Icons.lock_reset),
+            onPressed: () => showChangePasswordDialog(context),
+          ),
           IconButton(
             tooltip: 'Sign out',
             icon: const Icon(Icons.logout),
@@ -8390,6 +8566,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onPressed: email == null ? null : _resetPassword,
           icon: const Icon(Icons.lock_reset),
           label: const Text('Send password reset email'),
+        ),
+        OutlinedButton.icon(
+          onPressed: () => showChangePasswordDialog(context),
+          icon: const Icon(Icons.password),
+          label: const Text('Change password'),
         ),
         OutlinedButton.icon(
           onPressed: () => _signOut(context),
@@ -19172,6 +19353,74 @@ _phone.dispose();
 super.dispose();
 }
 
+/// "Forgot password?": sends a reset link to the email address.
+Future<void> _forgotPassword() async {
+final typed = _email.text.trim();
+final box = TextEditingController(text: typed.contains('@') ? typed : '');
+final isPhone = typed.isNotEmpty && !typed.contains('@');
+final messenger = ScaffoldMessenger.of(context);
+final email = await showDialog<String>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Forgot password'),
+content: SizedBox(
+width: 380,
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+Align(
+alignment: Alignment.centerLeft,
+child: Text(
+isPhone
+? 'Students sign in with the phone number and have no email. '
+'Ask your teacher or the administrator to reset your '
+'password. Teachers and staff: enter your email below.'
+    : 'Enter your email address. We will send you a link to '
+'choose a new password.',
+style: const TextStyle(fontSize: 13)),
+),
+const SizedBox(height: 12),
+TextField(
+controller: box,
+autofocus: true,
+keyboardType: TextInputType.emailAddress,
+onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+decoration: const InputDecoration(
+labelText: 'Email', border: OutlineInputBorder()),
+),
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, box.text.trim()),
+child: const Text('Send link')),
+],
+),
+);
+box.dispose();
+if (email == null) return;
+if (email.isEmpty || !email.contains('@') || !email.contains('.')) {
+messenger.showSnackBar(
+const SnackBar(content: Text('Enter a valid email address.')));
+return;
+}
+try {
+await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+messenger.showSnackBar(SnackBar(
+content: Text('If $email has an account, a reset link was sent. '
+'Check the inbox and the spam folder.')));
+} on FirebaseAuthException catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text(e.code == 'invalid-email'
+? 'This email address is not valid.'
+    : e.code == 'too-many-requests'
+? 'Too many attempts. Try again later.'
+    : (e.message ?? e.code))));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+}
+}
+
 /// Sign up, step 1 -> 2: check the email and password, then show the form.
 void _next() {
 final email = _email.text.trim();
@@ -19650,6 +19899,14 @@ icon: Icon(
 _hide ? Icons.visibility : Icons.visibility_off),
 onPressed: () => setState(() => _hide = !_hide),
 ),
+),
+),
+if (!_signUp)
+Align(
+alignment: Alignment.centerRight,
+child: TextButton(
+onPressed: _busy ? null : _forgotPassword,
+child: const Text('Forgot password?'),
 ),
 ),
 ]),
@@ -20381,6 +20638,13 @@ t.assignments.isEmpty
 ),
 ),
 actions: [
+TextButton.icon(
+onPressed: () {
+Navigator.pop(ctx);
+showChangePasswordDialog(context);
+},
+icon: const Icon(Icons.lock_reset, size: 18),
+label: const Text('Change password')),
 TextButton(
 onPressed: () => Navigator.pop(ctx),
 child: const Text('Close')),
