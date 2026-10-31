@@ -1040,7 +1040,7 @@ class ExamService {
                 for (final sub in subjects)
                   cell(r?.marks.containsKey(sub) ?? false
                       ? _fmtMark(r!.marks[sub]!)
-                      : ((r?.cheated ?? false)
+                      : (((r?.cheated ?? false) || (r?.cheatedSubs.contains(sub) ?? false))
                       ? 'Cheated'
                       : (studentIsNew(x.createdAt, sub) ? 'New' : '-'))),
                 cell(
@@ -1311,7 +1311,7 @@ class ExamService {
               ? sc(
               k++,
               r,
-              (res?.cheated ?? false)
+              ((res?.cheated ?? false) || (res?.cheatedSubs.contains(sub) ?? false))
                   ? 'Cheated'
                   : (studentIsNew(x.createdAt, sub) ? 'New' : '-'),
               2)
@@ -1593,7 +1593,7 @@ class ExamService {
             tc(subW,
                 res?.marks.containsKey(sub) ?? false
                     ? _fmtMark(res!.marks[sub]!)
-                    : ((res?.cheated ?? false)
+                    : (((res?.cheated ?? false) || (res?.cheatedSubs.contains(sub) ?? false))
                     ? 'Cheated'
                     : (studentIsNew(s.createdAt, sub) ? 'New' : '-')),
                 sz: sz,
@@ -16469,6 +16469,8 @@ label: const Text('Report'),
 class CheatEntry {
 final String id, exam, name, label, studentNo, by;
 final DateTime? at;
+/// Subjects the student cheated in. Empty = every subject.
+final List<String> subjects;
 const CheatEntry({
 required this.id,
 required this.exam,
@@ -16477,6 +16479,7 @@ this.label = '',
 this.studentNo = '',
 this.by = '',
 this.at,
+this.subjects = const [],
 });
 
 factory CheatEntry.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -16489,6 +16492,7 @@ label: '${m['label'] ?? ''}',
 studentNo: '${m['studentNo'] ?? ''}',
 by: '${m['by'] ?? ''}',
 at: (m['createdAt'] as Timestamp?)?.toDate(),
+subjects: [for (final x in (m['subjects'] as List? ?? const [])) '$x'],
 );
 }
 }
@@ -16526,8 +16530,36 @@ if (!_ready.isCompleted) _ready.complete();
 });
 }
 
-static bool isCheated(String exam, String studentId) =>
-byExam.value[exam]?.containsKey(studentId) ?? false;
+/// True when the student cheated in EVERY subject of the exam.
+static bool isCheated(String exam, String studentId) {
+final e = byExam.value[exam]?[studentId];
+return e != null && e.subjects.isEmpty;
+}
+
+/// The subjects a student cheated in when only some subjects were chosen
+/// (empty when the student is not listed or cheated in every subject).
+static Set<String> partialSubjects(String exam, String studentId) {
+final e = byExam.value[exam]?[studentId];
+if (e == null || e.subjects.isEmpty) return const <String>{};
+return e.subjects.toSet();
+}
+
+/// True when this one subject counts as cheated for the student.
+static bool isCheatedIn(String exam, String studentId, String subject) =>
+isCheated(exam, studentId) ||
+partialSubjects(exam, studentId).contains(subject);
+
+/// Changes the cheated subjects of a student already in the list
+/// (empty list = every subject).
+static Future<void> setSubjects(
+String exam, String studentId, List<String> subjects) async {
+final twin = (await ResultService().twinMap())[studentId];
+final batch = FirebaseFirestore.instance.batch();
+for (final id in <String>{studentId, if (twin != null) twin}) {
+batch.update(_col.doc(_docId(exam, id)), {'subjects': subjects});
+}
+await batch.commit();
+}
 
 static Set<String> idsOf(String exam) =>
 byExam.value[exam]?.keys.toSet() ?? <String>{};
@@ -16536,7 +16568,8 @@ static String _docId(String exam, String id) =>
 '${SchoolService.subjectKey(exam)}__$id';
 
 /// Marks the student (and his twin record: class <-> section) as cheated.
-static Future<void> add(StudentInfo s, String exam, String label) async {
+static Future<void> add(StudentInfo s, String exam, String label,
+{List<String> subjects = const []}) async {
 final twin = (await ResultService().twinMap())[s.id];
 final by = FirebaseAuth.instance.currentUser?.email ?? '';
 final batch = FirebaseFirestore.instance.batch();
@@ -16548,6 +16581,7 @@ batch.set(_col.doc(_docId(exam, id)), {
 'label': label,
 'studentNo': s.studentNo,
 'by': by,
+'subjects': subjects,
 'createdAt': FieldValue.serverTimestamp(),
 });
 }
@@ -16569,7 +16603,12 @@ final Map<String, double> marks;
 
 /// The student is in the cheating list of this exam: no marks count.
 final bool cheated;
-const ResultMarks(this.marks, {this.cheated = false});
+
+/// Subjects of this exam that count as cheated (the student cheated in
+/// some subjects only). Their marks are left out of the total and average.
+final Set<String> cheatedSubs;
+const ResultMarks(this.marks,
+{this.cheated = false, this.cheatedSubs = const <String>{}});
 double get total => marks.values.fold(0.0, (a, b) => a + b);
 double? get average => marks.isEmpty ? null : total / marks.length;
 }
@@ -16725,7 +16764,15 @@ out[id] = ResultMarks(_visibleMarks(_merge(docs)));
 }
 // the cheating list: no marks count, the student shows "Cheated"
 for (final id in CheatService.idsOf(exam)) {
+if (CheatService.isCheated(exam, id)) {
 out[id] = const ResultMarks({}, cheated: true);
+} else {
+final cs = CheatService.partialSubjects(exam, id);
+final old = out[id]?.marks ?? const <String, double>{};
+out[id] = ResultMarks(
+{for (final e in old.entries) if (!cs.contains(e.key)) e.key: e.value},
+cheatedSubs: cs);
+}
 }
 Map<String, ResultMarks> result = out;
 if (teacherScope.value.isStudent) {
@@ -16881,7 +16928,10 @@ if (extra.isNotEmpty) await write(extra);
 } catch (_) {}
 }
 
-Future<ResultMarks> get(String studentId, String exam) async {
+/// [raw] keeps the marks of cheated subjects (used when editing, so they
+/// are never lost when saving).
+Future<ResultMarks> get(String studentId, String exam,
+{bool raw = false}) async {
 CheatService.start();
 await CheatService.ready;
 if (CheatService.isCheated(exam, studentId)) {
@@ -16897,7 +16947,14 @@ if (d.data() != null) docs.add(d.data()!);
 if (id == studentId) rethrow;
 }
 }
-return ResultMarks(_merge(docs));
+final cs = CheatService.partialSubjects(exam, studentId);
+final merged = _merge(docs);
+if (cs.isEmpty) return ResultMarks(merged);
+return ResultMarks(
+raw
+? merged
+    : {for (final e in merged.entries) if (!cs.contains(e.key)) e.key: e.value},
+cheatedSubs: cs);
 }
 
 /// Saves the marks (an empty map removes the result).
@@ -17035,7 +17092,8 @@ var nw = 0;
 for (final st in people) {
 if (results[st.id]?.marks[sub] == null) {
 if (studentIsNew(st.createdAt, sub) ||
-(results[st.id]?.cheated ?? false)) {
+(results[st.id]?.cheated ?? false) ||
+(results[st.id]?.cheatedSubs.contains(sub) ?? false)) {
 nw++;
 }
 continue;
@@ -17357,6 +17415,7 @@ sub: people
     .where((st) =>
 results[st.id]?.marks[sub] == null &&
 !(results[st.id]?.cheated ?? false) &&
+!(results[st.id]?.cheatedSubs.contains(sub) ?? false) &&
 !studentIsNew(st.createdAt, sub))
     .length,
 };
@@ -17688,6 +17747,87 @@ onPressed: _busy ? null : _save, child: const Text('Save')),
 }
 }
 
+/// Asks which subject(s) a student cheated in. Returns null when cancelled,
+/// an empty list when every subject is ticked (= all subjects), otherwise the
+/// ticked subjects.
+Future<List<String>?> _pickCheatSubjects(
+BuildContext context, {
+required String title,
+required String intro,
+required String confirm,
+Set<String>? initial,
+}) {
+final all = ExamService.subjects;
+final chosen = <String>{
+...((initial == null || initial.isEmpty) ? all : initial),
+};
+return showDialog<List<String>>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setS) => AlertDialog(
+title: Text(title),
+content: SizedBox(
+width: 360,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(intro),
+const SizedBox(height: 8),
+CheckboxListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+controlAffinity: ListTileControlAffinity.leading,
+title: const Text('All subjects',
+style: TextStyle(fontWeight: FontWeight.w700)),
+value: chosen.length == all.length,
+onChanged: (v) => setS(() {
+chosen.clear();
+if (v == true) chosen.addAll(all);
+}),
+),
+const Divider(height: 1),
+for (final sub in all)
+CheckboxListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+controlAffinity: ListTileControlAffinity.leading,
+title: Text(sub),
+value: chosen.contains(sub),
+onChanged: (v) => setS(() {
+if (v == true) {
+chosen.add(sub);
+} else {
+chosen.remove(sub);
+}
+}),
+),
+],
+),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Cancel')),
+FilledButton(
+style: FilledButton.styleFrom(backgroundColor: kCheatColor),
+onPressed: chosen.isEmpty
+? null
+    : () => Navigator.pop(
+ctx,
+chosen.length == all.length
+? <String>[]
+    : <String>[for (final x in all) if (chosen.contains(x)) x]),
+child: Text(confirm),
+),
+],
+),
+),
+);
+}
+
 /// "Cheating list" of the Result screen: the students marked as cheated in
 /// the chosen exam. The administrator searches a student and marks him; all
 /// his marks of the exam then show "Cheated".
@@ -17738,7 +17878,9 @@ final inScope = {for (final s in widget.students) s.id};
 final out = <StudentInfo>[];
 for (final st in widget.students) {
 if (!secs.containsKey(st.sectionId)) continue;
-if (CheatService.isCheated(widget.exam, st.id)) continue;
+if (CheatService.byExam.value[widget.exam]?.containsKey(st.id) ?? false) {
+continue;
+}
 final hay = '${st.name} ${st.studentNo}'.toLowerCase();
 if (!tokens.every(hay.contains)) continue;
 if (_isDupCopy(st, widget.twins, secs, inScope)) continue;
@@ -17751,30 +17893,20 @@ return out.take(8).toList();
 Future<void> _mark(StudentInfo s) async {
 final messenger = ScaffoldMessenger.of(context);
 final label = _secs[s.sectionId]?.label ?? '';
-final ok = await showDialog<bool>(
-context: context,
-builder: (ctx) => AlertDialog(
-title: const Text('Mark as cheated?'),
-content: Text(
-'${s.name}${label.isEmpty ? '' : ' ($label)'} will be marked as '
-'cheated in ${widget.exam}.\n\nEvery mark field of this exam shows '
-'"Cheated", and the student is left out of totals, averages and '
-'positions. You can remove the student from the list any time.'),
-actions: [
-TextButton(
-onPressed: () => Navigator.pop(ctx, false),
-child: const Text('Cancel')),
-FilledButton(
-style: FilledButton.styleFrom(backgroundColor: kCheatColor),
-onPressed: () => Navigator.pop(ctx, true),
-child: const Text('Mark as cheated')),
-],
-),
+final picked = await _pickCheatSubjects(
+context,
+title: 'Mark as cheated?',
+intro: '${s.name}${label.isEmpty ? '' : ' ($label)'} cheated in '
+'${widget.exam}.\n\nChoose the subject(s) the student cheated in. '
+'Those fields show "Cheated" and are left out of the total and '
+'average; the other subjects keep their marks. You can change the '
+'subjects or remove the student from the list any time.',
+confirm: 'Mark as cheated',
 );
-if (ok != true || !mounted) return;
+if (picked == null || !mounted) return;
 setState(() => _busy = true);
 try {
-await CheatService.add(s, widget.exam, label);
+await CheatService.add(s, widget.exam, label, subjects: picked);
 if (mounted) {
 setState(() {
 _search.clear();
@@ -17786,6 +17918,27 @@ SnackBar(content: Text('${s.name} was marked as cheated.')));
 } catch (e) {
 messenger.showSnackBar(SnackBar(
 content: Text('Could not save: ${'$e'.replaceFirst('Exception: ', '')}')));
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
+Future<void> _editSubjects(CheatEntry e) async {
+final messenger = ScaffoldMessenger.of(context);
+final picked = await _pickCheatSubjects(
+context,
+title: 'Cheated subjects',
+intro: '${e.name} · ${widget.exam}\n\nChoose the subject(s) the student cheated in.',
+confirm: 'Save',
+initial: e.subjects.toSet(),
+);
+if (picked == null || !mounted) return;
+setState(() => _busy = true);
+try {
+await CheatService.setSubjects(widget.exam, e.id, picked);
+} catch (err) {
+messenger.showSnackBar(SnackBar(
+content: Text('Could not save: ${'$err'.replaceFirst('Exception: ', '')}')));
 } finally {
 if (mounted) setState(() => _busy = false);
 }
@@ -17915,6 +18068,7 @@ for (final e in entries)
 ListTile(
 dense: true,
 contentPadding: EdgeInsets.zero,
+onTap: (admin && !_busy) ? () => _editSubjects(e) : null,
 leading: const CircleAvatar(
 radius: 14,
 backgroundColor: Color(0xFFFDECEA),
@@ -17923,6 +18077,7 @@ size: 14, color: kCheatColor),
 ),
 title: Text(e.name),
 subtitle: Text([
+e.subjects.isEmpty ? 'All subjects' : e.subjects.join(', '),
 if (e.label.isNotEmpty) e.label,
 if (e.studentNo.isNotEmpty) 'ID ${e.studentNo}',
 if (e.at != null)
@@ -18735,8 +18890,8 @@ final inlineSubs = teacherScope.value.isStudent
 ? const <String>[]
     : [
 for (final x in teacherScope.value.subjectList)
-if (sForm == null ||
-teacherScope.value.allows(x, sForm))
+if ((sForm == null || teacherScope.value.allows(x, sForm)) &&
+!(r?.cheatedSubs.contains(x) ?? false))
 x,
 ];
 final cheated = results[s.id]?.cheated ?? false;
@@ -18960,13 +19115,15 @@ for (final s in widget.students) {
 final m = all[s.id] ?? const <String, double>{};
 final hid = <String, double>{};
 for (final e in m.entries) {
-if (!_subjects.contains(e.key)) hid[e.key] = e.value;
+if (!_subjects.contains(e.key) ||
+CheatService.isCheatedIn(widget.exam, s.id, e.key)) {
+hid[e.key] = e.value;
+}
 }
 final row = <String, TextEditingController>{};
 for (final sub in _subjects) {
 final v = m[sub];
-final t = CheatService.isCheated(widget.exam, s.id)
-? kCheatText
+final t = CheatService.isCheatedIn(widget.exam, s.id, sub) ? kCheatText
     : v != null
 ? _fmtMark(v)
     : studentIsNew(s.createdAt, sub)
@@ -19402,7 +19559,7 @@ if (typed.isEmpty) return;
 if (mounted) setState(() => _saving = true);
 try {
 // read the stored marks first so no other subject is lost
-final cur = await _svc.get(widget.student.id, widget.exam);
+final cur = await _svc.get(widget.student.id, widget.exam, raw: true);
 await _svc.save(widget.student, widget.exam, {...cur.marks, ...typed});
 for (final e in typed.keys) {
 _saved[e] = _c[e]!.text.trim();
@@ -19548,9 +19705,11 @@ return const Text(
 'so no marks count.',
 style: TextStyle(color: kCheatColor, fontWeight: FontWeight.w700));
 }
-if (r.marks.isEmpty) return const Text('No result yet.');
-final avg = r.average!;
-final g = _gradeOf(avg);
+if (r.marks.isEmpty && r.cheatedSubs.isEmpty) {
+return const Text('No result yet.');
+}
+final avg = r.average;
+final g = avg == null ? null : _gradeOf(avg);
 return SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
 for (final sub in ExamService.subjects)
@@ -19575,6 +19734,17 @@ style: TextStyle(
 fontWeight: FontWeight.w700, color: kNewColor)),
 ]),
 ),
+for (final sub in ExamService.subjects)
+if (r.cheatedSubs.contains(sub))
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 4),
+child: Row(children: [
+Expanded(child: Text(sub)),
+const Text(kCheatText,
+style: TextStyle(
+fontWeight: FontWeight.w700, color: kCheatColor)),
+]),
+),
 const Divider(),
 Row(children: [
 const Expanded(child: Text('Total')),
@@ -19584,13 +19754,13 @@ style: const TextStyle(fontWeight: FontWeight.w700)),
 const SizedBox(height: 4),
 Row(children: [
 const Expanded(child: Text('Average')),
-Text(_fmtMark(double.parse(avg.toStringAsFixed(1))),
+Text(avg == null ? '–' : _fmtMark(double.parse(avg.toStringAsFixed(1))),
 style: const TextStyle(fontWeight: FontWeight.w700)),
 const SizedBox(width: 8),
-Text(g,
+Text(g ?? '',
 style: TextStyle(
 fontWeight: FontWeight.w800,
-color: _gradeColor(g))),
+color: g == null ? null : _gradeColor(g))),
 ]),
 ]),
 );
@@ -19639,7 +19809,7 @@ String? _error;
 @override
 void initState() {
 super.initState();
-_service.get(widget.student.id, widget.exam).then((r) async {
+_service.get(widget.student.id, widget.exam, raw: true).then((r) async {
 var absent = <String, Set<String>>{};
 try {
 absent = await _service.absentSubjects(
@@ -19648,9 +19818,7 @@ absent = await _service.absentSubjects(
 if (!mounted) return;
 setState(() {
 r.marks.forEach((k, v) {
-final c = _ctrl[k];
-if (c == null) {
-_hidden[k] = v;
+final c = _ctrl[k]; if (c == null || r.cheatedSubs.contains(k)) { _hidden[k] = v;
 } else {
 c.text = _fmtMark(v);
 }
@@ -19660,6 +19828,12 @@ if (CheatService.isCheated(widget.exam, widget.student.id)) {
 for (final c in _ctrl.values) {
 c.text = kCheatText;
 }
+}
+// cheated in some subjects only: those fields show Cheated (locked,
+// never saved; the stored mark is kept)
+for (final sub in r.cheatedSubs) {
+final c = _ctrl[sub];
+if (c != null) c.text = kCheatText;
 }
 // added after the exam date of a subject: show New (locked, never saved)
 for (final e in _ctrl.entries) {
