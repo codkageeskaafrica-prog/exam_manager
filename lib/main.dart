@@ -1040,8 +1040,13 @@ class ExamService {
                 for (final sub in subjects)
                   cell(r?.marks.containsKey(sub) ?? false
                       ? _fmtMark(r!.marks[sub]!)
-                      : (studentIsNew(x.createdAt, sub) ? 'New' : '-')),
-                cell(r == null || avg == null ? '-' : _fmtMark(r.total),
+                      : ((r?.cheated ?? false)
+                      ? 'Cheated'
+                      : (studentIsNew(x.createdAt, sub) ? 'New' : '-'))),
+                cell(
+                    (r?.cheated ?? false)
+                        ? 'Cheated'
+                        : (r == null || avg == null ? '-' : _fmtMark(r.total)),
                     bold: true),
                 cell(
                     avg == null
@@ -1303,10 +1308,18 @@ class ExamService {
         for (final sub in d.subjects) {
           final m = res?.marks[sub];
           line.write(m == null
-              ? sc(k++, r, studentIsNew(x.createdAt, sub) ? 'New' : '-', 2)
+              ? sc(
+              k++,
+              r,
+              (res?.cheated ?? false)
+                  ? 'Cheated'
+                  : (studentIsNew(x.createdAt, sub) ? 'New' : '-'),
+              2)
               : nc(k++, r, m, 2));
         }
-        line.write(res == null || avg == null
+        line.write((res?.cheated ?? false)
+            ? sc(k++, r, 'Cheated', 4)
+            : res == null || avg == null
             ? sc(k++, r, '-', 4)
             : nc(k++, r, res.total, 4));
         line.write(avg == null
@@ -1580,10 +1593,16 @@ class ExamService {
             tc(subW,
                 res?.marks.containsKey(sub) ?? false
                     ? _fmtMark(res!.marks[sub]!)
-                    : (studentIsNew(s.createdAt, sub) ? 'New' : '-'),
+                    : ((res?.cheated ?? false)
+                    ? 'Cheated'
+                    : (studentIsNew(s.createdAt, sub) ? 'New' : '-')),
                 sz: sz,
                 zebraRow: z),
-          tc(totW, res == null || avg == null ? '-' : _fmtMark(res.total),
+          tc(
+              totW,
+              (res?.cheated ?? false)
+                  ? 'Cheated'
+                  : (res == null || avg == null ? '-' : _fmtMark(res.total)),
               sz: sz, b: true, zebraRow: z),
           tc(
               avgW,
@@ -16242,7 +16261,12 @@ const kAbsentText = 'Absent';
 /// there: the field shows "New" (locked) instead of a mark.
 const kNewText = 'New';
 const kNewColor = Color(0xFF1565C0);
-bool isNewText(String t) => t.trim().toLowerCase() == 'new';
+const kCheatText = 'Cheated';
+const kCheatColor = Color(0xFFC62828);
+bool isNewText(String t) {
+final x = t.trim().toLowerCase();
+return x == 'new' || x == 'cheated';
+}
 
 /// True when [added] is later than the exam date of [subject].
 bool studentIsNew(DateTime? added, String subject) {
@@ -16254,7 +16278,7 @@ return DateTime(added.year, added.month, added.day).isAfter(d);
 /// Text of a locked field that is not a mark: "Absent" or "New".
 bool _isAbsentText(String t) {
 final x = t.trim().toLowerCase();
-return x == 'absent' || x == 'new';
+return x == 'absent' || x == 'new' || x == 'cheated';
 }
 
 /// Grade of an average mark. The limits are set in Settings.
@@ -16441,9 +16465,111 @@ label: const Text('Report'),
 }
 
 /// The marks of one student in one exam (subject -> mark).
+/// One student in the cheating list of an exam.
+class CheatEntry {
+final String id, exam, name, label, studentNo, by;
+final DateTime? at;
+const CheatEntry({
+required this.id,
+required this.exam,
+required this.name,
+this.label = '',
+this.studentNo = '',
+this.by = '',
+this.at,
+});
+
+factory CheatEntry.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
+final m = d.data() ?? const <String, dynamic>{};
+return CheatEntry(
+id: '${m['studentId'] ?? ''}',
+exam: '${m['exam'] ?? ''}',
+name: '${m['name'] ?? ''}',
+label: '${m['label'] ?? ''}',
+studentNo: '${m['studentNo'] ?? ''}',
+by: '${m['by'] ?? ''}',
+at: (m['createdAt'] as Timestamp?)?.toDate(),
+);
+}
+}
+
+/// The cheating list (collection "cheating", one document per student and
+/// exam). A student in the list shows "Cheated" in every mark field of that
+/// exam and is left out of totals, averages and positions. Only the
+/// administrator adds / removes students (set the Firestore rule so).
+class CheatService {
+static final _col = FirebaseFirestore.instance.collection('cheating');
+
+/// exam -> studentId -> entry
+static final ValueNotifier<Map<String, Map<String, CheatEntry>>> byExam =
+ValueNotifier(const {});
+static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
+static final Completer<void> _ready = Completer<void>();
+static Future<void> get ready => _ready.future;
+
+static void start() {
+if (_sub != null) return;
+_sub = _col.snapshots().listen((s) {
+final m = <String, Map<String, CheatEntry>>{};
+for (final d in s.docs) {
+final e = CheatEntry.fromDoc(d);
+if (e.id.isEmpty) continue;
+(m[e.exam] ??= {})[e.id] = e;
+}
+byExam.value = m;
+if (!_ready.isCompleted) _ready.complete();
+}, onError: (Object e) {
+debugPrint('Cheating list could not be read: $e');
+_sub?.cancel();
+_sub = null; // tried again the next time a screen starts it
+if (!_ready.isCompleted) _ready.complete();
+});
+}
+
+static bool isCheated(String exam, String studentId) =>
+byExam.value[exam]?.containsKey(studentId) ?? false;
+
+static Set<String> idsOf(String exam) =>
+byExam.value[exam]?.keys.toSet() ?? <String>{};
+
+static String _docId(String exam, String id) =>
+'${SchoolService.subjectKey(exam)}__$id';
+
+/// Marks the student (and his twin record: class <-> section) as cheated.
+static Future<void> add(StudentInfo s, String exam, String label) async {
+final twin = (await ResultService().twinMap())[s.id];
+final by = FirebaseAuth.instance.currentUser?.email ?? '';
+final batch = FirebaseFirestore.instance.batch();
+for (final id in <String>{s.id, if (twin != null) twin}) {
+batch.set(_col.doc(_docId(exam, id)), {
+'exam': exam,
+'studentId': id,
+'name': s.name,
+'label': label,
+'studentNo': s.studentNo,
+'by': by,
+'createdAt': FieldValue.serverTimestamp(),
+});
+}
+await batch.commit();
+}
+
+static Future<void> remove(String exam, String studentId) async {
+final twin = (await ResultService().twinMap())[studentId];
+final batch = FirebaseFirestore.instance.batch();
+for (final id in <String>{studentId, if (twin != null) twin}) {
+batch.delete(_col.doc(_docId(exam, id)));
+}
+await batch.commit();
+}
+}
+
 class ResultMarks {
 final Map<String, double> marks;
-const ResultMarks(this.marks);
+
+/// The student is in the cheating list of this exam: no marks count.
+final bool cheated;
+const ResultMarks(this.marks, {this.cheated = false});
 double get total => marks.values.fold(0.0, (a, b) => a + b);
 double? get average => marks.isEmpty ? null : total / marks.length;
 }
@@ -16568,9 +16694,18 @@ return out;
 }
 
 /// studentId -> marks, for one exam.
-Stream<Map<String, ResultMarks>> watchResults(String exam) =>
-_col.where('exam', isEqualTo: exam).snapshots().asyncMap((s) async {
+Stream<Map<String, ResultMarks>> watchResults(String exam) {
+late final StreamController<Map<String, ResultMarks>> ctrl;
+StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? sub;
+QuerySnapshot<Map<String, dynamic>>? last;
+VoidCallback? listener;
+
+Future<void> emit() async {
+final s = last;
+if (s == null || ctrl.isClosed) return;
+try {
 final twins = await twinMap();
+await CheatService.ready;
 final raw = <String, Map<String, dynamic>>{};
 for (final d in s.docs) {
 raw['${d.data()['studentId'] ?? ''}'] = d.data();
@@ -16588,12 +16723,39 @@ if (t != null && raw[t] != null) raw[t]!,
 ];
 out[id] = ResultMarks(_visibleMarks(_merge(docs)));
 }
+// the cheating list: no marks count, the student shows "Cheated"
+for (final id in CheatService.idsOf(exam)) {
+out[id] = const ResultMarks({}, cheated: true);
+}
+Map<String, ResultMarks> result = out;
 if (teacherScope.value.isStudent) {
 final me = teacherScope.value.studentId;
-return {if (out[me] != null) me: out[me]!};
+result = {if (out[me] != null) me: out[me]!};
 }
-return out;
-});
+if (!ctrl.isClosed) ctrl.add(result);
+} catch (e, st) {
+if (!ctrl.isClosed) ctrl.addError(e, st);
+}
+}
+
+ctrl = StreamController<Map<String, ResultMarks>>.broadcast(
+onListen: () {
+CheatService.start();
+listener = () => emit();
+CheatService.byExam.addListener(listener!);
+sub = _col.where('exam', isEqualTo: exam).snapshots().listen((s) {
+last = s;
+emit();
+}, onError: (Object e, StackTrace st) => ctrl.addError(e, st));
+},
+onCancel: () async {
+if (listener != null) CheatService.byExam.removeListener(listener!);
+await sub?.cancel();
+sub = null;
+},
+);
+return ctrl.stream;
+}
 
 /// studentId -> ALL marks (every subject), for one exam.
 /// studentId -> the subjects the student was ABSENT in, read from attendance:
@@ -16720,6 +16882,11 @@ if (extra.isNotEmpty) await write(extra);
 }
 
 Future<ResultMarks> get(String studentId, String exam) async {
+CheatService.start();
+await CheatService.ready;
+if (CheatService.isCheated(exam, studentId)) {
+return const ResultMarks({}, cheated: true);
+}
 final t = (await twinMap())[studentId];
 final docs = <Map<String, dynamic>>[];
 for (final id in [studentId, if (t != null) t]) {
@@ -16867,7 +17034,10 @@ var e = 0;
 var nw = 0;
 for (final st in people) {
 if (results[st.id]?.marks[sub] == null) {
-if (studentIsNew(st.createdAt, sub)) nw++;
+if (studentIsNew(st.createdAt, sub) ||
+(results[st.id]?.cheated ?? false)) {
+nw++;
+}
 continue;
 }
 e++;
@@ -17186,6 +17356,7 @@ for (final sub in ExamService.subjects)
 sub: people
     .where((st) =>
 results[st.id]?.marks[sub] == null &&
+!(results[st.id]?.cheated ?? false) &&
 !studentIsNew(st.createdAt, sub))
     .length,
 };
@@ -17517,6 +17688,265 @@ onPressed: _busy ? null : _save, child: const Text('Save')),
 }
 }
 
+/// "Cheating list" of the Result screen: the students marked as cheated in
+/// the chosen exam. The administrator searches a student and marks him; all
+/// his marks of the exam then show "Cheated".
+class _CheatPanel extends StatefulWidget {
+final String exam;
+final List<StudentInfo> students;
+final List<SectionInfo> sections;
+final Map<String, String> twins;
+const _CheatPanel({
+required this.exam,
+required this.students,
+required this.sections,
+required this.twins,
+});
+
+@override
+State<_CheatPanel> createState() => _CheatPanelState();
+}
+
+class _CheatPanelState extends State<_CheatPanel> {
+final _search = TextEditingController();
+String _query = '';
+bool _busy = false;
+
+@override
+void initState() {
+super.initState();
+CheatService.start();
+}
+
+@override
+void dispose() {
+_search.dispose();
+super.dispose();
+}
+
+Map<String, SectionInfo> get _secs => {for (final s in widget.sections) s.id: s};
+
+List<StudentInfo> _matches() {
+final tokens = _query
+    .toLowerCase()
+    .split(RegExp(r'\s+'))
+    .where((t) => t.isNotEmpty)
+    .toList();
+if (tokens.isEmpty) return const [];
+final secs = _secs;
+final inScope = {for (final s in widget.students) s.id};
+final out = <StudentInfo>[];
+for (final st in widget.students) {
+if (!secs.containsKey(st.sectionId)) continue;
+if (CheatService.isCheated(widget.exam, st.id)) continue;
+final hay = '${st.name} ${st.studentNo}'.toLowerCase();
+if (!tokens.every(hay.contains)) continue;
+if (_isDupCopy(st, widget.twins, secs, inScope)) continue;
+out.add(st);
+}
+out.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+return out.take(8).toList();
+}
+
+Future<void> _mark(StudentInfo s) async {
+final messenger = ScaffoldMessenger.of(context);
+final label = _secs[s.sectionId]?.label ?? '';
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Mark as cheated?'),
+content: Text(
+'${s.name}${label.isEmpty ? '' : ' ($label)'} will be marked as '
+'cheated in ${widget.exam}.\n\nEvery mark field of this exam shows '
+'"Cheated", and the student is left out of totals, averages and '
+'positions. You can remove the student from the list any time.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+style: FilledButton.styleFrom(backgroundColor: kCheatColor),
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Mark as cheated')),
+],
+),
+);
+if (ok != true || !mounted) return;
+setState(() => _busy = true);
+try {
+await CheatService.add(s, widget.exam, label);
+if (mounted) {
+setState(() {
+_search.clear();
+_query = '';
+});
+}
+messenger.showSnackBar(
+SnackBar(content: Text('${s.name} was marked as cheated.')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text('Could not save: ${'$e'.replaceFirst('Exception: ', '')}')));
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
+Future<void> _unmark(CheatEntry e) async {
+final messenger = ScaffoldMessenger.of(context);
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Remove from the cheating list?'),
+content: Text(
+'${e.name} will show his marks of ${widget.exam} again '
+'(the marks were never deleted).'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Remove')),
+],
+),
+);
+if (ok != true || !mounted) return;
+setState(() => _busy = true);
+try {
+await CheatService.remove(widget.exam, e.id);
+} catch (err) {
+messenger.showSnackBar(SnackBar(
+content: Text('Could not remove: ${'$err'.replaceFirst('Exception: ', '')}')));
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
+@override
+Widget build(BuildContext context) {
+return ValueListenableBuilder<Map<String, Map<String, CheatEntry>>>(
+valueListenable: CheatService.byExam,
+builder: (context, all, _) {
+final list = (all[widget.exam]?.values.toList() ?? <CheatEntry>[])
+..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+final seen = <String>{};
+final entries = <CheatEntry>[];
+for (final e in list) {
+final t = widget.twins[e.id];
+if (t != null && seen.contains(t)) continue; // twin record
+seen.add(e.id);
+entries.add(e);
+}
+return StreamBuilder<UserProfile>(
+stream: UserProfile.watchMine(),
+builder: (context, ps) {
+final admin = ps.data?.isAdmin == true;
+final matches = admin ? _matches() : const <StudentInfo>[];
+return Card(
+child: Padding(
+padding: const EdgeInsets.all(14),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Row(children: [
+const Icon(Icons.gavel, color: kCheatColor),
+const SizedBox(width: 8),
+const Expanded(
+child: Text('Cheating list',
+style: TextStyle(
+fontSize: 17, fontWeight: FontWeight.w700)),
+),
+if (_busy)
+const SizedBox(
+width: 16,
+height: 16,
+child: CircularProgressIndicator(strokeWidth: 2)),
+]),
+const SizedBox(height: 2),
+Text('${widget.exam} · ${entries.length} '
+'student${entries.length == 1 ? '' : 's'}',
+style: TextStyle(
+fontSize: 12.5, color: Colors.grey.shade700)),
+if (admin) ...[
+const SizedBox(height: 10),
+TextField(
+controller: _search,
+onChanged: (v) => setState(() => _query = v),
+decoration: const InputDecoration(
+isDense: true,
+prefixIcon: Icon(Icons.search),
+hintText: 'Search a student to mark as cheated',
+border: OutlineInputBorder(),
+),
+),
+if (_query.trim().isNotEmpty && matches.isEmpty)
+const Padding(
+padding: EdgeInsets.only(top: 8),
+child: Text('No student found.',
+style: TextStyle(fontSize: 12.5)),
+),
+for (final st in matches)
+ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+title: Text(st.name),
+subtitle: Text([
+_secs[st.sectionId]?.label ?? '',
+if (st.studentNo.isNotEmpty) 'ID ${st.studentNo}',
+].where((x) => x.isNotEmpty).join('  ·  ')),
+trailing: TextButton.icon(
+onPressed: _busy ? null : () => _mark(st),
+icon: const Icon(Icons.block,
+size: 16, color: kCheatColor),
+label: const Text('Cheated',
+style: TextStyle(color: kCheatColor)),
+),
+),
+],
+const Divider(height: 22),
+if (entries.isEmpty)
+Text(
+admin
+? 'No student is marked as cheated in this exam.'
+    : 'No student in the cheating list.',
+style: TextStyle(color: Colors.grey.shade700))
+else
+for (final e in entries)
+ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+leading: const CircleAvatar(
+radius: 14,
+backgroundColor: Color(0xFFFDECEA),
+child: Icon(Icons.gavel,
+size: 14, color: kCheatColor),
+),
+title: Text(e.name),
+subtitle: Text([
+if (e.label.isNotEmpty) e.label,
+if (e.studentNo.isNotEmpty) 'ID ${e.studentNo}',
+if (e.at != null)
+DateFormat('MMM d, y').format(e.at!),
+].join('  ·  ')),
+trailing: admin
+? IconButton(
+tooltip: 'Remove from the list',
+icon: const Icon(Icons.close, size: 18),
+onPressed: _busy ? null : () => _unmark(e),
+)
+    : null,
+),
+],
+),
+),
+);
+},
+);
+},
+);
+}
+}
+
 class ResultBrowseScreen extends StatefulWidget {
 final String? form, classKey;
 const ResultBrowseScreen({super.key, this.form, this.classKey});
@@ -17707,6 +18137,14 @@ onTap: onTap,
 ),
 );
 
+Widget _cheatPanel(List<SectionInfo> sections, List<StudentInfo> students) =>
+_CheatPanel(
+exam: _ResultPrefs.exam,
+students: students,
+sections: sections,
+twins: _twins,
+);
+
 Widget _summaryCard(List<SectionInfo> sections, List<StudentInfo> students,
 Map<String, ResultMarks> results) =>
 _subjectSummaryCard(
@@ -17752,7 +18190,10 @@ _isDupCopy(st, _twins, secById, inScope)) {
 continue;
 }
 total++;
-if (results[st.id]?.average != null) entered++;
+if (results[st.id]?.average != null ||
+(results[st.id]?.cheated ?? false)) {
+entered++;
+}
 if (_absent?[st.id]?.isNotEmpty ?? false) absentN++;
 }
 return _statusLine(entered, total - entered,
@@ -17956,12 +18397,29 @@ final card = level1 && secSnap.data!.isNotEmpty
 ? _summaryCard(secSnap.data!, stuSnap.data!, res)
     : null;
 final main = _body(secSnap.data!, stuSnap.data!, res,
-summary: wide ? null : card);
+summary: wide || card == null
+? (wide ? null : card)
+    : Column(children: [
+card,
+const SizedBox(height: 12),
+_cheatPanel(secSnap.data!, stuSnap.data!),
+]));
 if (!wide || card == null) return main;
 return Row(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
-const Expanded(child: SizedBox()),
+Expanded(
+child: SingleChildScrollView(
+padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+child: Align(
+alignment: Alignment.topRight,
+child: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 440),
+child: _cheatPanel(secSnap.data!, stuSnap.data!),
+),
+),
+),
+),
 SizedBox(width: 720, child: main),
 Expanded(
 child: SingleChildScrollView(
@@ -18109,6 +18567,10 @@ final same = i > 0 &&
 results[scored[i].id]!.average == results[scored[i - 1].id]!.average;
 rank[scored[i].id] = same ? rank[scored[i - 1].id]! : i + 1;
 }
+final cheatedN = [
+for (final s in students)
+if (results[s.id]?.cheated ?? false) s
+].length;
 final groupAvg = scored.isEmpty
 ? null
     : scored.fold(0.0, (a, s) => a + results[s.id]!.average!) / scored.length;
@@ -18161,13 +18623,13 @@ style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700),
 children: [
 TextSpan(text: '${students.length} students · '),
 TextSpan(
-text: '${scored.length} entered',
+text: '${scored.length + cheatedN} entered',
 style: const TextStyle(
 color: Color(0xFF2E7D32),
 fontWeight: FontWeight.w600)),
 const TextSpan(text: ' · '),
 TextSpan(
-text: '${students.length - scored.length} not entered',
+text: '${students.length - scored.length - cheatedN} not entered',
 style: const TextStyle(
 color: Color(0xFFC62828),
 fontWeight: FontWeight.w600)),
@@ -18277,7 +18739,9 @@ if (sForm == null ||
 teacherScope.value.allows(x, sForm))
 x,
 ];
+final cheated = results[s.id]?.cheated ?? false;
 final inline = inlineSubs.isNotEmpty &&
+!cheated &&
 (avg == null || _pinned.contains(s.id));
 Widget marksBox() => _InlineMarks(
 key: ValueKey('${s.id}|${_ResultPrefs.exam}'),
@@ -18345,10 +18809,11 @@ marksBox()
 else if (inline)
 const SizedBox.shrink()
 else if (r == null || avg == null)
-Text('No result',
+Text(cheated ? 'Cheated' : 'No result',
 style: TextStyle(
 fontSize: 12,
-color: Colors.grey.shade500))
+fontWeight: cheated ? FontWeight.w800 : FontWeight.w400,
+color: cheated ? kCheatColor : Colors.grey.shade500))
 else
 Column(
 crossAxisAlignment: CrossAxisAlignment.end,
@@ -18483,6 +18948,8 @@ _load();
 
 Future<void> _load() async {
 try {
+CheatService.start();
+await CheatService.ready;
 final all = await _service.getAllForExam(widget.exam);
 var absent = <String, Set<String>>{};
 try {
@@ -18498,7 +18965,9 @@ if (!_subjects.contains(e.key)) hid[e.key] = e.value;
 final row = <String, TextEditingController>{};
 for (final sub in _subjects) {
 final v = m[sub];
-final t = v != null
+final t = CheatService.isCheated(widget.exam, s.id)
+? kCheatText
+    : v != null
 ? _fmtMark(v)
     : studentIsNew(s.createdAt, sub)
 ? kNewText
@@ -19073,6 +19542,12 @@ height: 100,
 child: Center(child: CircularProgressIndicator()));
 }
 final r = snap.data!;
+if (r.cheated) {
+return const Text(
+'Cheated: this student is in the cheating list of this exam, '
+'so no marks count.',
+style: TextStyle(color: kCheatColor, fontWeight: FontWeight.w700));
+}
 if (r.marks.isEmpty) return const Text('No result yet.');
 final avg = r.average!;
 final g = _gradeOf(avg);
@@ -19180,6 +19655,12 @@ _hidden[k] = v;
 c.text = _fmtMark(v);
 }
 });
+// in the cheating list: every field shows Cheated (locked, never saved)
+if (CheatService.isCheated(widget.exam, widget.student.id)) {
+for (final c in _ctrl.values) {
+c.text = kCheatText;
+}
+}
 // added after the exam date of a subject: show New (locked, never saved)
 for (final e in _ctrl.entries) {
 if (e.value.text.trim().isEmpty &&
@@ -19230,6 +19711,11 @@ return (marks: out, ok: ok);
 }
 
 Future<void> _save() async {
+// a cheated student has nothing to save (the stored marks stay untouched)
+if (CheatService.isCheated(widget.exam, widget.student.id)) {
+Navigator.pop(context, false);
+return;
+}
 final r = _read();
 if (!r.ok) {
 setState(() => _error = 'Fix the marks shown in red (${_fmtMark(minMarkOf(widget.exam, _form))} to ${_fmtMark(maxMarkOf(widget.exam, _form))}).');
