@@ -1040,7 +1040,7 @@ class ExamService {
                 for (final sub in subjects)
                   cell(r?.marks.containsKey(sub) ?? false
                       ? _fmtMark(r!.marks[sub]!)
-                      : '-'),
+                      : (studentIsNew(x.createdAt, sub) ? 'New' : '-')),
                 cell(r == null || avg == null ? '-' : _fmtMark(r.total),
                     bold: true),
                 cell(
@@ -1302,7 +1302,9 @@ class ExamService {
         if (d.multi) line.write(sc(k++, r, g.sectionLabels[x.id] ?? '', 2));
         for (final sub in d.subjects) {
           final m = res?.marks[sub];
-          line.write(m == null ? sc(k++, r, '-', 2) : nc(k++, r, m, 2));
+          line.write(m == null
+              ? sc(k++, r, studentIsNew(x.createdAt, sub) ? 'New' : '-', 2)
+              : nc(k++, r, m, 2));
         }
         line.write(res == null || avg == null
             ? sc(k++, r, '-', 4)
@@ -1578,7 +1580,7 @@ class ExamService {
             tc(subW,
                 res?.marks.containsKey(sub) ?? false
                     ? _fmtMark(res!.marks[sub]!)
-                    : '-',
+                    : (studentIsNew(s.createdAt, sub) ? 'New' : '-'),
                 sz: sz,
                 zebraRow: z),
           tc(totW, res == null || avg == null ? '-' : _fmtMark(res.total),
@@ -8820,6 +8822,9 @@ class StudentInfo {
 
   /// The student's own ID number ('' = not generated yet). Shown in reports.
   final String studentNo;
+
+  /// When the student was added (null while the server time is pending).
+  final DateTime? createdAt;
   const StudentInfo(
       {required this.id,
         required this.name,
@@ -8827,7 +8832,8 @@ class StudentInfo {
         this.phone = '',
         this.phones = const [],
         this.accountUid = '',
-        this.studentNo = ''});
+        this.studentNo = '',
+        this.createdAt});
 
   /// For lists and reports: all numbers on one line, '' when there is none.
   String get phoneText =>
@@ -10313,7 +10319,8 @@ class SchoolService {
             id: d.id,
             name: d.data()['name'] ?? '',
             sectionId: sectionId,
-            studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+            studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
+            createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
     ];
     l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     return l;
@@ -10438,7 +10445,8 @@ Stream<List<StudentInfo>> watchAllStudents() =>
             phone: '${d.data()['phone'] ?? ''}',
             phones: _phoneList(d.data()['phones'], d.data()['phone']),
             accountUid: '${d.data()['accountUid'] ?? ''}',
-            studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+            studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
+            createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
     ]);
 
 // ---------------- Attendance ----------------
@@ -10523,7 +10531,8 @@ name: '${d.data()['name'] ?? ''}',
 sectionId: '${d.data()['sectionId'] ?? ''}',
 phone: '${d.data()['phone'] ?? ''}',
 phones: _phoneList(d.data()['phones'], d.data()['phone']),
-studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
+createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
 };
 // A student without a phone takes the phone of the student with the same
 // name in the same class (1A and 1A-A / 1A-B are the same class), as
@@ -10552,7 +10561,8 @@ sectionId: e.value.sectionId,
 phone: o.phone,
 phones: o.phones,
 accountUid: e.value.accountUid,
-studentNo: e.value.studentNo);
+studentNo: e.value.studentNo,
+createdAt: e.value.createdAt);
 }
 } catch (_) {}
 return map;
@@ -16228,7 +16238,24 @@ n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
 /// Shown (not saved) in a mark box when attendance says the student was absent
 /// in that subject. It is never a mark, so totals and averages ignore it.
 const kAbsentText = 'Absent';
-bool _isAbsentText(String t) => t.trim().toLowerCase() == 'absent';
+/// A student added AFTER the exam date of a subject has no mark to enter
+/// there: the field shows "New" (locked) instead of a mark.
+const kNewText = 'New';
+const kNewColor = Color(0xFF1565C0);
+bool isNewText(String t) => t.trim().toLowerCase() == 'new';
+
+/// True when [added] is later than the exam date of [subject].
+bool studentIsNew(DateTime? added, String subject) {
+final d = appSettings.value.subjectDateOf(subject);
+if (added == null || d == null) return false;
+return DateTime(added.year, added.month, added.day).isAfter(d);
+}
+
+/// Text of a locked field that is not a mark: "Absent" or "New".
+bool _isAbsentText(String t) {
+final x = t.trim().toLowerCase();
+return x == 'absent' || x == 'new';
+}
 
 /// Grade of an average mark. The limits are set in Settings.
 String _gradeOf(double avg) {
@@ -16440,7 +16467,8 @@ StudentInfo(
 id: d.id,
 name: '${d.data()['name'] ?? ''}',
 sectionId: '${d.data()['sectionId'] ?? ''}',
-studentNo: '${d.data()['studentNo'] ?? ''}'.trim()),
+studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
+createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
 ];
 l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 return l;
@@ -16832,17 +16860,23 @@ final subjects = teacherScope.value.subjectList;
 // subject -> form -> students with a mark, and subject -> total entered
 final byForm = <String, Map<String, int>>{};
 final entered = <String, int>{};
+final newBy = <String, int>{}; // students added after the exam: not counted
 for (final sub in subjects) {
 final g = {for (final f in forms) f: 0};
 var e = 0;
+var nw = 0;
 for (final st in people) {
-if (results[st.id]?.marks[sub] == null) continue;
+if (results[st.id]?.marks[sub] == null) {
+if (studentIsNew(st.createdAt, sub)) nw++;
+continue;
+}
 e++;
 final f = secById[st.sectionId]!.form;
 g[f] = (g[f] ?? 0) + 1;
 }
 byForm[sub] = g;
 entered[sub] = e;
+newBy[sub] = nw;
 }
 
 Widget cell(String t,
@@ -16950,7 +16984,8 @@ cell('Not entered', bold: true, size: 11.5),
 if (deadlines) cell('Days left', bold: true, size: 11.5),
 ]),
 for (final sub in subjects)
-row(sub, byForm[sub]!, entered[sub]!, people.length - entered[sub]!),
+row(sub, byForm[sub]!, entered[sub]!,
+people.length - entered[sub]! - newBy[sub]!),
 row('Total', totalF, totalE, totalAll - totalE, total: true),
 ],
 ),
@@ -17148,7 +17183,11 @@ st
 ];
 return {
 for (final sub in ExamService.subjects)
-sub: people.where((st) => results[st.id]?.marks[sub] == null).length,
+sub: people
+    .where((st) =>
+results[st.id]?.marks[sub] == null &&
+!studentIsNew(st.createdAt, sub))
+    .length,
 };
 }
 
@@ -18246,6 +18285,10 @@ student: s,
 subjects: inlineSubs,
 exam: _ResultPrefs.exam,
 absent: _absent[s.id] ?? const <String>{},
+newSubs: {
+for (final sub in inlineSubs)
+if (studentIsNew(s.createdAt, sub)) sub
+},
 onStart: () => _pinned.add(s.id),
 );
 return Card(
@@ -18457,6 +18500,8 @@ for (final sub in _subjects) {
 final v = m[sub];
 final t = v != null
 ? _fmtMark(v)
+    : studentIsNew(s.createdAt, sub)
+? kNewText
     : (absent[s.id]?.contains(sub) ?? false)
 ? kAbsentText
     : '';
@@ -18669,8 +18714,10 @@ readOnly: _isAbsentText(row[sub]!.text),
 canRequestFocus: !_isAbsentText(row[sub]!.text),
 textAlign: TextAlign.center,
 style: _isAbsentText(row[sub]!.text)
-? const TextStyle(
-color: kRed, fontWeight: FontWeight.w700, fontSize: 13)
+? TextStyle(
+color: isNewText(row[sub]!.text) ? kNewColor : kRed,
+fontWeight: FontWeight.w700,
+fontSize: 13)
     : null,
 textInputAction: TextInputAction.next,
 keyboardType:
@@ -18684,11 +18731,15 @@ onChanged: (_) => setState(() => _error = null),
 decoration: InputDecoration(
 isDense: true,
 filled: _isAbsentText(row[sub]!.text),
-fillColor: const Color(0xFFFDECEA),
+fillColor: isNewText(row[sub]!.text)
+? const Color(0xFFE3F2FD)
+    : const Color(0xFFFDECEA),
 border: const OutlineInputBorder(),
 enabledBorder: OutlineInputBorder(
 borderSide: BorderSide(
-color: (_isBad(row[sub]!.text, s.id) ||
+color: isNewText(row[sub]!.text)
+? kNewColor
+    : (_isBad(row[sub]!.text, s.id) ||
 _isAbsentText(row[sub]!.text))
 ? Colors.red
     : Colors.grey.shade400,
@@ -18791,6 +18842,9 @@ final VoidCallback onStart;
 
 /// Subjects the student was absent in (attendance): shown as Absent, locked.
 final Set<String> absent;
+
+/// Subjects whose exam was held before the student was added: shown as New.
+final Set<String> newSubs;
 const _InlineMarks({
 super.key,
 required this.student,
@@ -18798,6 +18852,7 @@ required this.subjects,
 required this.exam,
 required this.onStart,
 this.absent = const {},
+this.newSubs = const {},
 });
 
 @override
@@ -18809,7 +18864,11 @@ final _svc = ResultService();
 late final Map<String, TextEditingController> _c = {
 for (final s in widget.subjects)
 s: TextEditingController(
-text: widget.absent.contains(s) ? kAbsentText : ''),
+text: widget.newSubs.contains(s)
+? kNewText
+    : widget.absent.contains(s)
+? kAbsentText
+    : ''),
 };
 late final Map<String, FocusNode> _f = {
 for (final s in widget.subjects) s: FocusNode(),
@@ -18842,6 +18901,11 @@ f.dispose();
 }
 super.dispose();
 }
+
+bool _lock(String sub) =>
+widget.absent.contains(sub) || widget.newSubs.contains(sub);
+Color _lockColor(String sub) =>
+widget.newSubs.contains(sub) ? kNewColor : kRed;
 
 bool _isBad(String text) {
 final t = text.trim();
@@ -18894,37 +18958,43 @@ Widget build(BuildContext context) {
 final single = widget.subjects.length == 1;
 const red = OutlineInputBorder(
 borderSide: BorderSide(color: Color(0xFFC62828), width: 1.5));
+const blue = OutlineInputBorder(
+borderSide: BorderSide(color: kNewColor, width: 1.5));
 Widget box(String sub) => SizedBox(
 width: single ? 92 : 84,
 child: TextField(
 controller: _c[sub],
 focusNode: _f[sub],
-readOnly: widget.absent.contains(sub),
-canRequestFocus: !widget.absent.contains(sub),
+readOnly: _lock(sub),
+canRequestFocus: !_lock(sub),
 textAlign: TextAlign.center,
 textInputAction: TextInputAction.next,
 keyboardType: const TextInputType.numberWithOptions(decimal: true),
 inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-style: widget.absent.contains(sub)
-? const TextStyle(
-fontSize: 13, fontWeight: FontWeight.w700, color: kRed)
+style: _lock(sub)
+? TextStyle(
+fontSize: 13, fontWeight: FontWeight.w700, color: _lockColor(sub))
     : const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
 onChanged: (_) => setState(() => _ok = false),
 onSubmitted: (_) => FocusScope.of(context).nextFocus(),
 decoration: InputDecoration(
 isDense: true,
-filled: widget.absent.contains(sub),
-fillColor: const Color(0xFFFDECEA),
+filled: _lock(sub),
+fillColor: widget.newSubs.contains(sub)
+? const Color(0xFFE3F2FD)
+    : const Color(0xFFFDECEA),
 labelText: single ? 'Mark' : sub,
 labelStyle: const TextStyle(fontSize: 11),
 floatingLabelBehavior: FloatingLabelBehavior.auto,
 contentPadding:
 const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
 border: const OutlineInputBorder(),
-enabledBorder:
-(_isBad(_c[sub]!.text) || widget.absent.contains(sub)) ? red : null,
-focusedBorder:
-(_isBad(_c[sub]!.text) || widget.absent.contains(sub)) ? red : null,
+enabledBorder: widget.newSubs.contains(sub)
+? blue
+    : (_isBad(_c[sub]!.text) || _lock(sub)) ? red : null,
+focusedBorder: widget.newSubs.contains(sub)
+? blue
+    : (_isBad(_c[sub]!.text) || _lock(sub)) ? red : null,
 ),
 ),
 );
@@ -19019,6 +19089,17 @@ style:
 const TextStyle(fontWeight: FontWeight.w700)),
 ]),
 ),
+for (final sub in ExamService.subjects)
+if (r.marks[sub] == null && studentIsNew(student.createdAt, sub))
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 4),
+child: Row(children: [
+Expanded(child: Text(sub)),
+const Text(kNewText,
+style: TextStyle(
+fontWeight: FontWeight.w700, color: kNewColor)),
+]),
+),
 const Divider(),
 Row(children: [
 const Expanded(child: Text('Total')),
@@ -19099,6 +19180,13 @@ _hidden[k] = v;
 c.text = _fmtMark(v);
 }
 });
+// added after the exam date of a subject: show New (locked, never saved)
+for (final e in _ctrl.entries) {
+if (e.value.text.trim().isEmpty &&
+studentIsNew(widget.student.createdAt, e.key)) {
+e.value.text = kNewText;
+}
+}
 // absent in attendance and no mark yet: show Absent (never saved)
 for (final sub in absent[widget.student.id] ?? const <String>{}) {
 final c = _ctrl[sub];
@@ -19203,7 +19291,9 @@ enabled: !_saving,
 readOnly: _isAbsentText(t),
 canRequestFocus: !_isAbsentText(t),
 style: _isAbsentText(t)
-? const TextStyle(color: kRed, fontWeight: FontWeight.w700)
+? TextStyle(
+color: isNewText(t) ? kNewColor : kRed,
+fontWeight: FontWeight.w700)
     : null,
 keyboardType: const TextInputType.numberWithOptions(
 decimal: true),
@@ -19215,10 +19305,13 @@ decoration: InputDecoration(
 labelText: subject,
 border: const OutlineInputBorder(),
 filled: _isAbsentText(t),
-fillColor: const Color(0xFFFDECEA),
+fillColor: isNewText(t)
+? const Color(0xFFE3F2FD)
+    : const Color(0xFFFDECEA),
 enabledBorder: _isAbsentText(t)
-? const OutlineInputBorder(
-borderSide: BorderSide(color: kRed, width: 1.5))
+? OutlineInputBorder(
+borderSide: BorderSide(
+color: isNewText(t) ? kNewColor : kRed, width: 1.5))
     : null,
 isDense: true,
 errorText: bad ? '${_fmtMark(minMarkOf(widget.exam, _form))}–${_fmtMark(maxMarkOf(widget.exam, _form))}' : null,
