@@ -18795,12 +18795,21 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
     bool hasMarks(StudentInfo s) => results[s.id]?.average != null;
     bool isAbs(StudentInfo s) => _absent[s.id]?.isNotEmpty ?? false;
     final absentCount = students.where(isAbs).length;
+// marked as cheated in the cheating list (all subjects or only some)
+    bool isCheatAny(StudentInfo s) {
+      final r = results[s.id];
+      return (r?.cheated ?? false) || (r?.cheatedSubs.isNotEmpty ?? false);
+    }
+
+    final cheatedAnyN = students.where(isCheatAny).length;
     final shown = [
       for (final s in students)
         if (_nameMatches(s.name, _query) &&
             (_filter == 0 ||
                 (_filter == 3
                     ? isAbs(s)
+                    : _filter == 4
+                    ? isCheatAny(s)
                     : (_filter == 1 ? hasMarks(s) : !hasMarks(s))) ||
                 _pinned.contains(s.id)))
           s,
@@ -18858,6 +18867,13 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
                             color: Color(0xFFE67E22),
                             fontWeight: FontWeight.w600)),
                   ],
+                  if (cheatedAnyN > 0) ...[
+                    const TextSpan(text: ' · '),
+                    TextSpan(
+                        text: '$cheatedAnyN cheated',
+                        style: TextStyle(
+                            color: kCheatColor, fontWeight: FontWeight.w600)),
+                  ],
                   if (groupAvg != null)
                     TextSpan(
                         text:
@@ -18913,10 +18929,11 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
               (1, 'Entered'),
               (2, 'Not entered'),
               if (absentCount > 0) (3, 'Absent'),
+              if (cheatedAnyN > 0) (4, 'Cheated'),
             ])
               ChoiceChip(
                 label: Text(
-                    '${f.$2} ${f.$1 == 0 ? students.length : f.$1 == 1 ? scored.length : f.$1 == 3 ? absentCount : students.length - scored.length}'),
+                    '${f.$2} ${f.$1 == 0 ? students.length : f.$1 == 1 ? scored.length : f.$1 == 3 ? absentCount : f.$1 == 4 ? cheatedAnyN : students.length - scored.length}'),
                 selected: _filter == f.$1,
                 onSelected: (_) => setState(() {
                   _filter = f.$1;
@@ -18934,8 +18951,7 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
             child: Text(_query.trim().isEmpty
                 ? (_filter == 1
                 ? 'No student has marks entered yet.'
-                : _filter == 3
-                ? 'No student was absent.'
+                : _filter == 3 ? 'No student was absent.' : _filter == 4 ? 'No student is marked as cheated.'
                 : 'Every student has marks entered.')
                 : 'No student matches "${_query.trim()}".'))
             : ListView.builder(
