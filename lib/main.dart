@@ -6558,10 +6558,15 @@ Future<void> ensureUserProfile(User user) async {
     if ((await mine.get()).exists) return;
     final admins = await users.where('role', isEqualTo: 'admin').limit(1).get();
     final email = user.email ?? '';
+    final firstAdmin = admins.docs.isEmpty;
     await mine.set({
-      'role': admins.docs.isEmpty ? 'admin' : 'teacher',
+      'role': firstAdmin
+          ? 'admin'
+          : (email.endsWith('@$kStudentEmailDomain') ? 'student' : 'teacher'),
       'name': email.contains('@') ? email.split('@').first : email,
       'email': email,
+      // a deleted user who signs in again must be approved again
+      if (!firstAdmin) 'approved': false,
       'createdAt': FieldValue.serverTimestamp(),
     });
   } catch (e) {
@@ -6842,6 +6847,7 @@ class _ApprovalGate extends StatefulWidget {
 
 class _ApprovalGateState extends State<_ApprovalGate> {
   late final Stream<UserProfile> _stream = UserProfile.watchMine();
+  bool _ensuring = false, _ensured = false;
 
   @override
   Widget build(BuildContext context) {
@@ -6853,6 +6859,27 @@ class _ApprovalGateState extends State<_ApprovalGate> {
         final p = snap.data;
         if (p == null) {
           return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        if (!p.legacy) {
+          _ensuring = false;
+          _ensured = false;
+        } else if (!_ensured) {
+          // No profile (e.g. the user was deleted): create it first, as
+          // unapproved, and never show the app with full access meanwhile.
+          final u = FirebaseAuth.instance.currentUser;
+          if (u != null && !_ensuring) {
+            _ensuring = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _profilesEnsured.remove(u.uid);
+              ensureUserProfile(u).whenComplete(() {
+                if (mounted) setState(() => _ensured = true);
+              });
+            });
+          }
+          if (u != null) {
+            return const Scaffold(
+                body: Center(child: CircularProgressIndicator()));
+          }
         }
         if (p.approved) return widget.child;
         return _WaitingApprovalScreen(profile: p);
@@ -21470,6 +21497,49 @@ class _PermissionsCardState extends State<_PermissionsCard> {
           ),
       ]);
 
+  /// Removes the user from the list (and the Teachers list). The login
+  /// account itself stays in Firebase Authentication; if the person signs in
+  /// again they come back as unapproved and need a new approval.
+  Future<void> _deleteUser(
+      BuildContext context, UserProfile u, TeacherInfo? rec) async {
+    final who = u.name.isEmpty ? (u.email.isEmpty ? u.uid : u.email) : u.name;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this user?'),
+        content: Text('$who will be removed from the users list'
+            '${rec != null ? ' and from the Teachers list' : ''}. '
+            'If this person signs in again, an administrator must approve '
+            'the account again.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    await _run(context, () async {
+      final db = FirebaseFirestore.instance;
+      await db.collection('users').doc(u.uid).delete();
+      if (rec != null) await db.collection('teachers').doc(rec.id).delete();
+      if (u.role == 'student' && u.studentId.isNotEmpty) {
+        try {
+// free the student record so it can be linked again
+          await db
+              .collection('students')
+              .doc(u.studentId)
+              .update({'accountUid': FieldValue.delete()});
+        } catch (_) {}
+      }
+      if (context.mounted) _toast(context, '$who was deleted.');
+    });
+  }
+
   Future<void> _run(BuildContext c, Future<void> Function() f) async {
     try {
       await f();
@@ -21712,6 +21782,26 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                             builder: (context, st, _) => Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
+                                  if (_roleFilter != 'unapproved' && list.any((x) => !x.approved))
+                                    Container(
+                                      margin: const EdgeInsets.only(bottom: 6),
+                                      padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFFFFF4E5),
+                                          borderRadius: BorderRadius.circular(8)),
+                                      child: Row(children: [
+                                        const Icon(Icons.hourglass_top, size: 18, color: Colors.orange),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                            child: Text(
+                                                '${list.where((x) => !x.approved).length} waiting for approval',
+                                                style: const TextStyle(
+                                                    fontSize: 13, fontWeight: FontWeight.w600))),
+                                        TextButton(
+                                            onPressed: () => setState(() => _roleFilter = 'unapproved'),
+                                            child: const Text('Show')),
+                                      ]),
+                                    ),
                                   Padding(
                                     padding: const EdgeInsets.symmetric(vertical: 4),
                                     child: Text(
@@ -21886,6 +21976,28 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                       .doc(u.uid)
                       .update({'access': FieldValue.delete()})),
               child: const Text('Use the default for this role'),
+            ),
+          ),
+        if (!u.approved)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.icon(
+              icon: const Icon(Icons.check, size: 18),
+              label: const Text('Approve'),
+              onPressed: () => _run(
+                  context,
+                      () => users.doc(u.uid).update(
+                      {'approved': true, 'rejected': FieldValue.delete()})),
+            ),
+          ),
+        if (!isMe)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+              label: const Text('Delete user',
+                  style: TextStyle(color: Colors.red)),
+              onPressed: () => _deleteUser(context, u, r),
             ),
           ),
       ],
