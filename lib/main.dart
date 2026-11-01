@@ -21871,12 +21871,25 @@ class _PermissionsCardState extends State<_PermissionsCard> {
       title: Text(isMe ? '$title (you)' : title),
       trailing: u.approved
           ? null
-          : FilledButton.tonal(
-          onPressed: () => _run(
-              context,
-                  () => users.doc(u.uid).update(
-                  {'approved': true, 'rejected': FieldValue.delete()})),
-          child: const Text('Approve')),
+          : Row(mainAxisSize: MainAxisSize.min, children: [
+        if (!u.rejected)
+          TextButton(
+              style: TextButton.styleFrom(
+                  foregroundColor: Colors.red,
+                  visualDensity: VisualDensity.compact),
+              onPressed: () => _run(context,
+                      () => users.doc(u.uid).update({'rejected': true})),
+              child: const Text('Reject')),
+        const SizedBox(width: 4),
+        FilledButton.tonal(
+            style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact),
+            onPressed: () => _run(
+                context,
+                    () => users.doc(u.uid).update(
+                    {'approved': true, 'rejected': FieldValue.delete()})),
+            child: const Text('Approve')),
+      ]),
       subtitle: Text(
         '${UserProfile.roleLabel(u.role)}'
             '${u.pending ? ' (not signed in yet)' : ''}'
