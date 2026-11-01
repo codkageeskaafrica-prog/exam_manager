@@ -21430,7 +21430,7 @@ class _PermissionsCard extends StatefulWidget {
 
 class _PermissionsCardState extends State<_PermissionsCard> {
   final _search = TextEditingController();
-  String _roleFilter = 'all'; // all | admin | teacher | student
+  String _roleFilter = 'all'; // all | admin | teacher | student | unapproved
 
   @override
   void dispose() {
@@ -21612,10 +21612,14 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                   ),
                   const SizedBox(height: 8),
                   Wrap(spacing: 8, runSpacing: 4, children: [
-                    for (final r in ['all', ...UserProfile.roles])
+                    for (final r in ['all', ...UserProfile.roles, 'unapproved'])
                       ChoiceChip(
                         label: Text(
-                            r == 'all' ? 'All roles' : UserProfile.roleLabel(r)),
+                            r == 'all'
+                                ? 'All roles'
+                                : r == 'unapproved'
+                                ? 'Unapproved'
+                                : UserProfile.roleLabel(r)),
                         selected: _roleFilter == r,
                         onSelected: (_) => setState(() => _roleFilter = r),
                       ),
@@ -21690,7 +21694,10 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                           final qd = q.replaceAll(RegExp(r'\D'), '');
                           final shown = [
                             for (final u in list)
-                              if ((_roleFilter == 'all' || u.role == _roleFilter) &&
+                              if ((_roleFilter == 'all' ||
+                                  (_roleFilter == 'unapproved'
+                                      ? !u.approved
+                                      : u.role == _roleFilter)) &&
                                   (q.isEmpty ||
                                       u.name.toLowerCase().contains(q) ||
                                       u.email.toLowerCase().contains(q) ||
