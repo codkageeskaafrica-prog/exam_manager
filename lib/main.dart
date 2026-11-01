@@ -6469,6 +6469,13 @@ class UserProfile {
 
   /// Added in the Teachers tab; has not signed in for the first time yet.
   final bool pending;
+
+  /// False for an account created on the login screen until an
+  /// administrator approves it (accounts without the field are approved).
+  final bool approved;
+
+  /// The administrator refused this sign up.
+  final bool rejected;
   const UserProfile({
     required this.uid,
     required this.role,
@@ -6479,6 +6486,8 @@ class UserProfile {
     this.access,
     this.legacy = false,
     this.pending = false,
+    this.approved = true,
+    this.rejected = false,
   });
 
   static const roles = ['admin', 'teacher', 'affairs', 'student'];
@@ -6510,6 +6519,8 @@ class UserProfile {
       phone: '${m['phone'] ?? ''}',
       studentId: '${m['studentId'] ?? ''}',
       pending: m['pendingLogin'] == true,
+      approved: m['approved'] != false,
+      rejected: m['rejected'] == true,
       access: a is List
           ? [
         for (final e in a)
@@ -6815,6 +6826,98 @@ class _ScopeGateState extends State<_ScopeGate> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     return widget.child;
+  }
+}
+
+/// A person who created an account on the login screen cannot open the app
+/// until an administrator approves it (Settings > Users & permissions).
+/// The screen opens by itself the moment the account is approved.
+class _ApprovalGate extends StatefulWidget {
+  final Widget child;
+  const _ApprovalGate({required this.child});
+
+  @override
+  State<_ApprovalGate> createState() => _ApprovalGateState();
+}
+
+class _ApprovalGateState extends State<_ApprovalGate> {
+  late final Stream<UserProfile> _stream = UserProfile.watchMine();
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _stream,
+      builder: (context, snap) {
+        // profile unreadable (rules problem): nothing is blocked
+        if (snap.hasError) return widget.child;
+        final p = snap.data;
+        if (p == null) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        if (p.approved) return widget.child;
+        return _WaitingApprovalScreen(profile: p);
+      },
+    );
+  }
+}
+
+class _WaitingApprovalScreen extends StatelessWidget {
+  final UserProfile profile;
+  const _WaitingApprovalScreen({required this.profile});
+
+  @override
+  Widget build(BuildContext context) {
+    final rejected = profile.rejected;
+    return Scaffold(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Card(
+            margin: const EdgeInsets.all(16),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(rejected ? Icons.block : Icons.hourglass_top,
+                      size: 48, color: rejected ? Colors.red : kBlue),
+                  const SizedBox(height: 12),
+                  Text(
+                      rejected
+                          ? 'Your sign up was not approved'
+                          : 'Waiting for approval',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  Text(
+                      rejected
+                          ? 'The administrator did not approve this account. '
+                          'Please contact the school administrator.'
+                          : 'Your account was created. An administrator must '
+                          'approve it before you can use Exam Manager. '
+                          'This page opens by itself once you are approved.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 13.5)),
+                  if (profile.email.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(profile.email,
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.black54)),
+                  ],
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: () => FirebaseAuth.instance.signOut(),
+                    icon: const Icon(Icons.logout, size: 18),
+                    label: const Text('Sign out'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -20960,6 +21063,7 @@ class _LoginScreenState extends State<LoginScreen> {
             'role': isTeacher ? 'teacher' : 'student',
             'name': name,
             'email': email,
+            'approved': false, // an administrator must approve this account first
             if (!isTeacher && studentForm != null) 'form': studentForm,
             'createdAt': FieldValue.serverTimestamp(),
           });
@@ -21306,7 +21410,7 @@ class ExamManagerApp extends StatelessWidget {
             builder: (context, busy, _) => busy
                 ? const Scaffold(
                 body: Center(child: CircularProgressIndicator()))
-                : const _ScopeGate(child: HomeScreen()),
+                : const _ApprovalGate(child: _ScopeGate(child: HomeScreen())),
           );
         },
       ),
@@ -21668,15 +21772,37 @@ class _PermissionsCardState extends State<_PermissionsCard> {
         child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
       ),
       title: Text(isMe ? '$title (you)' : title),
+      trailing: u.approved
+          ? null
+          : FilledButton.tonal(
+          onPressed: () => _run(
+              context,
+                  () => users.doc(u.uid).update(
+                  {'approved': true, 'rejected': FieldValue.delete()})),
+          child: const Text('Approve')),
       subtitle: Text(
         '${UserProfile.roleLabel(u.role)}'
-            '${u.pending ? ' (not signed in yet)' : ''} · '
+            '${u.pending ? ' (not signed in yet)' : ''}'
+            '${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
             '${u.isAdmin ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
             '${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
             '${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
         style: const TextStyle(fontSize: 12),
       ),
       children: [
+        if (!u.approved && !u.rejected && !isMe)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.block, size: 18),
+                label: const Text('Reject sign up'),
+                onPressed: () => _run(context,
+                        () => users.doc(u.uid).update({'rejected': true})),
+              ),
+            ),
+          ),
         if (isMe)
           const Padding(
             padding: EdgeInsets.only(bottom: 8),
