@@ -881,6 +881,9 @@ class ExamService {
     required String exam,
     required List<ResultReportGroup> groups,
   }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
     final usable = [for (final g in groups) if (g.students.isNotEmpty) g];
     if (usable.isEmpty) {
       throw Exception('There are no students to put in the report.');
@@ -1209,6 +1212,9 @@ class ExamService {
     required String exam,
     required List<ResultReportGroup> groups,
   }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
     final usable = [for (final g in groups) if (g.students.isNotEmpty) g];
     if (usable.isEmpty) {
       throw Exception('There are no students to put in the report.');
@@ -1461,6 +1467,9 @@ class ExamService {
     required String exam,
     required List<ResultReportGroup> groups,
   }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
     final usable = [for (final g in groups) if (g.students.isNotEmpty) g];
     if (usable.isEmpty) {
       throw Exception('There are no students to put in the report.');
@@ -16404,6 +16413,8 @@ class _ReportMenuButtonState extends State<_ReportMenuButton> {
 
   @override
   Widget build(BuildContext context) {
+// only the administrator can see, download or print the report
+    if (teacherScope.value.scoped) return const SizedBox.shrink();
     if (_busy) {
       return const Padding(
         padding: EdgeInsets.all(12),
@@ -16501,6 +16512,124 @@ class CheatEntry {
 /// exam). A student in the list shows "Cheated" in every mark field of that
 /// exam and is left out of totals, averages and positions. Only the
 /// administrator adds / removes students (set the Firestore rule so).
+// ======================= MARK AS COMPLETE =======================
+//
+// The marks of one subject IN ONE FORM of an exam can be closed
+// ("Complete"): the mark fields of that subject become inactive for the
+// students of that form, everywhere. This happens when
+//  - an administrator, or a teacher of that subject and form, taps the lock
+//    in the Schedule tab (or "Mark all" for every form of the subject), or
+//  - the deadline of the subject (exam date + days to return the results)
+//    has passed.
+// Status is kept in the "subjectStatus" collection, one document per exam,
+// subject and form: status "complete" (closed by a person) or "open"
+// (reopened by a person; this also overrides the deadline). A document
+// without a form (older version) applies to every form.
+class SubjectLockService {
+  static final _col = FirebaseFirestore.instance.collection('subjectStatus');
+
+  /// exam -> 'subject|form' -> 'complete' | 'open'   (empty form = all forms)
+  static final ValueNotifier<Map<String, Map<String, String>>> byExam =
+  ValueNotifier(const {});
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
+  static final Completer<void> _ready = Completer<void>();
+  static Future<void> get ready => _ready.future;
+
+  static String _key(String subject, String form) => '$subject|$form';
+
+  static void start() {
+    if (_sub != null) return;
+    _sub = _col.snapshots().listen((s) {
+      final m = <String, Map<String, String>>{};
+      for (final d in s.docs) {
+        final x = d.data();
+        final exam = '${x['exam'] ?? ''}';
+        final sub = '${x['subject'] ?? ''}';
+        final form = '${x['form'] ?? ''}';
+        final st = '${x['status'] ?? ''}';
+        if (exam.isEmpty || sub.isEmpty) continue;
+        if (st != 'complete' && st != 'open') continue;
+        (m[exam] ??= {})[_key(sub, form)] = st;
+      }
+      byExam.value = m;
+      if (!_ready.isCompleted) _ready.complete();
+    }, onError: (Object e) {
+      debugPrint('Subject status could not be read: $e');
+      _sub?.cancel();
+      _sub = null; // tried again the next time a screen starts it
+      if (!_ready.isCompleted) _ready.complete();
+    });
+  }
+
+  /// The status set by a person for this subject and form ('complete' or
+  /// 'open'), or null when nobody set one.
+  static String? statusOf(String exam, String subject, [String form = '']) {
+    final m = byExam.value[exam];
+    if (m == null) return null;
+    return (form.isEmpty ? null : m[_key(subject, form)]) ??
+        m[_key(subject, '')];
+  }
+
+  /// True when the last day of the subject (exam date + days to return the
+  /// results) is behind us.
+  static bool deadlinePassed(String subject) {
+    final due = appSettings.value.subjectDeadline(subject);
+    if (due == null) return false;
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day)
+        .isAfter(DateTime(due.year, due.month, due.day));
+  }
+
+  /// True when the marks of [subject] are closed for [exam] (in [form]).
+  static bool isComplete(String exam, String subject, [String form = '']) {
+    final s = statusOf(exam, subject, form);
+    if (s == 'complete') return true;
+    if (s == 'open') return false;
+    return deadlinePassed(subject);
+  }
+
+  /// Closed only because the deadline passed (nobody tapped the button).
+  static bool closedByDeadline(String exam, String subject,
+      [String form = '']) =>
+      statusOf(exam, subject, form) == null && deadlinePassed(subject);
+
+  /// An administrator, or a teacher of this subject (in this form).
+  static bool canMark(String subject, [String form = '']) {
+    final t = teacherScope.value;
+    if (t.isStudent) return false;
+    return form.isEmpty ? t.allowsSubject(subject) : t.allows(subject, form);
+  }
+
+  /// A teacher cannot reopen a subject once its deadline has passed.
+  static bool canReopen(String exam, String subject, [String form = '']) {
+    if (!canMark(subject, form)) return false;
+    return !teacherScope.value.scoped || !deadlinePassed(subject);
+  }
+
+  static String _docId(String exam, String subject, String form) =>
+      '${SchoolService.subjectKey(exam)}__${SchoolService.subjectKey(subject)}'
+          '__${SchoolService.subjectKey(form)}';
+
+  /// Marks the subject Complete (or reopens it) in each of [forms].
+  static Future<void> setStatus(
+      String exam, String subject, List<String> forms, bool complete) async {
+    final u = FirebaseAuth.instance.currentUser;
+    final batch = FirebaseFirestore.instance.batch();
+    for (final f in forms) {
+      batch.set(_col.doc(_docId(exam, subject, f)), {
+        'exam': exam,
+        'subject': subject,
+        'form': f,
+        'status': complete ? 'complete' : 'open',
+        'updatedBy': u?.uid,
+        'updatedByEmail': u?.email,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  }
+}
+
 class CheatService {
   static final _col = FirebaseFirestore.instance.collection('cheating');
 
@@ -16512,6 +16641,7 @@ class CheatService {
   static Future<void> get ready => _ready.future;
 
   static void start() {
+    SubjectLockService.start();
     if (_sub != null) return;
     _sub = _col.snapshots().listen((s) {
       final m = <String, Map<String, CheatEntry>>{};
@@ -16543,6 +16673,19 @@ class CheatService {
     if (e == null || e.subjects.isEmpty) return const <String>{};
     return e.subjects.toSet();
   }
+
+  /// A teacher only sees the cheating of the subjects they teach (an
+  /// administrator sees all of it). Returns the part of [cs] this person may see.
+  static Set<String> visibleSubjects(Set<String> cs) {
+    final t = teacherScope.value;
+    if (!t.restricted) return cs;
+    return {for (final x in cs) if (t.allowsSubject(x)) x};
+  }
+
+  /// Whole-exam cheating is visible to everyone; a partial entry only to
+  /// administrators and to teachers of one of its subjects.
+  static bool visibleEntry(CheatEntry e) =>
+      e.subjects.isEmpty || visibleSubjects(e.subjects.toSet()).isNotEmpty;
 
   /// True when this one subject counts as cheated for the student.
   static bool isCheatedIn(String exam, String studentId, String subject) =>
@@ -16767,7 +16910,9 @@ class ResultService {
           if (CheatService.isCheated(exam, id)) {
             out[id] = const ResultMarks({}, cheated: true);
           } else {
-            final cs = CheatService.partialSubjects(exam, id);
+            final cs = CheatService.visibleSubjects(
+                CheatService.partialSubjects(exam, id));
+            if (cs.isEmpty) continue; // cheated only in subjects this user cannot see
             final old = out[id]?.marks ?? const <String, double>{};
             out[id] = ResultMarks(
                 {for (final e in old.entries) if (!cs.contains(e.key)) e.key: e.value},
@@ -16938,6 +17083,26 @@ class ResultService {
 
   Future<void> saveMany(String exam,
       List<(StudentInfo, Map<String, double>)> items) async {
+    SubjectLockService.start();
+    await SubjectLockService.ready;
+    final closedByForm = <String, List<String>>{};
+    List<String> closedFor(String form) => closedByForm.putIfAbsent(
+        form,
+            () => [
+          for (final sub in ExamService.subjects)
+            if (SubjectLockService.isComplete(exam, sub, form)) sub
+        ]);
+    if (items.any((it) => closedFor(SchoolService.formOf(it.$1)).isNotEmpty)) {
+      final stored = await getAllForExam(exam);
+      items = [
+        for (final it in items)
+          (
+          it.$1,
+          _keepClosed(stored[it.$1.id] ?? const <String, double>{}, it.$2,
+              closedFor(SchoolService.formOf(it.$1)))
+          ),
+      ];
+    }
     for (final it in items) {
       _checkTotal(exam, it.$1.name, it.$2, SchoolService.formOf(it.$1));
     }
@@ -16985,6 +17150,7 @@ class ResultService {
       {bool raw = false}) async {
     CheatService.start();
     await CheatService.ready;
+    await SubjectLockService.ready;
     if (CheatService.isCheated(exam, studentId)) {
       return const ResultMarks({}, cheated: true);
     }
@@ -16998,7 +17164,8 @@ class ResultService {
         if (id == studentId) rethrow;
       }
     }
-    final cs = CheatService.partialSubjects(exam, studentId);
+    final cs = CheatService.visibleSubjects(
+        CheatService.partialSubjects(exam, studentId));
     final merged = _merge(docs);
     if (cs.isEmpty) return ResultMarks(merged);
     return ResultMarks(
@@ -17008,8 +17175,38 @@ class ResultService {
         cheatedSubs: cs);
   }
 
+  static Map<String, double> _keepClosed(Map<String, double> stored,
+      Map<String, double> marks, List<String> closed) {
+    final out = {...marks};
+    for (final sub in closed) {
+      final v = stored[sub];
+      if (v == null) {
+        out.remove(sub);
+      } else {
+        out[sub] = v;
+      }
+    }
+    return out;
+  }
+
+  /// Subjects marked Complete (or past their deadline) cannot change: they
+  /// keep the stored mark, whatever the screen sent.
+  Future<Map<String, double>> _keepComplete(String studentId, String exam,
+      String form, Map<String, double> marks) async {
+    SubjectLockService.start();
+    await SubjectLockService.ready;
+    final closed = [
+      for (final sub in ExamService.subjects)
+        if (SubjectLockService.isComplete(exam, sub, form)) sub
+    ];
+    if (closed.isEmpty) return marks;
+    final cur = (await get(studentId, exam, raw: true)).marks;
+    return _keepClosed(cur, marks, closed);
+  }
+
   /// Saves the marks (an empty map removes the result).
   Future<void> save(StudentInfo s, String exam, Map<String, double> marks) async {
+    marks = await _keepComplete(s.id, exam, SchoolService.formOf(s), marks);
     _checkTotal(exam, s.name, marks, SchoolService.formOf(s));
     Future<void> put(String id, String sectionId) {
       final ref = _col.doc(_id(id, exam));
@@ -17106,7 +17303,75 @@ bool _isDupCopy(StudentInfo st, Map<String, String> twins,
 /// Summary of the chosen exam: for each subject, how many students have the
 /// mark entered in Form1, Form2, Form3 and Form4, and the totals entered /
 /// not entered.
+/// Asks, then marks a subject of an exam as Complete in the given forms
+/// (or reopens it).
+Future<void> _confirmSubjectStatus(BuildContext context, String exam,
+    String subject, List<String> forms, bool complete, int pending) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final byDeadline = forms
+      .any((f) => SubjectLockService.closedByDeadline(exam, subject, f));
+  final where = forms.length == 1 ? forms.first : forms.join(', ');
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(complete
+          ? 'Mark $subject · $where as complete?'
+          : 'Reopen $subject · $where?'),
+      content: Text(complete
+          ? '$exam · $subject · $where\n\nThe mark fields of $subject will be '
+          'locked for ${forms.length == 1 ? 'this form' : 'these forms'}: '
+          'nobody can enter or change these marks until it is reopened.'
+          '${pending > 0 ? '\n\n$pending student${pending == 1 ? ' has' : 's have'} no mark yet.' : ''}'
+          : '$exam · $subject · $where\n\nThe mark fields of $subject will be '
+          'open again, so marks can be entered or changed.'
+          '${byDeadline ? '\n\nThe deadline of this subject has passed.' : ''}'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel')),
+        FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(complete ? 'Mark as complete' : 'Reopen')),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  try {
+    await SubjectLockService.setStatus(exam, subject, forms, complete);
+    messenger.showSnackBar(SnackBar(
+        content: Text(complete
+            ? '$subject · $where marked as complete'
+            : '$subject · $where reopened')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('Could not save: ${'$e'.replaceFirst('Exception: ', '')} '
+            '(check the Firestore rules for "subjectStatus")')));
+  }
+}
+
 Widget _subjectSummaryCard(
+    BuildContext context,
+    List<SectionInfo> sections,
+    List<StudentInfo> students,
+    Map<String, ResultMarks> results,
+    Map<String, String> twins,
+    String exam,
+    {Widget? banner, bool deadlines = false}) {
+  if (!deadlines) {
+    return _subjectSummaryCardBody(
+        context, sections, students, results, twins, exam,
+        banner: banner);
+  }
+// the Schedule also shows the Complete status: redraw when it changes
+  return ValueListenableBuilder<Map<String, Map<String, String>>>(
+    valueListenable: SubjectLockService.byExam,
+    builder: (ctx, _, __) => _subjectSummaryCardBody(
+        ctx, sections, students, results, twins, exam,
+        banner: banner, deadlines: true),
+  );
+}
+
+Widget _subjectSummaryCardBody(
     BuildContext context,
     List<SectionInfo> sections,
     List<StudentInfo> students,
@@ -17136,8 +17401,10 @@ Widget _subjectSummaryCard(
   final byForm = <String, Map<String, int>>{};
   final entered = <String, int>{};
   final newBy = <String, int>{}; // students added after the exam: not counted
+  final pendingBy = <String, Map<String, int>>{}; // subject -> form -> no mark yet
   for (final sub in subjects) {
     final g = {for (final f in forms) f: 0};
+    final pf = {for (final f in forms) f: 0};
     var e = 0;
     var nw = 0;
     for (final st in people) {
@@ -17146,6 +17413,9 @@ Widget _subjectSummaryCard(
             (results[st.id]?.cheated ?? false) ||
             (results[st.id]?.cheatedSubs.contains(sub) ?? false)) {
           nw++;
+        } else {
+          final pfm = secById[st.sectionId]!.form;
+          pf[pfm] = (pf[pfm] ?? 0) + 1;
         }
         continue;
       }
@@ -17154,6 +17424,7 @@ Widget _subjectSummaryCard(
       g[f] = (g[f] ?? 0) + 1;
     }
     byForm[sub] = g;
+    pendingBy[sub] = pf;
     entered[sub] = e;
     newBy[sub] = nw;
   }
@@ -17205,18 +17476,138 @@ Widget _subjectSummaryCard(
     return cell(t, color: c, bold: true, size: 12);
   }
 
-  TableRow row(String name, Map<String, int> g, int e, int n,
-      {bool total = false}) =>
+// One form of one subject: the count and a lock to mark it Complete
+  Widget formCell(String sub, String f, int count) {
+    final complete = SubjectLockService.isComplete(exam, sub, f);
+    final mayMark = SubjectLockService.canMark(sub, f);
+    if (!complete && !mayMark) return cell('$count');
+    final can =
+    complete ? SubjectLockService.canReopen(exam, sub, f) : mayMark;
+    final tip = complete
+        ? (can
+        ? 'Complete. Tap to reopen $sub · $f'
+        : SubjectLockService.closedByDeadline(exam, sub, f)
+        ? 'Complete: the deadline has passed. Only an administrator can reopen'
+        : 'Complete. Only an administrator can reopen')
+        : 'Tap to mark $sub · $f as complete';
+    return Tooltip(
+      message: tip,
+      child: InkWell(
+        onTap: can
+            ? () => _confirmSubjectStatus(
+            context, exam, sub, [f], !complete, pendingBy[sub]?[f] ?? 0)
+            : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 3),
+          child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('$count',
+                    style: const TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.w500)),
+                const SizedBox(width: 3),
+                Icon(complete ? Icons.lock : Icons.lock_open,
+                    size: 13,
+                    color: complete
+                        ? kGreen
+                        : (can ? Colors.grey.shade600 : Colors.grey.shade400)),
+              ]),
+        ),
+      ),
+    );
+  }
+
+// Whole subject: Complete when every form is, else "Mark all" (Schedule)
+  Widget statusCell(String sub) {
+    final rel = [
+      for (final f in forms)
+        if (SubjectLockService.isComplete(exam, sub, f) ||
+            SubjectLockService.canMark(sub, f))
+          f
+    ];
+    if (rel.isEmpty) return cell('Open', color: Colors.grey, size: 11.5);
+    final done = [
+      for (final f in rel)
+        if (SubjectLockService.isComplete(exam, sub, f)) f
+    ];
+    if (done.length == rel.length) {
+      final reopen = [
+        for (final f in rel)
+          if (SubjectLockService.canReopen(exam, sub, f)) f
+      ];
+      return Tooltip(
+        message: reopen.isEmpty
+            ? 'Complete in every form. Only an administrator can reopen'
+            : 'Complete in every form. Tap to reopen',
+        child: InkWell(
+          onTap: reopen.isEmpty
+              ? null
+              : () => _confirmSubjectStatus(
+              context, exam, sub, reopen, false, 0),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 3),
+            child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.lock, size: 13, color: kGreen),
+                  const SizedBox(width: 3),
+                  const Flexible(
+                      child: Text('Complete',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: kGreen,
+                              fontWeight: FontWeight.w700))),
+                ]),
+          ),
+        ),
+      );
+    }
+    final open = [
+      for (final f in rel)
+        if (!SubjectLockService.isComplete(exam, sub, f) &&
+            SubjectLockService.canMark(sub, f))
+          f
+    ];
+    final pending =
+    open.fold<int>(0, (a, f) => a + (pendingBy[sub]?[f] ?? 0));
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+      child: SizedBox(
+        height: 28,
+        child: OutlinedButton(
+          style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              visualDensity: VisualDensity.compact,
+              textStyle:
+              const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          onPressed: () =>
+              _confirmSubjectStatus(context, exam, sub, open, true, pending),
+          child: Text(done.isEmpty ? 'Mark all' : 'Mark rest',
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+      ),
+    );
+  }
+
+  TableRow row(String name, Map<String, int> g, int e, int n, {bool total = false}) =>
       TableRow(
           decoration: total
               ? BoxDecoration(color: cs.primaryContainer.withAlpha(70))
               : null,
           children: [
             cell(name, align: TextAlign.left, bold: total),
-            for (final f in forms) cell('${g[f]}', bold: total),
+            for (final f in forms)
+              (deadlines && !total)
+                  ? formCell(name, f, g[f] ?? 0)
+                  : cell('${g[f]}', bold: total),
             cell('$e', color: const Color(0xFF2E7D32), bold: true),
             cell('$n', color: const Color(0xFFC62828), bold: true),
             if (deadlines) total ? cell('') : deadlineCell(name, n),
+            if (deadlines) total ? cell('') : statusCell(name),
           ]);
 
   return Card(
@@ -17246,6 +17637,7 @@ Widget _subjectSummaryCard(
             forms.length + 1: const FlexColumnWidth(1.5),
             forms.length + 2: const FlexColumnWidth(1.9),
             if (deadlines) forms.length + 3: const FlexColumnWidth(1.8),
+            if (deadlines) forms.length + 4: const FlexColumnWidth(2.3),
           },
           defaultVerticalAlignment: TableCellVerticalAlignment.middle,
           border: TableBorder(
@@ -17261,6 +17653,7 @@ Widget _subjectSummaryCard(
                   cell('Entered', bold: true, size: 11.5),
                   cell('Not entered', bold: true, size: 11.5),
                   if (deadlines) cell('Days left', bold: true, size: 11.5),
+                  if (deadlines) cell('Status', bold: true, size: 11.5),
                 ]),
             for (final sub in subjects)
               row(sub, byForm[sub]!, entered[sub]!,
@@ -17499,6 +17892,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   @override
   void initState() {
     super.initState();
+    SubjectLockService.start();
     _service.twinMap().then((t) {
       if (mounted) setState(() => _twins = t);
     });
@@ -17521,6 +17915,15 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     for (final sub in ExamService.subjects) {
       final due = appSettings.value.subjectDeadline(sub);
       if (due == null || (notEntered[sub] ?? 0) == 0) continue;
+// a Complete subject needs no reminder
+      final fs = [
+        for (final f in ExamService.forms)
+          if (secs.any((x) => x.form == f)) f
+      ];
+      if (fs.isNotEmpty &&
+          fs.every((f) => SubjectLockService.isComplete(_ResultPrefs.exam, sub, f))) {
+        continue;
+      }
       left[sub] =
           DateTime.utc(due.year, due.month, due.day).difference(today).inDays;
     }
@@ -18034,17 +18437,21 @@ class _CheatPanelState extends State<_CheatPanel> {
         final list = (all[widget.exam]?.values.toList() ?? <CheatEntry>[])
           ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
         final seen = <String>{};
-        final entries = <CheatEntry>[];
+        final allEntries = <CheatEntry>[];
         for (final e in list) {
           final t = widget.twins[e.id];
           if (t != null && seen.contains(t)) continue; // twin record
           seen.add(e.id);
-          entries.add(e);
+          allEntries.add(e);
         }
         return StreamBuilder<UserProfile>(
           stream: UserProfile.watchMine(),
           builder: (context, ps) {
             final admin = ps.data?.isAdmin == true;
+// a teacher only sees students cheated in a subject they teach
+            final entries = admin
+                ? allEntries
+                : [for (final e in allEntries) if (CheatService.visibleEntry(e)) e];
             final matches = admin ? _matches() : const <StudentInfo>[];
             return Card(
               child: Padding(
@@ -18128,7 +18535,9 @@ class _CheatPanelState extends State<_CheatPanel> {
                           ),
                           title: Text(e.name),
                           subtitle: Text([
-                            e.subjects.isEmpty ? 'All subjects' : e.subjects.join(', '),
+                            e.subjects.isEmpty
+                                ? 'All subjects'
+                                : CheatService.visibleSubjects(e.subjects.toSet()).join(', '),
                             if (e.label.isNotEmpty) e.label,
                             if (e.studentNo.isNotEmpty) 'ID ${e.studentNo}',
                             if (e.at != null)
@@ -18576,7 +18985,7 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
       appBar: AppBar(
         title: Text(_title),
         actions: [
-          if (!teacherScope.value.isStudent)
+          if (!teacherScope.value.scoped)
             _ReportMenuButton(
               iconOnly: true,
               fileName: () => _safeFile('Result-$_title-${_ResultPrefs.exam}'),
@@ -18588,8 +18997,8 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
       ),
       body: LayoutBuilder(builder: (context, box) {
         final level1 = widget.form == null && !teacherScope.value.isStudent;
-// wide screen: the summary goes in the empty space on the right
-        final wide = level1 && box.maxWidth >= 1500;
+// wide screen: summary + cheating list (under it) beside the forms
+        final wide = level1 && box.maxWidth >= 1000;
         Widget content() => StreamBuilder<List<SectionInfo>>(
           stream: _secStream,
           builder: (context, secSnap) => StreamBuilder<List<StudentInfo>>(
@@ -18620,35 +19029,33 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
                           _cheatPanel(secSnap.data!, stuSnap.data!),
                         ]));
                     if (!wide || card == null) return main;
-                    return Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-                            child: Align(
-                              alignment: Alignment.topRight,
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(maxWidth: 440),
-                                child: _cheatPanel(secSnap.data!, stuSnap.data!),
+                    return Align(
+                      alignment: Alignment.topCenter,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 1800),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+// left: summary by subject, with the cheating list under it
+                            Expanded(
+                              flex: 6,
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.fromLTRB(16, 4, 8, 24),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    card,
+                                    const SizedBox(height: 12),
+                                    _cheatPanel(secSnap.data!, stuSnap.data!),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
+// right: forms
+                            Expanded(flex: 5, child: main),
+                          ],
                         ),
-                        SizedBox(width: 720, child: main),
-                        Expanded(
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-                            child: Align(
-                              alignment: Alignment.topLeft,
-                              child: ConstrainedBox(
-                                  constraints:
-                                  const BoxConstraints(maxWidth: 560),
-                                  child: card),
-                            ),
-                          ),
-                        ),
-                      ],
+                      ),
                     );
                   },
                 ),
@@ -18728,6 +19135,10 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
 // studentId -> subjects the student was absent in on the exam day
   Map<String, Set<String>> _absent = const {};
   StreamSubscription<Map<String, Set<String>>>? _absentSub;
+  void _onLock() {
+    if (mounted) setState(() {});
+  }
+
 
   @override
   void initState() {
@@ -18739,12 +19150,15 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
         .watchAbsentSubjects(null, teacherScope.value.subjectList)
         .listen((a) {
       if (mounted) setState(() => _absent = a);
-    }, onError: (Object _) {}); // no access to attendance: nothing to show // no access to attendance: no pre-fill
+    }, onError: (Object _) {}); // no access to attendance: nothing to show
+    SubjectLockService.start();
+    SubjectLockService.byExam.addListener(_onLock);
   }
 
   @override
   void dispose() {
     _absentSub?.cancel();
+    SubjectLockService.byExam.removeListener(_onLock);
     _q.dispose();
     super.dispose();
   }
@@ -18969,7 +19383,8 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
                 : [
               for (final x in teacherScope.value.subjectList)
                 if ((sForm == null || teacherScope.value.allows(x, sForm)) &&
-                    !(r?.cheatedSubs.contains(x) ?? false))
+                    !(r?.cheatedSubs.contains(x) ?? false) &&
+                    !SubjectLockService.isComplete(_ResultPrefs.exam, x, sForm ?? ''))
                   x,
             ];
             final cheated = results[s.id]?.cheated ?? false;
@@ -19183,6 +19598,7 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
     try {
       CheatService.start();
       await CheatService.ready;
+      await SubjectLockService.ready;
       final all = await _service.getAllForExam(widget.exam);
       var absent = <String, Set<String>>{};
       try {
@@ -19241,6 +19657,13 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
   bool _can(String studentId, String subject) {
     final f = widget.studentForms[studentId] ?? '';
     return f.isEmpty || teacherScope.value.allows(subject, f);
+  }
+
+  /// True when [subject] is Complete in every form of this list.
+  bool _allClosed(String subject) {
+    final fs = widget.studentForms.values.where((f) => f.isNotEmpty).toSet();
+    if (fs.isEmpty) return SubjectLockService.isComplete(widget.exam, subject);
+    return fs.every((f) => SubjectLockService.isComplete(widget.exam, subject, f));
   }
 
   bool _isBad(String text, String studentId) {
@@ -19355,8 +19778,14 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
                 for (final sub in _subjects)
                   SizedBox(
                       width: cellW,
-                      child: Text(sub,
-                          overflow: TextOverflow.ellipsis, style: _bulkHead)),
+                      child: Row(children: [
+                        if (_allClosed(sub)) const Padding(
+                            padding: EdgeInsets.only(right: 3),
+                            child: Icon(Icons.lock, size: 12, color: Colors.white70)),
+                        Flexible(
+                            child: Text(sub,
+                                overflow: TextOverflow.ellipsis, style: _bulkHead)),
+                      ])),
                 const SizedBox(
                     width: avgW, child: Text('Average', style: _bulkHead)),
               ]),
@@ -19413,7 +19842,10 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
                             padding: const EdgeInsets.only(right: 8),
                             child: TextField(
                               controller: row[sub],
-                              enabled: !_saving && _can(s.id, sub),
+                              enabled: !_saving &&
+                                  _can(s.id, sub) &&
+                                  !SubjectLockService.isComplete(
+                                      widget.exam, sub, widget.studentForms[s.id] ?? ''),
                               readOnly: _isAbsentText(row[sub]!.text),
                               canRequestFocus: !_isAbsentText(row[sub]!.text),
                               textAlign: TextAlign.center,
@@ -20050,14 +20482,16 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
                   child: Builder(builder: (_) {
                     final c = _ctrl[subject]!;
                     final t = c.text.trim();
+                    final locked =
+                    SubjectLockService.isComplete(widget.exam, subject, _form);
                     final v = double.tryParse(t);
                     final bad =
                         t.isNotEmpty && !_isAbsentText(t) && (v == null || v < minMarkOf(widget.exam, _form) || v > maxMarkOf(widget.exam, _form));
                     return TextField(
                       controller: c,
                       enabled: !_saving,
-                      readOnly: _isAbsentText(t),
-                      canRequestFocus: !_isAbsentText(t),
+                      readOnly: _isAbsentText(t) || locked,
+                      canRequestFocus: !_isAbsentText(t) && !locked,
                       style: _isAbsentText(t)
                           ? TextStyle(
                           color: isNewText(t) ? kNewColor : kRed,
@@ -20072,8 +20506,15 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
                       decoration: InputDecoration(
                         labelText: subject,
                         border: const OutlineInputBorder(),
-                        filled: _isAbsentText(t),
-                        fillColor: isNewText(t)
+                        suffixIcon: locked
+                            ? const Tooltip(
+                            message: 'Complete: the marks of this subject are closed',
+                            child: Icon(Icons.lock_outline, size: 16))
+                            : null,
+                        filled: _isAbsentText(t) || locked,
+                        fillColor: (locked && !_isAbsentText(t))
+                            ? const Color(0xFFEEEEEE)
+                            : isNewText(t)
                             ? const Color(0xFFE3F2FD)
                             : const Color(0xFFFDECEA),
                         enabledBorder: _isAbsentText(t)
@@ -20088,6 +20529,14 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
                   }),
                 ),
             ]),
+            if (_ctrl.keys
+                .any((s) => SubjectLockService.isComplete(widget.exam, s, _form)))
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                    'Subjects with a lock are Complete. They can be reopened in the Schedule tab.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+              ),
             const SizedBox(height: 14),
             Container(
               width: double.infinity,
