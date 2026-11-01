@@ -8083,6 +8083,32 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
 final appSettings = AppSettingsController();
 
 /// One place for the general settings of the app.
+/// Shared look of the cards in Settings.
+const _kSettingsCardShape = RoundedRectangleBorder(
+  borderRadius: BorderRadius.all(Radius.circular(16)),
+  side: BorderSide(color: Color(0xFFE3E8EF)),
+);
+
+/// One entry of the Settings menu.
+class _SetCat {
+  final int id;
+  final String title, subtitle;
+  final IconData icon;
+  const _SetCat(this.id, this.title, this.subtitle, this.icon);
+}
+
+const _kSetCats = <_SetCat>[
+  _SetCat(0, 'School', 'Letterhead, logo, exam heading, class lists',
+      Icons.school),
+  _SetCat(1, 'Exams & results', 'Exams, grades, mark limits, upload defaults',
+      Icons.emoji_events),
+  _SetCat(2, 'Attendance', 'Week start and attendance colours',
+      Icons.fact_check),
+  _SetCat(3, 'Users', 'Accounts, approval and page access',
+      Icons.manage_accounts),
+  _SetCat(4, 'Account', 'Your password and sign out', Icons.person),
+];
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -8104,6 +8130,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ];
   final _newExam = TextEditingController();
   bool _busy = false;
+
+  // menu: selected category, selected tab inside it, and (narrow screens)
+  // whether a category page is open instead of the menu
+  int _cat = 0, _tab = 0;
+  bool _open = false;
+  late final Stream<UserProfile> _me = UserProfile.watchMine();
+  // accounts waiting for approval (badge on the Users entry)
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _waiting =
+  FirebaseFirestore.instance
+      .collection('users')
+      .where('approved', isEqualTo: false)
+      .snapshots();
 
   @override
   void dispose() {
@@ -8436,17 +8474,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _card(String title, IconData icon, List<Widget> children) => Card(
     margin: EdgeInsets.zero,
+    elevation: 0,
+    color: Colors.white,
+    shape: _kSettingsCardShape,
     child: Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Icon(icon, size: 20, color: kBlue),
-          const SizedBox(width: 8),
-          Text(title,
-              style:
-              const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+                color: const Color(0xFFE8F2FC),
+                borderRadius: BorderRadius.circular(10)),
+            child: Icon(icon, size: 18, color: kBlue),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(title,
+                style: const TextStyle(
+                    fontSize: 15.5, fontWeight: FontWeight.w700)),
+          ),
         ]),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         ...children,
       ]),
     ),
@@ -8741,43 +8791,244 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ]);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: ValueListenableBuilder<AppSettings>(
-        valueListenable: appSettings,
-        builder: (context, s, _) {
-          const gap = SizedBox(height: 12);
-          return Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 720),
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+  // ---------------- menu + pages ----------------
+
+  /// The tabs (and their cards) of one category.
+  List<(String, List<Widget>)> _tabsOf(int id, AppSettings s) {
+    if (id == 0) {
+      return <(String, List<Widget>)>[
+        ('School', <Widget>[_schoolCard(), _subjectsCard(s)]),
+      ];
+    }
+    if (id == 1) {
+      return <(String, List<Widget>)>[
+        ('Exams', <Widget>[_examsCard(s)]),
+        ('Grades & rules', <Widget>[_resultsCard(), const _ReturnDaysCard()]),
+        ('Upload', <Widget>[_uploadCard(s)]),
+      ];
+    }
+    if (id == 2) {
+      return <(String, List<Widget>)>[
+        ('Attendance', <Widget>[_attendanceCard(s)]),
+      ];
+    }
+    if (id == 3) {
+      return <(String, List<Widget>)>[
+        ('Users', <Widget>[const _PermissionsCard(part: 1)]),
+        ('Default access', <Widget>[const _PermissionsCard(part: 2)]),
+      ];
+    }
+    return <(String, List<Widget>)>[
+      ('Account', <Widget>[_accountCard()]),
+    ];
+  }
+
+  Widget _catTile(_SetCat c,
+      {required bool selected, required int badge, required VoidCallback onTap}) {
+    return Material(
+      color: selected ? const Color(0xFFDCEBFA) : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+            color: selected ? kBlue : const Color(0xFFE3E8EF)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          child: Row(children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                  color: selected ? kBlue : const Color(0xFFE8F2FC),
+                  borderRadius: BorderRadius.circular(12)),
+              child: Icon(c.icon,
+                  size: 22, color: selected ? Colors.white : kBlue),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _schoolCard(),
-                  gap,
-                  _attendanceCard(s),
-                  gap,
-                  _resultsCard(),
-                  gap,
-                  _examsCard(s),
-                  gap,
-                  const _ReturnDaysCard(),
-                  gap,
-                  _subjectsCard(s),
-                  gap,
-                  const _PermissionsCard(),
-                  _uploadCard(s),
-                  gap,
-                  _accountCard(),
+                  Text(c.title,
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  Text(c.subtitle,
+                      maxLines: 2, overflow: TextOverflow.ellipsis, style: _hint),
                 ],
               ),
             ),
-          );
-        },
+            if (badge > 0)
+              Container(
+                margin: const EdgeInsets.only(left: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                    color: Colors.orange.shade700,
+                    borderRadius: BorderRadius.circular(10)),
+                child: Text('$badge',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700)),
+              ),
+            const Icon(Icons.chevron_right, color: Colors.black38),
+          ]),
+        ),
       ),
+    );
+  }
+
+  Widget _catEntry(_SetCat c, bool wide) {
+    final selected = wide && c.id == _cat;
+    void tap() => setState(() {
+      _cat = c.id;
+      _tab = 0;
+      _open = true;
+    });
+    if (c.id != 3) {
+      return _catTile(c, selected: selected, badge: 0, onTap: tap);
+    }
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _waiting,
+      builder: (context, snap) => _catTile(c,
+          selected: selected,
+          badge: snap.hasError ? 0 : (snap.data?.docs.length ?? 0),
+          onTap: tap),
+    );
+  }
+
+  Widget _page(_SetCat c, AppSettings s, bool wide) {
+    final tabs = _tabsOf(c.id, s);
+    final t = _tab < tabs.length ? _tab : 0;
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 780),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+          children: [
+            if (wide) ...[
+              Row(children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                      color: kBlue, borderRadius: BorderRadius.circular(14)),
+                  child: Icon(c.icon, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(c.title,
+                          style: const TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.w800)),
+                      Text(c.subtitle, style: _hint),
+                    ],
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 16),
+            ],
+            if (tabs.length > 1) ...[
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<int>(
+                  showSelectedIcon: false,
+                  segments: [
+                    for (var i = 0; i < tabs.length; i++)
+                      ButtonSegment<int>(value: i, label: Text(tabs[i].$1)),
+                  ],
+                  selected: {t},
+                  onSelectionChanged: (v) => setState(() => _tab = v.first),
+                ),
+              ),
+              const SizedBox(height: 14),
+            ],
+            for (final w in tabs[t].$2) ...[w, const SizedBox(height: 12)],
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _me,
+      builder: (context, me) {
+        // only an administrator manages users (a rules error is shown there)
+        final admin = me.hasError || me.data?.isAdmin == true;
+        final cats = [
+          for (final c in _kSetCats)
+            if (c.id != 3 || admin) c
+        ];
+        if (!cats.any((c) => c.id == _cat)) _cat = cats.first.id;
+        final cur = cats.firstWhere((c) => c.id == _cat);
+        return ValueListenableBuilder<AppSettings>(
+          valueListenable: appSettings,
+          builder: (context, s, _) => LayoutBuilder(
+            builder: (context, box) {
+              final wide = box.maxWidth >= 820;
+              if (wide) {
+                return Scaffold(
+                  appBar: AppBar(title: const Text('Settings')),
+                  body: Row(children: [
+                    SizedBox(
+                      width: 310,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: [
+                          for (final c in cats)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: _catEntry(c, true),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: _page(cur, s, true)),
+                  ]),
+                );
+              }
+              return PopScope(
+                canPop: !_open,
+                onPopInvokedWithResult: (didPop, _) {
+                  if (!didPop) setState(() => _open = false);
+                },
+                child: Scaffold(
+                  appBar: AppBar(
+                    title: Text(_open ? cur.title : 'Settings'),
+                    leading: _open
+                        ? IconButton(
+                      icon: const Icon(Icons.arrow_back),
+                      onPressed: () => setState(() => _open = false),
+                    )
+                        : null,
+                  ),
+                  body: _open
+                      ? _page(cur, s, false)
+                      : ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      for (final c in cats)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _catEntry(c, false),
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
@@ -18290,6 +18541,9 @@ class _ReturnDaysCardState extends State<_ReturnDaysCard> {
   Widget build(BuildContext context) {
     return Card(
       margin: EdgeInsets.zero,
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -21449,7 +21703,9 @@ class ExamManagerApp extends StatelessWidget {
 
 /// Administrator only: default access per role and the access of each user.
 class _PermissionsCard extends StatefulWidget {
-  const _PermissionsCard();
+  /// 0 = everything, 1 = the users list only, 2 = the default access only.
+  final int part;
+  const _PermissionsCard({this.part = 0});
 
   @override
   State<_PermissionsCard> createState() => _PermissionsCardState();
@@ -21608,224 +21864,243 @@ class _PermissionsCardState extends State<_PermissionsCard> {
           padding: const EdgeInsets.only(bottom: 12),
           child: Card(
             margin: EdgeInsets.zero,
+            elevation: 0,
+            color: Colors.white,
+            shape: _kSettingsCardShape,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Row(children: [
-                    Icon(Icons.admin_panel_settings, size: 20, color: kBlue),
-                    SizedBox(width: 8),
-                    Text('Users & permissions',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w700)),
-                  ]),
-                  const SizedBox(height: 8),
-                  const Text(
-                      'Choose which pages each user can see. Administrators '
-                          'always see everything. Users only see the pages '
-                          'ticked for them.',
-                      style: TextStyle(fontSize: 12, color: Colors.black54)),
-                  const SizedBox(height: 14),
-                  const Text('Default access for new accounts',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  ValueListenableBuilder<AppSettings>(
-                    valueListenable: appSettings,
-                    builder: (context, st, _) => Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Teachers',
-                            style: TextStyle(fontSize: 12)),
-                        const SizedBox(height: 4),
-                        _pageChips(
-                            st.teacherAccess,
-                                (v) => _run(context,
-                                    () => appSettings.update({'teacherAccess': v}))),
-                        const SizedBox(height: 10),
-                        const Text('Students',
-                            style: TextStyle(fontSize: 12)),
-                        const SizedBox(height: 4),
-                        _pageChips(
-                            st.studentAccess,
-                                (v) => _run(context,
-                                    () => appSettings.update({'studentAccess': v}))),
-                        const SizedBox(height: 10),
-                        const Text('Student affairs',
-                            style: TextStyle(fontSize: 12)),
-                        const SizedBox(height: 4),
-                        _pageChips(
-                            st.affairsAccess,
-                                (v) => _run(context,
-                                    () => appSettings.update({'affairsAccess': v}))),
-                      ],
-                    ),
-                  ),
-                  const Divider(height: 28),
-                  const Text('Users',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _search,
-                    onChanged: (_) => setState(() {}),
-                    decoration: InputDecoration(
-                      hintText: 'Search name, phone or email',
-                      prefixIcon: const Icon(Icons.search),
-                      suffixIcon: _search.text.isEmpty
-                          ? null
-                          : IconButton(
-                          icon: const Icon(Icons.clear),
-                          onPressed: () => setState(_search.clear)),
-                      border: const OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(spacing: 8, runSpacing: 4, children: [
-                    for (final r in ['all', ...UserProfile.roles, 'unapproved'])
-                      ChoiceChip(
-                        label: Text(
-                            r == 'all'
-                                ? 'All roles'
-                                : r == 'unapproved'
-                                ? 'Unapproved'
-                                : UserProfile.roleLabel(r)),
-                        selected: _roleFilter == r,
-                        onSelected: (_) => setState(() => _roleFilter = r),
+                  if (widget.part == 0) ...[
+                    const Row(children: [
+                      Icon(Icons.admin_panel_settings, size: 20, color: kBlue),
+                      SizedBox(width: 8),
+                      Text('Users & permissions',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700)),
+                    ]),
+                    const SizedBox(height: 8),
+                    const Text(
+                        'Choose which pages each user can see. Administrators '
+                            'always see everything. Users only see the pages '
+                            'ticked for them.',
+                        style: TextStyle(fontSize: 12, color: Colors.black54)),
+                    const SizedBox(height: 14),
+                  ],
+                  if (widget.part != 1) ...[
+                    const Text('Default access for new accounts',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    if (widget.part == 2)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Text(
+                            'The pages a new teacher, student or student-affairs account '
+                                'can open. You can still change them for each user.',
+                            style: TextStyle(fontSize: 12, color: Colors.black54)),
                       ),
-                  ]),
-                  const SizedBox(height: 4),
-                  StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                    stream: users.snapshots(),
-                    builder: (context, snap) {
-                      if (snap.hasError) {
-                        return Text('Error: ${snap.error}');
-                      }
-                      if (!snap.hasData) {
-                        return const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: Center(child: CircularProgressIndicator()),
-                        );
-                      }
-                      final accounts =
-                      snap.data!.docs.map(UserProfile.fromDoc).toList();
+                    const SizedBox(height: 8),
+                    ValueListenableBuilder<AppSettings>(
+                      valueListenable: appSettings,
+                      builder: (context, st, _) => Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Teachers',
+                              style: TextStyle(fontSize: 12)),
+                          const SizedBox(height: 4),
+                          _pageChips(
+                              st.teacherAccess,
+                                  (v) => _run(context,
+                                      () => appSettings.update({'teacherAccess': v}))),
+                          const SizedBox(height: 10),
+                          const Text('Students',
+                              style: TextStyle(fontSize: 12)),
+                          const SizedBox(height: 4),
+                          _pageChips(
+                              st.studentAccess,
+                                  (v) => _run(context,
+                                      () => appSettings.update({'studentAccess': v}))),
+                          const SizedBox(height: 10),
+                          const Text('Student affairs',
+                              style: TextStyle(fontSize: 12)),
+                          const SizedBox(height: 4),
+                          _pageChips(
+                              st.affairsAccess,
+                                  (v) => _run(context,
+                                      () => appSettings.update({'affairsAccess': v}))),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (widget.part == 0) const Divider(height: 28),
+                  if (widget.part != 2) ...[
+                    if (widget.part == 0) ...[
+                      const Text('Users',
+                          style: TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                    ],
+                    TextField(
+                      controller: _search,
+                      onChanged: (_) => setState(() {}),
+                      decoration: InputDecoration(
+                        hintText: 'Search name, phone or email',
+                        prefixIcon: const Icon(Icons.search),
+                        suffixIcon: _search.text.isEmpty
+                            ? null
+                            : IconButton(
+                            icon: const Icon(Icons.clear),
+                            onPressed: () => setState(_search.clear)),
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(spacing: 8, runSpacing: 4, children: [
+                      for (final r in ['all', ...UserProfile.roles, 'unapproved'])
+                        ChoiceChip(
+                          label: Text(
+                              r == 'all'
+                                  ? 'All roles'
+                                  : r == 'unapproved'
+                                  ? 'Unapproved'
+                                  : UserProfile.roleLabel(r)),
+                          selected: _roleFilter == r,
+                          onSelected: (_) => setState(() => _roleFilter = r),
+                        ),
+                    ]),
+                    const SizedBox(height: 4),
+                    StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                      stream: users.snapshots(),
+                      builder: (context, snap) {
+                        if (snap.hasError) {
+                          return Text('Error: ${snap.error}');
+                        }
+                        if (!snap.hasData) {
+                          return const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                        }
+                        final accounts =
+                        snap.data!.docs.map(UserProfile.fromDoc).toList();
 // Everybody in Teachers must be here too: a teacher /
 // staff member without an account yet is listed as
 // "not signed in yet" (set up now, linked at the first
 // sign in).
-                      return StreamBuilder<List<TeacherInfo>>(
-                        stream: TeacherService().watch(),
-                        builder: (context, ts) {
-                          final ids = {for (final x in accounts) x.uid};
-                          final emails = {
-                            for (final x in accounts) x.email.trim().toLowerCase()
-                          }..remove('');
-                          final list = [...accounts];
-                          for (final t in ts.data ?? const <TeacherInfo>[]) {
-                            final mail = t.email.trim().toLowerCase();
-                            if (ids.contains(t.id)) continue;
-                            if (mail.isNotEmpty && emails.contains(mail)) continue;
-                            ids.add(t.id);
-                            if (mail.isNotEmpty) emails.add(mail);
-                            list.add(UserProfile(
-                              uid: t.id,
-                              role: 'teacher',
-                              name: t.name,
-                              email: t.email,
-                              pending: true,
-                            ));
-                          }
-                          list.sort((x, y) => (x.name.isEmpty ? x.email : x.name)
-                              .toLowerCase()
-                              .compareTo((y.name.isEmpty ? y.email : y.name)
-                              .toLowerCase()));
-                          if (list.isEmpty) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 8),
-                              child: Text('No other users yet.',
-                                  style: TextStyle(color: Colors.black54)),
-                            );
-                          }
-                          final tList = ts.data ?? const <TeacherInfo>[];
-                          String phoneOf(UserProfile u) {
-                            if (u.phone.isNotEmpty) return u.phone;
-                            final m = u.email.trim().toLowerCase();
-                            for (final t in tList) {
-                              if (t.id == u.uid ||
-                                  (m.isNotEmpty &&
-                                      t.email.trim().toLowerCase() == m)) {
-                                return t.phone;
-                              }
+                        return StreamBuilder<List<TeacherInfo>>(
+                          stream: TeacherService().watch(),
+                          builder: (context, ts) {
+                            final ids = {for (final x in accounts) x.uid};
+                            final emails = {
+                              for (final x in accounts) x.email.trim().toLowerCase()
+                            }..remove('');
+                            final list = [...accounts];
+                            for (final t in ts.data ?? const <TeacherInfo>[]) {
+                              final mail = t.email.trim().toLowerCase();
+                              if (ids.contains(t.id)) continue;
+                              if (mail.isNotEmpty && emails.contains(mail)) continue;
+                              ids.add(t.id);
+                              if (mail.isNotEmpty) emails.add(mail);
+                              list.add(UserProfile(
+                                uid: t.id,
+                                role: 'teacher',
+                                name: t.name,
+                                email: t.email,
+                                pending: true,
+                              ));
                             }
-                            return '';
-                          }
+                            list.sort((x, y) => (x.name.isEmpty ? x.email : x.name)
+                                .toLowerCase()
+                                .compareTo((y.name.isEmpty ? y.email : y.name)
+                                .toLowerCase()));
+                            if (list.isEmpty) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 8),
+                                child: Text('No other users yet.',
+                                    style: TextStyle(color: Colors.black54)),
+                              );
+                            }
+                            final tList = ts.data ?? const <TeacherInfo>[];
+                            String phoneOf(UserProfile u) {
+                              if (u.phone.isNotEmpty) return u.phone;
+                              final m = u.email.trim().toLowerCase();
+                              for (final t in tList) {
+                                if (t.id == u.uid ||
+                                    (m.isNotEmpty &&
+                                        t.email.trim().toLowerCase() == m)) {
+                                  return t.phone;
+                                }
+                              }
+                              return '';
+                            }
 
-                          final q = _search.text.trim().toLowerCase();
-                          final qd = q.replaceAll(RegExp(r'\D'), '');
-                          final shown = [
-                            for (final u in list)
-                              if ((_roleFilter == 'all' ||
-                                  (_roleFilter == 'unapproved'
-                                      ? !u.approved
-                                      : u.role == _roleFilter)) &&
-                                  (q.isEmpty ||
-                                      u.name.toLowerCase().contains(q) ||
-                                      u.email.toLowerCase().contains(q) ||
-                                      (qd.isNotEmpty &&
-                                          phoneOf(u)
-                                              .replaceAll(RegExp(r'\D'), '')
-                                              .contains(qd))))
-                                u,
-                          ];
-                          return ValueListenableBuilder<AppSettings>(
-                            valueListenable: appSettings,
-                            builder: (context, st, _) => Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  if (_roleFilter != 'unapproved' && list.any((x) => !x.approved))
-                                    Container(
-                                      margin: const EdgeInsets.only(bottom: 6),
-                                      padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
-                                      decoration: BoxDecoration(
-                                          color: const Color(0xFFFFF4E5),
-                                          borderRadius: BorderRadius.circular(8)),
-                                      child: Row(children: [
-                                        const Icon(Icons.hourglass_top, size: 18, color: Colors.orange),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                            child: Text(
-                                                '${list.where((x) => !x.approved).length} waiting for approval',
-                                                style: const TextStyle(
-                                                    fontSize: 13, fontWeight: FontWeight.w600))),
-                                        TextButton(
-                                            onPressed: () => setState(() => _roleFilter = 'unapproved'),
-                                            child: const Text('Show')),
-                                      ]),
+                            final q = _search.text.trim().toLowerCase();
+                            final qd = q.replaceAll(RegExp(r'\D'), '');
+                            final shown = [
+                              for (final u in list)
+                                if ((_roleFilter == 'all' ||
+                                    (_roleFilter == 'unapproved'
+                                        ? !u.approved
+                                        : u.role == _roleFilter)) &&
+                                    (q.isEmpty ||
+                                        u.name.toLowerCase().contains(q) ||
+                                        u.email.toLowerCase().contains(q) ||
+                                        (qd.isNotEmpty &&
+                                            phoneOf(u)
+                                                .replaceAll(RegExp(r'\D'), '')
+                                                .contains(qd))))
+                                  u,
+                            ];
+                            return ValueListenableBuilder<AppSettings>(
+                              valueListenable: appSettings,
+                              builder: (context, st, _) => Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (_roleFilter != 'unapproved' && list.any((x) => !x.approved))
+                                      Container(
+                                        margin: const EdgeInsets.only(bottom: 6),
+                                        padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+                                        decoration: BoxDecoration(
+                                            color: const Color(0xFFFFF4E5),
+                                            borderRadius: BorderRadius.circular(8)),
+                                        child: Row(children: [
+                                          const Icon(Icons.hourglass_top, size: 18, color: Colors.orange),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                              child: Text(
+                                                  '${list.where((x) => !x.approved).length} waiting for approval',
+                                                  style: const TextStyle(
+                                                      fontSize: 13, fontWeight: FontWeight.w600))),
+                                          TextButton(
+                                              onPressed: () => setState(() => _roleFilter = 'unapproved'),
+                                              child: const Text('Show')),
+                                        ]),
+                                      ),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 4),
+                                      child: Text(
+                                          shown.length == list.length
+                                              ? '${list.length} users'
+                                              : '${shown.length} of ${list.length} users',
+                                          style: const TextStyle(
+                                              fontSize: 12, color: Colors.black54)),
                                     ),
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: 4),
-                                    child: Text(
-                                        shown.length == list.length
-                                            ? '${list.length} users'
-                                            : '${shown.length} of ${list.length} users',
-                                        style: const TextStyle(
-                                            fontSize: 12, color: Colors.black54)),
-                                  ),
-                                  if (shown.isEmpty)
-                                    const Padding(
-                                      padding: EdgeInsets.symmetric(vertical: 8),
-                                      child: Text('No user matches.',
-                                          style: TextStyle(color: Colors.black54)),
-                                    ),
-                                  for (final u in shown)
-                                    _userTile(context, u, st, u.uid == me, users,
-                                        tList),
-                                ]),
-                          );
-                        },
-                      );
-                    },
-                  ),
+                                    if (shown.isEmpty)
+                                      const Padding(
+                                        padding: EdgeInsets.symmetric(vertical: 8),
+                                        child: Text('No user matches.',
+                                            style: TextStyle(color: Colors.black54)),
+                                      ),
+                                    for (final u in shown)
+                                      _userTile(context, u, st, u.uid == me, users,
+                                          tList),
+                                  ]),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
