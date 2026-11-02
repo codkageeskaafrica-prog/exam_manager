@@ -1126,6 +1126,185 @@ class ExamService {
     return doc.save();
   }
 
+  // ---------------- Cheating report (PDF) ----------------
+  /// A PDF with the students marked as cheated in [exam]: a short summary
+  /// (per subject and per class) and the list. Same header and footer as the
+  /// result report.
+  Future<Uint8List> buildCheatReportPdf({
+    required String exam,
+    required List<CheatEntry> entries,
+  }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
+    if (entries.isEmpty) {
+      throw Exception('No student is marked as cheated in this exam.');
+    }
+
+    pw.MemoryImage? headerImg;
+    final letterhead = await getLetterhead();
+    if (letterhead != null) {
+      try {
+        headerImg = pw.MemoryImage(
+            _sniff(letterhead) != null ? letterhead : await _toPng(letterhead));
+      } catch (_) {}
+    }
+    final topImg = headerImg;
+    final stampImg = pw.MemoryImage(base64Decode(_footerStampBase64));
+    final logoImg = pdfLogoImage(LogoPlace.result);
+    final wmBg = pdfWatermark(LogoPlace.result);
+    final heading = await getHeading();
+
+    // The built-in PDF font is Latin-1 only.
+    String safe(String t) => String.fromCharCodes([
+      for (final r in t.runes)
+        r == 0x2018 || r == 0x2019
+            ? 0x27
+            : r == 0x2013 || r == 0x2014
+            ? 0x2D
+            : r > 255
+            ? 0x3F
+            : r
+    ]);
+    const grey = PdfColor(0.85, 0.85, 0.85);
+    const zebra = PdfColor(0.96, 0.96, 0.96);
+    pw.Widget bar(String t, {bool boxed = false, double size = 11}) =>
+        pw.Container(
+          width: double.infinity,
+          alignment: pw.Alignment.center,
+          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+          decoration: pw.BoxDecoration(
+              color: grey, border: boxed ? pw.Border.all(width: 1) : null),
+          child: pw.Text(safe(t),
+              style: pw.TextStyle(fontSize: size, fontWeight: pw.FontWeight.bold)),
+        );
+
+    // by class, then by name
+    final sorted = [...entries]..sort((a, b) {
+      final c = a.label.toLowerCase().compareTo(b.label.toLowerCase());
+      return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    String subjectsOf(CheatEntry e) =>
+        e.subjects.isEmpty ? 'All subjects' : e.subjects.join(', ');
+
+    final allCount = entries.where((e) => e.subjects.isEmpty).length;
+    final bySubject = <String, int>{};
+    final byClass = <String, int>{};
+    for (final e in entries) {
+      for (final sub in (e.subjects.isEmpty ? ExamService.subjects : e.subjects)) {
+        bySubject[sub] = (bySubject[sub] ?? 0) + 1;
+      }
+      final cls = e.label.isEmpty ? '-' : e.label;
+      byClass[cls] = (byClass[cls] ?? 0) + 1;
+    }
+    final subjectLine = [
+      for (final sub in ExamService.subjects)
+        if ((bySubject[sub] ?? 0) > 0) '$sub: ${bySubject[sub]}'
+    ].join('   ');
+    final classKeys = byClass.keys.toList()..sort();
+    final classLine = [for (final k in classKeys) '$k: ${byClass[k]}'].join('   ');
+
+    final theme = pw.ThemeData.withFont(
+        base: pw.Font.times(), bold: pw.Font.timesBold());
+    pw.Widget cell(String t, {bool bold = false, bool left = false}) =>
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+          child: pw.Align(
+            alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
+            child: pw.Text(safe(t),
+                style: pw.TextStyle(
+                    fontSize: 10,
+                    fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+          ),
+        );
+
+    final rows = <pw.TableRow>[
+      pw.TableRow(
+        repeat: true,
+        decoration: const pw.BoxDecoration(color: grey),
+        children: [
+          cell('No', bold: true),
+          cell('Student name', bold: true, left: true),
+          cell('ID', bold: true),
+          cell('Class', bold: true),
+          cell('Subjects', bold: true, left: true),
+          cell('Date', bold: true),
+        ],
+      ),
+      for (var i = 0; i < sorted.length; i++)
+        pw.TableRow(
+          decoration: i.isOdd ? const pw.BoxDecoration(color: zebra) : null,
+          children: [
+            cell('${i + 1}'),
+            cell(sorted[i].name, left: true),
+            cell(sorted[i].studentNo.isEmpty ? '-' : sorted[i].studentNo),
+            cell(sorted[i].label.isEmpty ? '-' : sorted[i].label),
+            cell(subjectsOf(sorted[i]), left: true),
+            cell(sorted[i].at == null
+                ? '-'
+                : DateFormat('MMM d, y').format(sorted[i].at!)),
+          ],
+        ),
+    ];
+
+    final doc = pw.Document();
+    doc.addPage(pw.MultiPage(
+      maxPages: 100000,
+      pageTheme: pw.PageTheme(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.fromLTRB(28, 20, 28, 20),
+        theme: theme,
+        buildBackground: wmBg,
+      ),
+      footer: (ctx) => pw.Column(
+        mainAxisSize: pw.MainAxisSize.min,
+        children: [
+          pw.Divider(thickness: 0.5),
+          pw.Text(
+              safe('Cheating report | $exam | '
+                  'Page ${ctx.pageNumber} of ${ctx.pagesCount}'),
+              textAlign: pw.TextAlign.center,
+              style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 3),
+          pw.Center(child: pw.Image(stampImg, height: 36, fit: pw.BoxFit.contain)),
+        ],
+      ),
+      build: (ctx) => [
+        if (logoImg != null) pdfLogoBlock(logoImg),
+        if (topImg != null)
+          pw.Image(topImg,
+              width: double.infinity, height: 80, fit: pw.BoxFit.contain),
+        pw.SizedBox(height: 6),
+        bar('${exam.toUpperCase()} - CHEATING REPORT', boxed: true, size: 13),
+        bar('ACADEMIC YEAR ${heading.academicYear}   |   '
+            '${entries.length} student${entries.length == 1 ? '' : 's'}'
+            '${allCount > 0 ? ' | $allCount in all subjects' : ''}',
+            size: 10),
+        pw.SizedBox(height: 8),
+        if (subjectLine.isNotEmpty)
+          pw.Text(safe('By subject: $subjectLine'),
+              style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+        if (classLine.isNotEmpty)
+          pw.Text(safe('By class: $classLine'),
+              style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 8),
+        pw.Table(
+          border: pw.TableBorder.all(width: 0.5),
+          columnWidths: const {
+            0: pw.FixedColumnWidth(28),
+            1: pw.FlexColumnWidth(4),
+            2: pw.FixedColumnWidth(52),
+            3: pw.FixedColumnWidth(42),
+            4: pw.FlexColumnWidth(3.4),
+            5: pw.FixedColumnWidth(62),
+          },
+          children: rows,
+        ),
+      ],
+    ));
+    return doc.save();
+  }
+
   // ---------------- Result report (Excel and Word) ----------------
   /// Same ranking as the PDF: best average first, equal averages share a
   /// position, students without marks come last (A-Z).
@@ -18851,6 +19030,15 @@ class _CheatPanelState extends State<_CheatPanel> {
                             style: TextStyle(
                                 fontSize: 17, fontWeight: FontWeight.w700)),
                       ),
+// only the administrator sees the report menu (it hides itself otherwise)
+                      if (admin)
+                        _ReportMenuButton(
+                          iconOnly: true,
+                          enabled: entries.isNotEmpty,
+                          fileName: () => _safeFile('Cheating-${widget.exam}'),
+                          build: () => ExamService()
+                              .buildCheatReportPdf(exam: widget.exam, entries: entries),
+                        ),
                       if (_busy)
                         const SizedBox(
                             width: 16,
