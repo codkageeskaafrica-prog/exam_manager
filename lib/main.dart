@@ -968,7 +968,7 @@ class ExamService {
         for (final x in g.students)
           if (g.results[x.id]?.average == null) x
       ]..sort(byName);
-      // A-Z by name; the Pos column still shows each student's rank
+      // A-Z by name; the No. column is a simple serial number (1, 2, 3...)
       final ordered = [...scored, ...unscored]..sort(byName);
 
       final groupAvg = scored.isEmpty
@@ -1017,7 +1017,7 @@ class ExamService {
           repeat: true, // the heading row is repeated on every page
           decoration: const pw.BoxDecoration(color: grey),
           children: [
-            cell('Pos', bold: true),
+            cell('No.', bold: true),
             cell('Student name', bold: true, left: true),
             cell('ID', bold: true),
             if (multi) cell('Class', bold: true),
@@ -1036,7 +1036,7 @@ class ExamService {
               final avg = r?.average;
               final gr = avg == null ? null : _gradeOf(avg);
               return [
-                cell(rank[x.id]?.toString() ?? '-'),
+                cell('${i + 1}'),
                 cell(x.name, left: true),
                 cell(x.studentNo.isEmpty ? '-' : x.studentNo),
                 if (multi) cell(g.sectionLabels[x.id] ?? ''),
@@ -1127,9 +1127,9 @@ class ExamService {
   }
 
   // ---------------- Cheating report (PDF) ----------------
-  /// A PDF with the students marked as cheated in [exam]: a short summary
-  /// (per subject and per class) and the list. Same header and footer as the
-  /// result report.
+  /// A PDF with the students marked as cheated in [exam]: a red title band,
+  /// summary cards, bar charts per subject and per class, and the list. The
+  /// school letterhead, logo and stamp are used like in the result report.
   Future<Uint8List> buildCheatReportPdf({
     required String exam,
     required List<CheatEntry> entries,
@@ -1166,18 +1166,15 @@ class ExamService {
             ? 0x3F
             : r
     ]);
-    const grey = PdfColor(0.85, 0.85, 0.85);
-    const zebra = PdfColor(0.96, 0.96, 0.96);
-    pw.Widget bar(String t, {bool boxed = false, double size = 11}) =>
-        pw.Container(
-          width: double.infinity,
-          alignment: pw.Alignment.center,
-          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-          decoration: pw.BoxDecoration(
-              color: grey, border: boxed ? pw.Border.all(width: 1) : null),
-          child: pw.Text(safe(t),
-              style: pw.TextStyle(fontSize: size, fontWeight: pw.FontWeight.bold)),
-        );
+
+    // palette
+    const red = PdfColor.fromInt(0xFF9B1C1C); // title band, table head
+    const redSoft = PdfColor.fromInt(0xFFD9534F); // bars
+    const tint = PdfColor.fromInt(0xFFFDECEA); // cards
+    const tintRow = PdfColor.fromInt(0xFFFFF6F5); // zebra rows
+    const track = PdfColor.fromInt(0xFFEDEDED); // empty part of a bar
+    const line = PdfColor.fromInt(0xFFD0D0D0);
+    const ink = PdfColor.fromInt(0xFF222222);
 
     // by class, then by name
     final sorted = [...entries]..sort((a, b) {
@@ -1197,52 +1194,187 @@ class ExamService {
       final cls = e.label.isEmpty ? '-' : e.label;
       byClass[cls] = (byClass[cls] ?? 0) + 1;
     }
-    final subjectLine = [
+    final subjectItems = [
       for (final sub in ExamService.subjects)
-        if ((bySubject[sub] ?? 0) > 0) '$sub: ${bySubject[sub]}'
-    ].join('   ');
+        if ((bySubject[sub] ?? 0) > 0) MapEntry(sub, bySubject[sub]!)
+    ];
     final classKeys = byClass.keys.toList()..sort();
-    final classLine = [for (final k in classKeys) '$k: ${byClass[k]}'].join('   ');
+    final classItems = [for (final k in classKeys) MapEntry(k, byClass[k]!)];
 
     final theme = pw.ThemeData.withFont(
-        base: pw.Font.times(), bold: pw.Font.timesBold());
-    pw.Widget cell(String t, {bool bold = false, bool left = false}) =>
+        base: pw.Font.helvetica(), bold: pw.Font.helveticaBold());
+    pw.TextStyle ts(double size,
+        {bool bold = false, PdfColor color = ink}) =>
+        pw.TextStyle(
+            fontSize: size,
+            color: color,
+            fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal);
+
+    // title band
+    final band = pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: const pw.BoxDecoration(
+        color: red,
+        borderRadius: pw.BorderRadius.all(pw.Radius.circular(10)),
+      ),
+      child: pw.Row(children: [
+        pw.Expanded(
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Text('CHEATING REPORT',
+                  style: ts(21, bold: true, color: PdfColors.white)),
+              pw.SizedBox(height: 4),
+              pw.Text(
+                  safe('${exam.toUpperCase()}   |   '
+                      'Academic year ${heading.academicYear}'),
+                  style: ts(10.5, color: PdfColors.grey200)),
+            ],
+          ),
+        ),
+        pw.Text(DateFormat('MMM d, y').format(DateTime.now()),
+            style: ts(10, color: PdfColors.grey200)),
+      ]),
+    );
+
+    // summary cards
+    pw.Widget card(String value, String label) => pw.Expanded(
+      child: pw.Container(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: pw.BoxDecoration(
+          color: tint,
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+          border: pw.Border.all(width: 0.6, color: redSoft),
+        ),
+        child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(value, style: ts(22, bold: true, color: red)),
+            pw.SizedBox(height: 1),
+            pw.Text(safe(label), style: ts(9, color: PdfColors.grey800)),
+          ],
+        ),
+      ),
+    );
+    final cards = pw.Row(children: [
+      card('${entries.length}',
+          entries.length == 1 ? 'Student cheated' : 'Students cheated'),
+      pw.SizedBox(width: 8),
+      card('$allCount', 'In all subjects'),
+      pw.SizedBox(width: 8),
+      card('${entries.length - allCount}', 'In some subjects'),
+      pw.SizedBox(width: 8),
+      card('${byClass.length}', byClass.length == 1 ? 'Class' : 'Classes'),
+    ]);
+
+    // horizontal bar chart (the bar length is the number of students)
+    pw.Widget bars(String title, List<MapEntry<String, int>> items) {
+      final maxV = items.fold<int>(1, (m, x) => x.value > m ? x.value : m);
+      return pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(title, style: ts(11, bold: true, color: red)),
+          pw.Container(
+              margin: const pw.EdgeInsets.only(top: 2, bottom: 5),
+              height: 1.2,
+              color: redSoft),
+          for (final it in items)
+            pw.Padding(
+              padding: const pw.EdgeInsets.symmetric(vertical: 1.6),
+              child: pw.Row(children: [
+                pw.SizedBox(
+                    width: 56,
+                    child: pw.Text(safe(it.key), style: ts(9))),
+                pw.Expanded(
+                  child: pw.Container(
+                    height: 7,
+                    decoration: const pw.BoxDecoration(
+                      color: track,
+                      borderRadius: pw.BorderRadius.all(pw.Radius.circular(3.5)),
+                    ),
+                    child: pw.Row(children: [
+                      pw.Expanded(
+                        flex: it.value,
+                        child: pw.Container(
+                          height: 7,
+                          decoration: const pw.BoxDecoration(
+                            color: redSoft,
+                            borderRadius:
+                            pw.BorderRadius.all(pw.Radius.circular(3.5)),
+                          ),
+                        ),
+                      ),
+                      if (maxV - it.value > 0)
+                        pw.Expanded(
+                            flex: maxV - it.value, child: pw.SizedBox(height: 7)),
+                    ]),
+                  ),
+                ),
+                pw.SizedBox(
+                  width: 22,
+                  child: pw.Text('${it.value}',
+                      textAlign: pw.TextAlign.right,
+                      style: ts(9, bold: true)),
+                ),
+              ]),
+            ),
+        ],
+      );
+    }
+
+    final charts = pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Expanded(child: bars('By subject', subjectItems)),
+        pw.SizedBox(width: 22),
+        pw.Expanded(child: bars('By class', classItems)),
+      ],
+    );
+
+    // list
+    pw.Widget cell(String t,
+        {bool bold = false,
+          bool left = false,
+          PdfColor color = ink,
+          double size = 9.5}) =>
         pw.Padding(
-          padding: const pw.EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+          padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 5),
           child: pw.Align(
             alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
-            child: pw.Text(safe(t),
-                style: pw.TextStyle(
-                    fontSize: 10,
-                    fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+            child: pw.Text(safe(t), style: ts(size, bold: bold, color: color)),
           ),
         );
-
     final rows = <pw.TableRow>[
       pw.TableRow(
         repeat: true,
-        decoration: const pw.BoxDecoration(color: grey),
+        decoration: const pw.BoxDecoration(color: red),
         children: [
-          cell('No', bold: true),
-          cell('Student name', bold: true, left: true),
-          cell('ID', bold: true),
-          cell('Class', bold: true),
-          cell('Subjects', bold: true, left: true),
-          cell('Date', bold: true),
+          cell('No', bold: true, color: PdfColors.white),
+          cell('Student name', bold: true, left: true, color: PdfColors.white),
+          cell('ID', bold: true, color: PdfColors.white),
+          cell('Class', bold: true, color: PdfColors.white),
+          cell('Subjects', bold: true, left: true, color: PdfColors.white),
+          cell('Date', bold: true, color: PdfColors.white),
         ],
       ),
       for (var i = 0; i < sorted.length; i++)
         pw.TableRow(
-          decoration: i.isOdd ? const pw.BoxDecoration(color: zebra) : null,
+          decoration: i.isOdd ? const pw.BoxDecoration(color: tintRow) : null,
           children: [
-            cell('${i + 1}'),
-            cell(sorted[i].name, left: true),
+            cell('${i + 1}', color: PdfColors.grey700),
+            cell(sorted[i].name, left: true, bold: true),
             cell(sorted[i].studentNo.isEmpty ? '-' : sorted[i].studentNo),
-            cell(sorted[i].label.isEmpty ? '-' : sorted[i].label),
-            cell(subjectsOf(sorted[i]), left: true),
-            cell(sorted[i].at == null
-                ? '-'
-                : DateFormat('MMM d, y').format(sorted[i].at!)),
+            cell(sorted[i].label.isEmpty ? '-' : sorted[i].label, bold: true),
+            cell(subjectsOf(sorted[i]),
+                left: true,
+                bold: sorted[i].subjects.isEmpty,
+                color: sorted[i].subjects.isEmpty ? red : ink),
+            cell(
+                sorted[i].at == null
+                    ? '-'
+                    : DateFormat('MMM d, y').format(sorted[i].at!),
+                color: PdfColors.grey800),
           ],
         ),
     ];
@@ -1259,12 +1391,12 @@ class ExamService {
       footer: (ctx) => pw.Column(
         mainAxisSize: pw.MainAxisSize.min,
         children: [
-          pw.Divider(thickness: 0.5),
+          pw.Divider(thickness: 0.5, color: line),
           pw.Text(
               safe('Cheating report | $exam | '
                   'Page ${ctx.pageNumber} of ${ctx.pagesCount}'),
               textAlign: pw.TextAlign.center,
-              style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+              style: ts(9.5, bold: true)),
           pw.SizedBox(height: 3),
           pw.Center(child: pw.Image(stampImg, height: 36, fit: pw.BoxFit.contain)),
         ],
@@ -1274,24 +1406,22 @@ class ExamService {
         if (topImg != null)
           pw.Image(topImg,
               width: double.infinity, height: 80, fit: pw.BoxFit.contain),
-        pw.SizedBox(height: 6),
-        bar('${exam.toUpperCase()} - CHEATING REPORT', boxed: true, size: 13),
-        bar('ACADEMIC YEAR ${heading.academicYear}   |   '
-            '${entries.length} student${entries.length == 1 ? '' : 's'}'
-            '${allCount > 0 ? ' | $allCount in all subjects' : ''}',
-            size: 10),
         pw.SizedBox(height: 8),
-        if (subjectLine.isNotEmpty)
-          pw.Text(safe('By subject: $subjectLine'),
-              style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
-        if (classLine.isNotEmpty)
-          pw.Text(safe('By class: $classLine'),
-              style: pw.TextStyle(fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
-        pw.SizedBox(height: 8),
+        band,
+        pw.SizedBox(height: 10),
+        cards,
+        pw.SizedBox(height: 14),
+        charts,
+        pw.SizedBox(height: 16),
+        pw.Text('Students', style: ts(12, bold: true, color: red)),
+        pw.SizedBox(height: 4),
         pw.Table(
-          border: pw.TableBorder.all(width: 0.5),
+          border: const pw.TableBorder(
+            horizontalInside: pw.BorderSide(width: 0.4, color: line),
+            bottom: pw.BorderSide(width: 0.8, color: red),
+          ),
           columnWidths: const {
-            0: pw.FixedColumnWidth(28),
+            0: pw.FixedColumnWidth(30),
             1: pw.FlexColumnWidth(4),
             2: pw.FixedColumnWidth(52),
             3: pw.FixedColumnWidth(42),
@@ -1464,7 +1594,7 @@ class ExamService {
       // header row (row 5)
       final head = StringBuffer('<row r="5" ht="30" customHeight="1">');
       var c = 0;
-      head.write(sc(c++, 5, 'Pos', 1));
+      head.write(sc(c++, 5, 'No.', 1));
       head.write(sc(c++, 5, 'Student name', 1));
       head.write(sc(c++, 5, 'ID', 1));
       if (d.multi) head.write(sc(c++, 5, 'Class', 1));
@@ -1484,9 +1614,7 @@ class ExamService {
         final gr = avg == null ? null : _gradeOf(avg);
         final line = StringBuffer('<row r="$r">');
         var k = 0;
-        line.write(d.rank[x.id] == null
-            ? sc(k++, r, '-', 2)
-            : nc(k++, r, d.rank[x.id]!, 2));
+        line.write(nc(k++, r, r - 5, 2)); // serial number 1, 2, 3...
         line.write(sc(k++, r, x.name, 3));
         line.write(sc(k++, r, x.studentNo.isEmpty ? '-' : x.studentNo, 2));
         if (d.multi) line.write(sc(k++, r, g.sectionLabels[x.id] ?? '', 2));
@@ -1755,7 +1883,7 @@ class ExamService {
       body.write(para('', b: false, sz: 12, sp: 0));
 
       final rows = StringBuffer(tr([
-        tc(widths[0], 'Pos', head: true, sz: sz),
+        tc(widths[0], 'No.', head: true, sz: sz),
         tc(widths[1], 'Student name', head: true, jc: 'left', sz: sz),
         tc(idW, 'ID', head: true, sz: sz),
         if (d.multi) tc(clsW, 'Class', head: true, sz: sz),
@@ -1771,7 +1899,7 @@ class ExamService {
         final gr = avg == null ? null : _gradeOf(avg);
         final z = i.isOdd;
         rows.write(tr([
-          tc(posW, d.rank[s.id]?.toString() ?? '-', sz: sz, zebraRow: z),
+          tc(posW, '${i + 1}', sz: sz, zebraRow: z),
           tc(nameW, s.name, jc: 'left', sz: sz, zebraRow: z),
           tc(idW, s.studentNo.isEmpty ? '-' : s.studentNo,
               sz: sz, zebraRow: z),
@@ -14357,6 +14485,36 @@ class _StudentAttendanceBodyState extends State<_StudentAttendanceBody> {
 
 // ======================= STUDENT DETAIL SCREEN =======================
 /// Everything about one student: profile + full attendance history.
+/// The real section of a student (from the Sections tab).
+class _RealSection {
+  /// The divided section the student belongs to (null = none found).
+  final SectionInfo? sec;
+
+  /// True when the class has divided sections at all.
+  final bool classDivided;
+
+  /// Students in that section (or in the whole class when there is none).
+  final int? size;
+  const _RealSection(this.sec, this.classDivided, this.size);
+}
+
+/// One exam of the student as shown in the Results tab.
+class _ExamView {
+  final String exam;
+
+  /// Every mark this person may see (a teacher only sees their subjects).
+  final Map<String, double> marks;
+
+  /// The marks that count (cheated subjects are left out).
+  final Map<String, double> counted;
+  final Set<String> cheatedSubs;
+  final bool cheatedAll, open;
+  const _ExamView(this.exam, this.marks, this.counted, this.cheatedSubs,
+      this.cheatedAll, this.open);
+  double get total => counted.values.fold(0.0, (a, b) => a + b);
+  double? get average => counted.isEmpty ? null : total / counted.length;
+}
+
 class StudentDetailScreen extends StatefulWidget {
   final StudentInfo student;
   final SectionInfo section;
@@ -14380,7 +14538,123 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       .doc(widget.student.id)
       .snapshots();
   late Future<List<_AttEntry>> _attFuture = _loadAttendance();
+  late Future<Map<String, ResultMarks>> _resFuture = _loadResults();
+  late Future<_RealSection> _secFuture = _loadRealSection();
   String _filter = 'all'; // all | present | absent | late
+  String? _twin; // the same student's record in the class <-> section twin
+
+  @override
+  void initState() {
+    super.initState();
+    CheatService.start();
+  }
+
+  /// The real section of the student. A student of a whole class (2B) is
+  /// usually saved a second time in a divided section (2B-A): that copy (the
+  /// "twin") tells which section of the Sections tab the student is in.
+  Future<_RealSection> _loadRealSection() async {
+    final db = FirebaseFirestore.instance;
+    try {
+      final base = widget.section;
+      final secs = await db.collection('sections').get();
+      final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
+      final divided = all.any((x) =>
+      x.isSub && x.form == base.form && x.classKey == base.classKey);
+      SectionInfo? real;
+      if (base.isSub) {
+        real = base;
+      } else {
+        final tid = (await ResultService().twinMap())[widget.student.id];
+        final secId = tid == null ? null : ResultService._stuSection[tid];
+        if (secId != null) {
+          for (final x in all) {
+            if (x.id == secId && x.isSub) real = x;
+          }
+        }
+      }
+      int? size;
+      try {
+        final q = await db
+            .collection('students')
+            .where('sectionId', isEqualTo: (real ?? base).id)
+            .get();
+        size = q.docs.length;
+      } catch (_) {}
+      return _RealSection(real, divided, size);
+    } catch (_) {
+      return const _RealSection(null, false, null);
+    }
+  }
+
+  /// The marks of every exam this student has (also the marks entered on the
+  /// twin record: class <-> section).
+  Future<Map<String, ResultMarks>> _loadResults() async {
+    final col = FirebaseFirestore.instance.collection('results');
+    final id = widget.student.id;
+    final twin = (await ResultService().twinMap())[id];
+    _twin = twin;
+    QuerySnapshot<Map<String, dynamic>> q;
+    try {
+      q = await col.where('studentId', whereIn: [id, if (twin != null) twin]).get();
+    } catch (_) {
+      q = await col.where('studentId', isEqualTo: id).get();
+    }
+    final byExam = <String, List<Map<String, dynamic>>>{};
+    for (final d in q.docs) {
+      byExam.putIfAbsent('${d.data()['exam'] ?? ''}', () => []).add(d.data());
+    }
+    return {
+      for (final e in byExam.entries)
+        if (e.key.isNotEmpty) e.key: ResultMarks(ResultService._merge(e.value)),
+    };
+  }
+
+  CheatEntry? _cheatOf(String exam) {
+    final m = CheatService.byExam.value[exam];
+    if (m == null) return null;
+    return m[widget.student.id] ?? (_twin == null ? null : m[_twin]);
+  }
+
+  /// The exams to show: a teacher only sees the open exams and the subjects
+  /// they teach; an administrator sees everything.
+  List<_ExamView> _views(Map<String, ResultMarks> data) {
+    final t = teacherScope.value;
+    final st = appSettings.value;
+    final out = <_ExamView>[];
+    for (final e in data.keys) {
+      final open = st.isExamOpen(e);
+      if (t.restricted && !open) continue;
+      final entry = _cheatOf(e);
+      final all = entry != null && entry.subjects.isEmpty;
+      final partial = (entry == null || all)
+          ? <String>{}
+          : CheatService.visibleSubjects(entry.subjects.toSet());
+      final visible = {
+        for (final m in data[e]!.marks.entries)
+          if (t.allowsSubject(m.key)) m.key: m.value
+      };
+      if (visible.isEmpty && !all && partial.isEmpty) continue;
+      final counted = all
+          ? <String, double>{}
+          : {
+        for (final m in visible.entries)
+          if (!partial.contains(m.key)) m.key: m.value
+      };
+      out.add(_ExamView(e, visible, counted, partial, all, open));
+    }
+    final order = st.examOptions;
+    int idx(String x) {
+      final k = order.indexOf(x);
+      return k < 0 ? 1 << 20 : k;
+    }
+    out.sort((a, b) {
+      final c = idx(a.exam).compareTo(idx(b.exam));
+      return c != 0 ? c : a.exam.compareTo(b.exam);
+    });
+    return out;
+  }
+
+  String _f1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
 
   /// Every register (any section, any date) that has a mark for this
   /// student. Queries one field path, so no extra Firestore index is needed.
@@ -14415,60 +14689,290 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
   String _fmtDate(Timestamp? t) =>
       t == null ? '–' : DateFormat('MMM d, yyyy  HH:mm').format(t.toDate());
 
-  Widget _info(IconData icon, String label, String value) => ListTile(
-    dense: true,
-    leading: Icon(icon, size: 20),
-    title: Text(label,
-        style: const TextStyle(fontSize: 12, color: Colors.black54)),
-    subtitle: Text(value,
-        style: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            color: Colors.black87)),
-  );
-
-  /// Compact label + value cell used in the two-column details grid.
-  Widget _cell(IconData icon, String label, Widget value, double width) =>
-      SizedBox(
-        width: width,
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Icon(icon, size: 16, color: Colors.black54),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label,
-                      style: const TextStyle(fontSize: 11, color: Colors.black54)),
-                  value,
-                ]),
-          ),
-        ]),
-      );
+  static const _line = Color(0xFFE3E8EF);
 
   Widget _val(String v) => Text(v,
       style: const TextStyle(
-          fontSize: 13, fontWeight: FontWeight.w600, color: Colors.black87));
+          fontSize: 14, fontWeight: FontWeight.w600, color: Colors.black87));
 
   Widget _smallBtn(IconData icon, String label, VoidCallback onTap) =>
-      Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: FilledButton.tonalIcon(
-          style: FilledButton.styleFrom(
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            textStyle: const TextStyle(fontSize: 12),
-          ),
-          onPressed: onTap,
-          icon: Icon(icon, size: 16),
-          label: Text(label),
+      FilledButton.tonalIcon(
+        style: FilledButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          textStyle: const TextStyle(fontSize: 12),
         ),
+        onPressed: onTap,
+        icon: Icon(icon, size: 16),
+        label: Text(label),
       );
 
-  Widget _profile(ColorScheme cs) {
+  Widget _tag(String t, Color c, {IconData? icon}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+    decoration: BoxDecoration(
+        color: c.withAlpha(30), borderRadius: BorderRadius.circular(10)),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      if (icon != null) ...[Icon(icon, size: 14, color: c), const SizedBox(width: 4)],
+      Text(t,
+          style: TextStyle(
+              fontSize: 12, fontWeight: FontWeight.w700, color: c)),
+    ]),
+  );
+
+  /// A white rounded card with an icon badge and a title.
+  Widget _box(String title, IconData icon, List<Widget> rows) => Card(
+    margin: const EdgeInsets.only(bottom: 12),
+    elevation: 0,
+    color: Colors.white,
+    shape: _kSettingsCardShape,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+                color: const Color(0xFFE8F2FC),
+                borderRadius: BorderRadius.circular(10)),
+            child: Icon(icon, size: 18, color: kBlue),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Text(title,
+                  style: const TextStyle(
+                      fontSize: 15.5, fontWeight: FontWeight.w700))),
+        ]),
+        const SizedBox(height: 6),
+        ...rows,
+      ]),
+    ),
+  );
+
+  Widget _kv(IconData icon, String label, Widget value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 7),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Icon(icon, size: 18, color: Colors.black45),
+      const SizedBox(width: 10),
+      SizedBox(
+          width: 112,
+          child: Text(label,
+              style: const TextStyle(fontSize: 12.5, color: Colors.black54))),
+      Expanded(child: value),
+    ]),
+  );
+
+  Widget _statTile(IconData icon, String label, String value, Color color,
+      [String sub = '']) =>
+      Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _line)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 6),
+            Expanded(
+                child: Text(label,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11.5, color: Colors.black54))),
+          ]),
+          const SizedBox(height: 6),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 22, fontWeight: FontWeight.w800, color: color)),
+          Text(sub,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: Colors.black45)),
+        ]),
+      );
+
+  Widget _msg(String t, IconData i) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Icon(i, size: 44, color: Colors.black26),
+        const SizedBox(height: 8),
+        Text(t,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.black54)),
+      ]),
+    ),
+  );
+
+// ---------------- header ----------------
+  Widget _header(ColorScheme cs) {
+    final sec = widget.section;
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _docStream,
+      builder: (context, snap) {
+        final m = snap.data?.data() ?? {};
+        final name = '${m['name'] ?? widget.student.name}';
+        final no = '${m['studentNo'] ?? ''}'.trim();
+        Widget chip(String t) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+          decoration: BoxDecoration(
+              color: Colors.white24, borderRadius: BorderRadius.circular(10)),
+          child: Text(t,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600)),
+        );
+        return Container(
+          margin: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(colors: [
+              cs.primary,
+              Color.lerp(cs.primary, Colors.black, 0.35)!,
+            ]),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Row(children: [
+            CircleAvatar(
+              radius: 28,
+              backgroundColor: Colors.white,
+              child: Text(
+                  name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase(),
+                  style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: cs.primary)),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 19,
+                          fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 6),
+                  FutureBuilder<_RealSection>(
+                    future: _secFuture,
+                    builder: (context, s) {
+                      final real = s.data?.sec;
+                      return Wrap(spacing: 6, runSpacing: 4, children: [
+                        chip(sec.fullName),
+                        if (real != null && real.id != sec.id)
+                          chip('Section ${real.subName}'),
+                        chip(sec.form),
+                        if (no.isNotEmpty) chip('ID $no'),
+                      ]);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+
+  Widget _tabBar(ColorScheme cs) {
+    Widget tab(IconData i, String t) => Tab(
+      height: 42,
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(i, size: 18),
+        const SizedBox(width: 6),
+        Text(t, style: const TextStyle(fontWeight: FontWeight.w700)),
+      ]),
+    );
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _line)),
+      child: TabBar(
+        dividerColor: Colors.transparent,
+        indicatorSize: TabBarIndicatorSize.tab,
+        indicatorPadding: const EdgeInsets.all(4),
+        indicator: BoxDecoration(
+            color: cs.primary, borderRadius: BorderRadius.circular(11)),
+        labelColor: Colors.white,
+        unselectedLabelColor: Colors.black54,
+        tabs: [
+          tab(Icons.badge_outlined, 'Overview'),
+          tab(Icons.emoji_events_outlined, 'Results'),
+          tab(Icons.fact_check_outlined, 'Attendance'),
+        ],
+      ),
+    );
+  }
+
+// ---------------- overview tab ----------------
+  Widget _statsRow() {
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Expanded(
+        child: FutureBuilder<List<_AttEntry>>(
+          future: _attFuture,
+          builder: (context, snap) {
+            final t = _Tally();
+            for (final e in snap.data ?? const <_AttEntry>[]) {
+              t.add(e.mark);
+            }
+            return _statTile(
+                Icons.fact_check_outlined,
+                'Attendance',
+                snap.hasData ? _pct(t.rate) : '…',
+                _rateColor(t.rate),
+                snap.hasData ? '${t.p} present' : '');
+          },
+        ),
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: FutureBuilder<List<_AttEntry>>(
+          future: _attFuture,
+          builder: (context, snap) {
+            final t = _Tally();
+            for (final e in snap.data ?? const <_AttEntry>[]) {
+              t.add(e.mark);
+            }
+            return _statTile(Icons.event_busy_outlined, 'Days absent',
+                snap.hasData ? '${t.a}' : '…', t.a > 0 ? kRed : Colors.blueGrey,
+                snap.hasData ? 'of ${t.total} marked' : '');
+          },
+        ),
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: FutureBuilder<Map<String, ResultMarks>>(
+          future: _resFuture,
+          builder: (context, snap) {
+            if (!snap.hasData) {
+              return _statTile(Icons.emoji_events_outlined, 'Average', '…',
+                  Colors.blueGrey);
+            }
+            final avgs = [
+              for (final v in _views(snap.data!))
+                if (v.average != null) v.average!
+            ];
+            if (avgs.isEmpty) {
+              return _statTile(Icons.emoji_events_outlined, 'Average', '–',
+                  Colors.blueGrey, 'no result yet');
+            }
+            final o = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
+            final g = _gradeOf(o);
+            return _statTile(Icons.emoji_events_outlined, 'Average', _f1(o),
+                _gradeColor(g), 'Grade $g');
+          },
+        ),
+      ),
+    ]);
+  }
+
+  Widget _overview() {
     final sec = widget.section;
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: _docStream,
@@ -14476,120 +14980,427 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         final m = snap.data?.data() ?? {};
         final linked = (m['accountUid'] is String) &&
             (m['accountUid'] as String).isNotEmpty;
-        final name = '${m['name'] ?? widget.student.name}';
         final hasPhone = '${m['phone'] ?? ''}'.isNotEmpty;
         final noId = '${m['studentNo'] ?? ''}'.trim().isEmpty;
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                CircleAvatar(
-                  radius: 22,
-                  backgroundColor: cs.primaryContainer,
-                  child: Text(
-                    name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase(),
-                    style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: cs.onPrimaryContainer),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
+        final phones = <String>[
+          if (m['phones'] is List)
+            for (final p in (m['phones'] as List))
+              if ('$p'.trim().isNotEmpty) '$p'.trim()
+        ];
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+          children: [
+            _statsRow(),
+            const SizedBox(height: 12),
+            _box('Class & section', Icons.groups_outlined, [
+              _kv(Icons.school_outlined, 'Form', _val(sec.form)),
+              _kv(Icons.class_outlined, 'Class',
+                  _val(SectionInfo.code(sec.form, sec.classKey))),
+              FutureBuilder<_RealSection>(
+                future: _secFuture,
+                builder: (context, s) {
+                  final r = s.data;
+                  final real = r?.sec;
+                  final Widget secVal = s.connectionState != ConnectionState.done
+                      ? _val('…')
+                      : real != null
+                      ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(name,
+                        _val('Section ${real.subName}'),
+                        Text(real.fullName,
                             style: const TextStyle(
-                                fontSize: 17, fontWeight: FontWeight.bold)),
-                        Text(sec.fullName,
-                            style: TextStyle(
-                                color: cs.primary,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 13)),
-                      ]),
-                ),
-              ]),
-              const Divider(height: 16),
-              LayoutBuilder(builder: (context, c) {
-                final w = (c.maxWidth - 12) / 2;
-                return Wrap(spacing: 12, runSpacing: 10, children: [
-                  _cell(Icons.school_outlined, 'Form', _val(sec.form), w),
-                  _cell(Icons.class_outlined, 'Class',
-                      _val(SectionInfo.code(sec.form, sec.classKey)), w),
-                  _cell(
-                      Icons.groups_outlined,
-                      'Section',
-                      _val(sec.isSub
-                          ? 'Section ${sec.subName}'
-                          : 'Whole class (no sections)'),
-                      w),
-                  _cell(
-                      Icons.tag,
-                      'Student ID',
-                      noId
-                          ? Wrap(
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: 8,
-                          children: [
-                            _val('Not set yet'),
-                            _smallBtn(Icons.auto_fix_high, 'Generate', () async {
-                              final messenger = ScaffoldMessenger.of(context);
-                              try {
-                                await SchoolService()
-                                    .generateStudentNo(widget.student.id);
-                              } catch (e) {
-                                messenger.showSnackBar(SnackBar(
-                                    content:
-                                    Text('Could not generate the ID: $e')));
-                              }
-                            }),
-                          ])
-                          : _val('${m['studentNo']}'.trim()),
-                      w),
-                  _cell(
-                      Icons.phone_outlined,
-                      'Phone number(s)',
-                      _val((m['phones'] is List && (m['phones'] as List).isNotEmpty)
-                          ? (m['phones'] as List).join('  ·  ')
-                          : 'Not saved'),
-                      w),
-                  _cell(
-                      Icons.person_outline,
-                      'Username / password',
-                      _val(!hasPhone
-                          ? 'No phone number, cannot log in'
-                          : '${m['phone']}  (same for both)'),
-                      w),
-                  _cell(
-                      Icons.link,
-                      'Student account',
-                      Wrap(
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          spacing: 8,
-                          children: [
-                            _val(linked ? 'Linked' : 'Not linked'),
-                            if (!linked && hasPhone)
-                              _smallBtn(Icons.key, 'Create login', () {
-                                runAccountCreation(context,
-                                    ids: [widget.student.id], quiet: true);
-                              }),
-                          ]),
-                      w),
-                  _cell(Icons.event_available_outlined, 'Added',
-                      _val(_fmtDate(m['createdAt'] as Timestamp?)), w),
-                  if (m['updatedAt'] != null)
-                    _cell(Icons.update, 'Last updated',
-                        _val(_fmtDate(m['updatedAt'] as Timestamp?)), w),
-                ]);
-              }),
+                                fontSize: 12, color: Colors.black54)),
+                      ])
+                      : _val(r != null && r.classDivided
+                      ? 'Not placed in a section yet'
+                      : 'Whole class (no sections)');
+                  return Column(children: [
+                    _kv(Icons.groups_outlined, 'Section', secVal),
+                    if (r != null && r.size != null)
+                      _kv(Icons.people_outline, 'Students here',
+                          _val('${r.size} in ${(real ?? sec).fullName}')),
+                  ]);
+                },
+              ),
             ]),
-          ),
+            _box('Contact', Icons.phone_outlined, [
+              if (phones.isEmpty)
+                _kv(Icons.phone_outlined, 'Phone number', _val('Not saved'))
+              else
+                for (var i = 0; i < phones.length; i++)
+                  _kv(Icons.phone_outlined, i == 0 ? 'Phone number(s)' : '',
+                      _val(phones[i])),
+            ]),
+            _box('Login', Icons.key_outlined, [
+              _kv(
+                  Icons.person_outline,
+                  'Username / password',
+                  _val(!hasPhone
+                      ? 'No phone number, cannot log in'
+                      : '${m['phone']}  (same for both)')),
+              _kv(
+                Icons.link,
+                'Student account',
+                Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      linked
+                          ? _tag('Linked', kGreen, icon: Icons.check_circle)
+                          : _tag('Not linked', kLate, icon: Icons.link_off),
+                      if (!linked && hasPhone)
+                        _smallBtn(Icons.key, 'Create login', () {
+                          runAccountCreation(context,
+                              ids: [widget.student.id], quiet: true);
+                        }),
+                    ]),
+              ),
+            ]),
+            _box('Record', Icons.badge_outlined, [
+              _kv(
+                  Icons.tag,
+                  'Student ID',
+                  noId
+                      ? Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        _val('Not set yet'),
+                        _smallBtn(Icons.auto_fix_high, 'Generate', () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          try {
+                            await SchoolService()
+                                .generateStudentNo(widget.student.id);
+                          } catch (e) {
+                            messenger.showSnackBar(SnackBar(
+                                content:
+                                Text('Could not generate the ID: $e')));
+                          }
+                        }),
+                      ])
+                      : _val('${m['studentNo']}'.trim())),
+              _kv(Icons.event_available_outlined, 'Added',
+                  _val(_fmtDate(m['createdAt'] as Timestamp?))),
+              if (m['updatedAt'] != null)
+                _kv(Icons.update, 'Last updated',
+                    _val(_fmtDate(m['updatedAt'] as Timestamp?))),
+            ]),
+          ],
         );
       },
     );
   }
+
+// ---------------- results tab ----------------
+  Widget _overallCard(List<_ExamView> views) {
+    final avgs = [
+      for (final v in views)
+        if (v.average != null) v.average!
+    ];
+    if (avgs.isEmpty) return const SizedBox.shrink();
+    final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
+    final g = _gradeOf(overall);
+    final bySub = <String, List<double>>{};
+    for (final v in views) {
+      v.counted.forEach((k, x) => (bySub[k] ??= []).add(x));
+    }
+    String best = '', weak = '';
+    double bv = -1, wv = 1e9;
+    bySub.forEach((k, l) {
+      final a = l.fold(0.0, (x, y) => x + y) / l.length;
+      if (a > bv) {
+        bv = a;
+        best = k;
+      }
+      if (a < wv) {
+        wv = a;
+        weak = k;
+      }
+    });
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            _gradeBadge(g, 56),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Overall average',
+                      style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+                  Text(_f1(overall),
+                      style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.w800,
+                          color: _gradeColor(g))),
+                  Text(
+                      '${avgs.length} exam${avgs.length == 1 ? '' : 's'} with marks',
+                      style: const TextStyle(fontSize: 12, color: Colors.black45)),
+                ],
+              ),
+            ),
+          ]),
+          if (bySub.length > 1) ...[
+            const SizedBox(height: 12),
+            Wrap(spacing: 8, runSpacing: 6, children: [
+              _tag('Best: $best (${_f1(bv)})', kGreen, icon: Icons.trending_up),
+              _tag('Weakest: $weak (${_f1(wv)})', kRed, icon: Icons.trending_down),
+            ]),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _gradeBadge(String g, double size) => Container(
+    width: size,
+    height: size,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      color: _gradeColor(g).withAlpha(36),
+      border: Border.all(color: _gradeColor(g), width: 2),
+    ),
+    child: Text(g,
+        style: TextStyle(
+            fontSize: size * 0.46,
+            fontWeight: FontWeight.w900,
+            color: _gradeColor(g))),
+  );
+
+  Widget _examCard(_ExamView v, bool expanded) {
+    final avg = v.average;
+    final g = avg == null ? null : _gradeOf(avg);
+    final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
+    final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+    final subs = <String>[
+      for (final s in ExamService.subjects)
+        if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
+      for (final s in {...v.marks.keys, ...v.cheatedSubs})
+        if (!ExamService.subjects.contains(s)) s,
+    ];
+    final belowMin =
+        limits.totalMin > 0 && avg != null && v.total < limits.totalMin;
+
+    Widget subjectRow(String sub) {
+      final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
+      final mark = v.marks[sub];
+      final c = mark == null ? Colors.grey : _gradeColor(_gradeOf(mark));
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(children: [
+          SizedBox(
+              width: 92,
+              child: Text(sub,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600))),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: cheated || mark == null
+                    ? 0
+                    : (mark / maxMark).clamp(0.0, 1.0),
+                minHeight: 8,
+                backgroundColor: Colors.grey.shade200,
+                color: c,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 78,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: cheated
+                  ? _tag('Cheated', kCheatColor, icon: Icons.gavel)
+                  : mark == null
+                  ? const Text('-')
+                  : Container(
+                constraints: const BoxConstraints(minWidth: 46),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                    color: c.withAlpha(30),
+                    borderRadius: BorderRadius.circular(20)),
+                child: Text(_fmtMark(mark),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800, color: c)),
+              ),
+            ),
+          ),
+        ]),
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 0,
+      color: Colors.white,
+      clipBehavior: Clip.antiAlias,
+      shape: _kSettingsCardShape,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: expanded,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+          expandedCrossAxisAlignment: CrossAxisAlignment.start,
+          leading: v.cheatedAll
+              ? Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: kCheatColor.withAlpha(30),
+                border: Border.all(color: kCheatColor, width: 2)),
+            child: const Icon(Icons.gavel, size: 20, color: kCheatColor),
+          )
+              : g == null
+              ? const Icon(Icons.hourglass_empty, color: Colors.black38)
+              : _gradeBadge(g, 42),
+          title: Row(children: [
+            Flexible(
+                child: Text(v.exam,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 15.5, fontWeight: FontWeight.w700))),
+            if (!v.open) ...[
+              const SizedBox(width: 8),
+              _tag('Closed', Colors.blueGrey),
+            ],
+          ]),
+          subtitle: Text(
+              v.cheatedAll
+                  ? 'Marked as cheated'
+                  : avg == null
+                  ? 'No marks counted'
+                  : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}'
+                  '${belowMin ? ' · below min' : ''}',
+              style: TextStyle(
+                  fontSize: 12.5,
+                  color: belowMin || v.cheatedAll ? kRed : Colors.black54,
+                  fontWeight:
+                  belowMin || v.cheatedAll ? FontWeight.w700 : FontWeight.w400)),
+          children: [
+            if (v.cheatedAll)
+              _note('Marked as cheated in all subjects. No mark counts.')
+            else if (v.cheatedSubs.isNotEmpty)
+              _note('Cheated in ${v.cheatedSubs.join(', ')}. '
+                  'Those marks are not counted.'),
+            for (final sub in subs) subjectRow(sub),
+            if (!v.cheatedAll && avg != null) ...[
+              const Divider(height: 18),
+              Row(children: [
+                const Expanded(
+                    child: Text('Total',
+                        style: TextStyle(fontWeight: FontWeight.w700))),
+                Text(
+                    '${_fmtMark(v.total)}'
+                        '${limits.totalMax > 0 ? ' / ${_fmtMark(limits.totalMax)}' : ''}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: belowMin ? kRed : Colors.black87)),
+              ]),
+              const SizedBox(height: 4),
+              Row(children: [
+                const Expanded(
+                    child: Text('Average',
+                        style: TextStyle(fontWeight: FontWeight.w700))),
+                Text('${_f1(avg)}  ·  Grade $g',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800, color: _gradeColor(g!))),
+              ]),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _note(String t) => Container(
+    width: double.infinity,
+    margin: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    decoration: BoxDecoration(
+        color: kCheatColor.withAlpha(20),
+        borderRadius: BorderRadius.circular(10)),
+    child: Row(children: [
+      const Icon(Icons.gavel, size: 16, color: kCheatColor),
+      const SizedBox(width: 8),
+      Expanded(
+          child: Text(t,
+              style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: kCheatColor))),
+    ]),
+  );
+
+  Widget _resultsTab() => FutureBuilder<Map<String, ResultMarks>>(
+    future: _resFuture,
+    builder: (context, snap) {
+      if (snap.hasError) {
+        return _msg('Could not load results: ${snap.error}', Icons.error_outline);
+      }
+      if (!snap.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      return ValueListenableBuilder<Map<String, Map<String, CheatEntry>>>(
+        valueListenable: CheatService.byExam,
+        builder: (context, _, __) {
+          final views = _views(snap.data!);
+          if (views.isEmpty) {
+            return _msg('No results yet for this student.',
+                Icons.emoji_events_outlined);
+          }
+          return RefreshIndicator(
+            onRefresh: () async {
+              setState(() => _resFuture = _loadResults());
+              await _resFuture;
+            },
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+              children: [
+                _overallCard(views),
+                for (var i = 0; i < views.length; i++)
+                  _examCard(views[i], i == 0),
+              ],
+            ),
+          );
+        },
+      );
+    },
+  );
+
+// ---------------- attendance tab ----------------
+  Widget _attendanceTab() => FutureBuilder<List<_AttEntry>>(
+    future: _attFuture,
+    builder: (context, snap) {
+      if (snap.hasError) {
+        return _msg('Could not load attendance: ${snap.error}', Icons.error_outline);
+      }
+      if (!snap.hasData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+        children: [_summary(snap.data!), _history(snap.data!)],
+      );
+    },
+  );
 
   Widget _summary(List<_AttEntry> all) {
     final t = _Tally();
@@ -14600,6 +15411,10 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     }
     final color = _rateColor(t.rate);
     return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -14705,51 +15520,50 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       ));
     }
     return Card(
-        child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start, children: children));
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        color: Colors.white,
+        shape: _kSettingsCardShape,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start, children: children),
+        ));
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Student details'), actions: [
-        IconButton(
-          tooltip: 'Refresh attendance',
-          icon: const Icon(Icons.refresh),
-          onPressed: () => setState(() => _attFuture = _loadAttendance()),
-        ),
-      ]),
-      body: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-            children: [
-              _profile(cs),
-              FutureBuilder<List<_AttEntry>>(
-                future: _attFuture,
-                builder: (context, snap) {
-                  if (snap.hasError) {
-                    return Card(
-                        child: Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Text(
-                                'Could not load attendance: ${snap.error}')));
-                  }
-                  if (!snap.hasData) {
-                    return const Padding(
-                        padding: EdgeInsets.all(32),
-                        child: Center(child: CircularProgressIndicator()));
-                  }
-                  return Column(children: [
-                    _summary(snap.data!),
-                    _history(snap.data!),
-                  ]);
-                },
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Student details'), actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh),
+            onPressed: () => setState(() {
+              _attFuture = _loadAttendance();
+              _resFuture = _loadResults();
+              _secFuture = _loadRealSection();
+            }),
+          ),
+        ]),
+        body: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 820),
+            child: Column(children: [
+              _header(cs),
+              _tabBar(cs),
+              const SizedBox(height: 4),
+              Expanded(
+                child: TabBarView(children: [
+                  _overview(),
+                  _resultsTab(),
+                  _attendanceTab(),
+                ]),
               ),
-            ],
+            ]),
           ),
         ),
       ),
