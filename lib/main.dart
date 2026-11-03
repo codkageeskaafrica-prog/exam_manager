@@ -6733,6 +6733,7 @@ class AppPages {
   static const result = 'result';
   static const schedule = 'schedule';
   static const teachers = 'teachers';
+  static const finance = 'finance';
   static const settings = 'settings';
 
   static const all = [
@@ -6744,6 +6745,7 @@ class AppPages {
     result,
     schedule,
     teachers,
+    finance,
     settings,
   ];
   static const labels = {
@@ -6755,6 +6757,7 @@ class AppPages {
     result: 'Result',
     schedule: 'Schedule',
     teachers: 'Teachers',
+    finance: 'Finance',
     settings: 'Settings',
   };
 }
@@ -6762,7 +6765,9 @@ class AppPages {
 /// Who the signed-in person is and which pages they may open
 /// (Firestore: users/{uid}).
 ///  - role 'admin'   : sees every page and manages the permissions.
-///  - role 'teacher' / 'affairs' (student affairs) / 'student': sees the
+///  - role 'affairs' (student affairs): full access, every page and every
+///    admin-level view (only managing users / roles stays with the admin).
+///  - role 'teacher' / 'student': sees the
 ///    pages in `access`; when `access`
 ///    is not set, the default of that role (Settings > Users & permissions).
 ///  - no profile document: an account made before permissions existed. It
@@ -6804,8 +6809,11 @@ class UserProfile {
 
   bool get isAdmin => role == 'admin';
 
+  /// Administrators and Student affairs can open everything.
+  bool get fullAccess => role == 'admin' || role == 'affairs';
+
   List<String> effectiveAccess(AppSettings st) {
-    if (isAdmin) return AppPages.all;
+    if (fullAccess) return AppPages.all;
     final a = access;
     if (a != null) return a;
     if (role == 'student') return st.studentAccess;
@@ -7555,6 +7563,14 @@ class HomeScreen extends StatelessWidget {
       builder: (_) => const TeachersScreen(),
     ),
     _HomeItem(
+      page: AppPages.finance,
+      title: 'Finance',
+      subtitle: 'Monthly school fees: record payments and see who still owes',
+      icon: Icons.account_balance_wallet,
+      color: const Color(0xFFB7950B),
+      builder: (_) => const FinanceScreen(),
+    ),
+    _HomeItem(
       page: AppPages.settings,
       title: 'Settings',
       subtitle: 'Letterhead, grades, attendance and other general settings',
@@ -8163,6 +8179,15 @@ class AppSettings {
   /// Days allowed to return the results of an exam, counted from its date.
   final int resultDays;
 
+  /// Finance: the text written before every amount (e.g. "USD").
+  final String currency;
+
+  /// Finance: the fee every student of a form pays each month ("Form1" -> 20).
+  final Map<String, double> monthlyFees;
+
+  /// Finance: the ways a payment can be received.
+  final List<String> paymentMethods;
+
   const AppSettings({
     this.weekStart = DateTime.monday,
     this.maxMark = 100.0,
@@ -8185,6 +8210,9 @@ class AppSettings {
     this.uploadNumber = true,
     this.subjectDates = const {},
     this.resultDays = 7,
+    this.currency = 'USD',
+    this.monthlyFees = const {},
+    this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
   });
 
   /// Used until the first exam is added in Settings.
@@ -8346,6 +8374,22 @@ class AppSettings {
       resultDays: m['resultDays'] is num
           ? (m['resultDays'] as num).toInt().clamp(0, 365)
           : d.resultDays,
+      currency: m['currency'] is String &&
+          (m['currency'] as String).trim().isNotEmpty
+          ? (m['currency'] as String).trim()
+          : d.currency,
+      monthlyFees: m['monthlyFees'] is Map
+          ? {
+        for (final e in (m['monthlyFees'] as Map).entries)
+          if (e.value is num) '${e.key}': (e.value as num).toDouble(),
+      }
+          : d.monthlyFees,
+      paymentMethods: m['paymentMethods'] is List
+          ? [
+        for (final e in (m['paymentMethods'] as List))
+          if (e is String && e.trim().isNotEmpty) e.trim(),
+      ]
+          : d.paymentMethods,
     );
   }
 }
@@ -8411,6 +8455,8 @@ const _kSetCats = <_SetCat>[
       Icons.emoji_events),
   _SetCat(2, 'Attendance', 'Week start and attendance colours',
       Icons.fact_check),
+  _SetCat(5, 'Finance', 'Currency, monthly fees and payment methods',
+      Icons.account_balance_wallet),
   _SetCat(3, 'Users', 'Accounts, approval and page access',
       Icons.manage_accounts),
   _SetCat(4, 'Account', 'Your password and sign out', Icons.person),
@@ -8436,6 +8482,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: _fmtMark(g)),
   ];
   final _newExam = TextEditingController();
+  late final _cur = TextEditingController(text: appSettings.value.currency);
+  late final _methods =
+  TextEditingController(text: appSettings.value.paymentMethods.join(', '));
+  late final Map<String, TextEditingController> _fee = {
+    for (final f in ExamService.forms)
+      f: TextEditingController(
+          text: (appSettings.value.monthlyFees[f] ?? 0) == 0
+              ? ''
+              : _commaNum(appSettings.value.monthlyFees[f]!)),
+  };
   bool _busy = false;
 
   // menu: selected category, selected tab inside it, and (narrow screens)
@@ -8452,7 +8508,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    for (final c in [_good, _warn, _newExam, ..._grade]) {
+    for (final c in [
+      _good, _warn, _newExam, ..._grade, _cur, _methods, ..._fee.values
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -8831,6 +8889,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ),
   );
 
+  /// An amount field that shows thousands commas as you type (150,000).
+  Widget _moneyField(TextEditingController c, String label) => TextField(
+    controller: c,
+    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+    inputFormatters: const [_MoneyFormatter()],
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+  );
+
   Widget _saveButton(String label, VoidCallback onTap) => Align(
     alignment: Alignment.centerRight,
     child: FilledButton.tonal(
@@ -8876,6 +8946,79 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ),
   ]);
+
+  Future<void> _saveFinance() async {
+    final fees = <String, double>{};
+    for (final e in _fee.entries) {
+      if (e.value.text.trim().isEmpty) {
+        fees[e.key] = 0;
+        continue;
+      }
+      final v = _parseMoney(e.value.text);
+      if (v == null || v < 0) {
+        _toast('Enter a valid monthly fee for ${e.key}.');
+        return;
+      }
+      fees[e.key] = v;
+    }
+    final methods = [
+      for (final m in _methods.text.split(','))
+        if (m.trim().isNotEmpty) m.trim(),
+    ];
+    final cur = _cur.text.trim();
+    await _save({
+      'currency': cur.isEmpty ? 'USD' : cur,
+      'monthlyFees': fees,
+      'paymentMethods': methods.isEmpty ? ['Cash'] : methods,
+    }, 'Finance settings saved');
+  }
+
+  Widget _financeCard(AppSettings s) =>
+      _card('Finance', Icons.account_balance_wallet, [
+        const Text('Currency', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text('Written before every amount, e.g. USD or SLSH.',
+            style: _hint),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _cur,
+          decoration: const InputDecoration(
+            labelText: 'Currency',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        const Divider(height: 28),
+        const Text('Monthly fee per form',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text(
+            'Every student of the form pays this each month. Leave it empty '
+                'for no fee.',
+            style: _hint),
+        const SizedBox(height: 12),
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          for (final f in ExamService.forms)
+            SizedBox(width: 150, child: _moneyField(_fee[f]!, '$f fee')),
+        ]),
+        const Divider(height: 28),
+        const Text('Payment methods',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text('Separate them with commas, e.g. Cash, Zaad, eDahab.',
+            style: _hint),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _methods,
+          decoration: const InputDecoration(
+            labelText: 'Payment methods',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 8),
+        _saveButton('Save finance settings', _saveFinance),
+      ]);
 
   Widget _attendanceCard(AppSettings s) =>
       _card('Attendance', Icons.fact_check, [
@@ -9117,6 +9260,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (id == 2) {
       return <(String, List<Widget>)>[
         ('Attendance', <Widget>[_attendanceCard(s)]),
+      ];
+    }
+    if (id == 5) {
+      return <(String, List<Widget>)>[
+        ('Finance', <Widget>[_financeCard(s)]),
       ];
     }
     if (id == 3) {
@@ -14518,8 +14666,9 @@ class StudentDetailScreen extends StatefulWidget {
 }
 
 class _AttEntry {
-  final String dateKey, subject, mark, note;
-  const _AttEntry(this.dateKey, this.subject, this.mark, [this.note = '']);
+  final String dateKey, subject, mark, note, docId, sid;
+  const _AttEntry(this.dateKey, this.subject, this.mark,
+      [this.note = '', this.docId = '', this.sid = '']);
   bool get present => mark == 'present' || mark == 'late';
 }
 
@@ -14548,6 +14697,8 @@ Future<List<_AttEntry>> _loadAttendanceOf(String id) async {
           '${d.data()['subject'] ?? ''}'.trim(),
           '${(d.data()['records'] as Map?)?[sid] ?? ''}',
           '${(d.data()['notes'] as Map?)?[sid] ?? ''}'.trim(),
+          d.id,
+          sid,
         ),
     ];
   }
@@ -15420,10 +15571,120 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       }
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
-        children: [_summary(snap.data!), _history(snap.data!)],
+        children: [_summary(snap.data!), _generalNote(), _history(snap.data!)],
       );
     },
   );
+
+  /// The same student can exist twice (whole class + divided section, the
+  /// "twin"). The general note is kept on BOTH records, so it shows (and stays)
+  /// whichever copy is opened.
+  late final Future<String?> _twinId = ResultService()
+      .twinMap()
+      .then<String?>((m) => m[widget.student.id])
+      .catchError((_) => null);
+
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _twinDocs() async* {
+    final t = await _twinId;
+    if (t == null) return;
+    yield* FirebaseFirestore.instance.collection('students').doc(t).snapshots();
+  }
+
+  late final Stream<DocumentSnapshot<Map<String, dynamic>>> _twinDocStream =
+  _twinDocs().asBroadcastStream();
+
+  String _noteOf(DocumentSnapshot<Map<String, dynamic>>? d) =>
+      '${d?.data()?['attendanceNote'] ?? ''}'.trim();
+
+  /// One general note about the student (not tied to a day). Stored
+  /// permanently on the student record as `attendanceNote`.
+  Widget _generalNote() =>
+      StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: _docStream,
+        builder: (context, own) =>
+            StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+              stream: _twinDocStream,
+              builder: (context, twin) {
+                final mine = _noteOf(own.data);
+                final note = mine.isNotEmpty ? mine : _noteOf(twin.data);
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  elevation: 0,
+                  color: Colors.white,
+                  shape: _kSettingsCardShape,
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => _editGeneralNote(note),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Icon(Icons.sticky_note_2_outlined, size: 22),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text('General note',
+                                      style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600)),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                      note.isEmpty
+                                          ? "Tap to add a general note about this student"
+                                          : note,
+                                      style: TextStyle(
+                                          fontSize: 13,
+                                          fontStyle: note.isEmpty
+                                              ? FontStyle.normal
+                                              : FontStyle.italic,
+                                          color: note.isEmpty
+                                              ? Colors.grey.shade600
+                                              : Colors.grey.shade800)),
+                                ],
+                              ),
+                            ),
+                            Icon(note.isEmpty ? Icons.add : Icons.edit,
+                                size: 18, color: Colors.grey.shade600),
+                          ]),
+                    ),
+                  ),
+                );
+              },
+            ),
+      );
+
+  Future<void> _editGeneralNote(String current) async {
+    final r = await showDialog<String>(
+      context: context,
+      builder: (_) => _NoteDialog(
+        name: widget.student.name,
+        initial: current,
+        title: 'General note',
+        hint: 'e.g. Chronic illness, lives far away, parent contacted...',
+        maxLength: 500,
+      ),
+    );
+    if (r == null || !mounted) return;
+    final text = r.trim();
+    final messenger = ScaffoldMessenger.of(context);
+    final value = text.isEmpty ? FieldValue.delete() : text;
+    try {
+      final col = FirebaseFirestore.instance.collection('students');
+      await col.doc(widget.student.id).update({'attendanceNote': value});
+      final t = await _twinId;
+      if (t != null) {
+        try {
+          await col.doc(t).update({'attendanceNote': value});
+        } catch (_) {} // the twin copy is optional
+      }
+      messenger.showSnackBar(const SnackBar(content: Text('Note saved')));
+    } catch (err) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not save note: $err')));
+    }
+  }
 
   Widget _summary(List<_AttEntry> all) {
     final t = _Tally();
@@ -15472,6 +15733,37 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     label: Text('$label: $n',
         style: TextStyle(fontWeight: FontWeight.w600, color: c)),
   );
+
+  /// Add / edit / remove the note of one day (all subjects of that day).
+  Future<void> _editDayNote(List<_AttEntry> list) async {
+    final current = {
+      for (final e in list)
+        if (e.note.isNotEmpty) e.note
+    }.join(' · ');
+    final r = await showDialog<String>(
+      context: context,
+      builder: (_) => _NoteDialog(name: widget.student.name, initial: current),
+    );
+    if (r == null || !mounted) return;
+    final text = r.trim();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final col = FirebaseFirestore.instance.collection('attendance');
+      for (final e in list) {
+        if (e.docId.isEmpty) continue;
+        await col.doc(e.docId).update({
+          FieldPath(['notes', e.sid]): text.isEmpty ? FieldValue.delete() : text,
+        });
+      }
+      if (!mounted) return;
+      setState(() {
+        _attFuture = _loadAttendance();
+      });
+      messenger.showSnackBar(const SnackBar(content: Text('Note saved')));
+    } catch (err) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not save note: $err')));
+    }
+  }
 
   Widget _history(List<_AttEntry> all) {
     final shown = [
@@ -15549,23 +15841,45 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         ].join(' · ');
         trailing = nAbsent > 0 ? '$nAbsent absent' : '$nLate late';
       }
+      final dayNote = {
+        for (final e in list)
+          if (e.note.isNotEmpty) e.note
+      }.join(' · ');
       children.add(ListTile(
         dense: true,
+        onTap: () => _editDayNote(list),
         leading: Icon(nAbsent > 0 ? Icons.cancel : Icons.check_circle, color: c),
         title: Text(d == null
             ? day.key
             : DateFormat('EEE, MMM d, yyyy').format(d)),
-        subtitle: Text(
-            [
-              subtitle,
-              for (final n in {
-                for (final e in list)
-                  if (e.mark == 'absent' && e.note.isNotEmpty) e.note
-              })
-                'Note: $n',
-            ].join('\n'),
-            maxLines: 6,
-            overflow: TextOverflow.ellipsis),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(
+                    dayNote.isEmpty ? Icons.note_add_outlined : Icons.edit_note,
+                    size: 14,
+                    color: dayNote.isEmpty ? Colors.grey.shade600 : c),
+                const SizedBox(width: 4),
+                Flexible(
+                    child: Text(dayNote.isEmpty ? 'Add note' : dayNote,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontStyle: dayNote.isEmpty
+                                ? FontStyle.normal
+                                : FontStyle.italic,
+                            color: dayNote.isEmpty
+                                ? Colors.grey.shade600
+                                : Colors.grey.shade800))),
+              ]),
+            ),
+          ],
+        ),
         trailing: Text(trailing,
             style: TextStyle(color: c, fontWeight: FontWeight.w700)),
       ));
@@ -15697,10 +16011,17 @@ class _StackBar extends StatelessWidget {
   }
 }
 
-/// Small dialog to write the reason / note for an absent student.
+/// Small dialog to write a note for a student (any mark).
 class _NoteDialog extends StatefulWidget {
-  final String name, initial;
-  const _NoteDialog({required this.name, required this.initial});
+  final String name, initial, title, hint;
+  final int maxLength;
+  const _NoteDialog({
+    required this.name,
+    required this.initial,
+    this.title = 'Attendance note',
+    this.hint = 'e.g. Sick, came late, left early...',
+    this.maxLength = 200,
+  });
   @override
   State<_NoteDialog> createState() => _NoteDialogState();
 }
@@ -15716,7 +16037,7 @@ class _NoteDialogState extends State<_NoteDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Absence note'),
+    title: Text(widget.title),
     content: Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -15728,11 +16049,11 @@ class _NoteDialogState extends State<_NoteDialog> {
           controller: _c,
           autofocus: true,
           maxLines: 3,
-          maxLength: 200,
+          maxLength: widget.maxLength,
           textCapitalization: TextCapitalization.sentences,
-          decoration: const InputDecoration(
-            hintText: 'e.g. Sick, family emergency, late...',
-            border: OutlineInputBorder(),
+          decoration: InputDecoration(
+            hintText: widget.hint,
+            border: const OutlineInputBorder(),
           ),
         ),
       ],
@@ -15870,7 +16191,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (d != null) _setDate(d);
   }
 
-  /// Add / edit / remove the note of an absent student.
+  /// Add / edit / remove the note of a student.
   Future<void> _editNote(StudentInfo s) async {
     final r = await showDialog<String>(
       context: context,
@@ -15897,10 +16218,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         for (final s in students)
           if (_marks[s.id] != null) s.id: _marks[s.id]!,
       };
-// a note is kept only for students who are marked absent
+// a note can be written for any student (present, absent or not marked)
       final notes = {
         for (final s in students)
-          if (_marks[s.id] == 'absent' && (_notes[s.id] ?? '').trim().isNotEmpty)
+          if ((_notes[s.id] ?? '').trim().isNotEmpty)
             s.id: _notes[s.id]!.trim(),
       };
       final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
@@ -16251,37 +16572,36 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 fontSize: 14.5, fontWeight: FontWeight.w600)),
-                        if (mark == 'absent')
-                          InkWell(
-                            onTap: _saving ? null : () => _editNote(s),
-                            child: Padding(
-                              padding: const EdgeInsets.only(top: 3, bottom: 1),
-                              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                Icon(
-                                    (_notes[s.id] ?? '').trim().isEmpty
-                                        ? Icons.note_add_outlined
-                                        : Icons.edit_note,
-                                    size: 15,
-                                    color: kRed),
-                                const SizedBox(width: 4),
-                                Flexible(
-                                    child: Text(
-                                        (_notes[s.id] ?? '').trim().isEmpty
-                                            ? 'Add note'
-                                            : _notes[s.id]!.trim(),
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                            fontSize: 12,
-                                            color: (_notes[s.id] ?? '').trim().isEmpty
-                                                ? kRed
-                                                : Colors.grey.shade700,
-                                            fontStyle: (_notes[s.id] ?? '').trim().isEmpty
-                                                ? FontStyle.normal
-                                                : FontStyle.italic))),
-                              ]),
-                            ),
+                        InkWell(
+                          onTap: _saving ? null : () => _editNote(s),
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 3, bottom: 1),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(
+                                  (_notes[s.id] ?? '').trim().isEmpty
+                                      ? Icons.note_add_outlined
+                                      : Icons.edit_note,
+                                  size: 15,
+                                  color: mark == 'absent' ? kRed : Colors.grey.shade600),
+                              const SizedBox(width: 4),
+                              Flexible(
+                                  child: Text(
+                                      (_notes[s.id] ?? '').trim().isEmpty
+                                          ? 'Add note'
+                                          : _notes[s.id]!.trim(),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          color: (_notes[s.id] ?? '').trim().isEmpty
+                                              ? (mark == 'absent' ? kRed : Colors.grey.shade600)
+                                              : Colors.grey.shade800,
+                                          fontStyle: (_notes[s.id] ?? '').trim().isEmpty
+                                              ? FontStyle.normal
+                                              : FontStyle.italic))),
+                            ]),
                           ),
+                        ),
                       ],
                     ),
                   ),
@@ -16365,6 +16685,1924 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       ),
     );
   }
+}
+
+// ======================= FINANCE =======================
+
+String _plainNum(double v) =>
+    v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+/// 150000 -> "150,000" (for filling an amount field).
+String _commaNum(double v) => NumberFormat('#,##0.##').format(v);
+
+/// Reads an amount typed with thousands commas: "150,000" -> 150000.
+double? _parseMoney(String s) => double.tryParse(s.trim().replaceAll(',', ''));
+
+/// Puts thousands commas in an amount field while the person types.
+class _MoneyFormatter extends TextInputFormatter {
+  const _MoneyFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue old, TextEditingValue v) {
+    final t = v.text.replaceAll(RegExp(r'[^0-9.]'), '');
+    final dot = t.indexOf('.');
+    final intPart = dot < 0 ? t : t.substring(0, dot);
+    final dec = dot < 0 ? '' : t.substring(dot + 1).replaceAll('.', '');
+    final b = StringBuffer();
+    for (var i = 0; i < intPart.length; i++) {
+      if (i > 0 && (intPart.length - i) % 3 == 0) b.write(',');
+      b.write(intPart[i]);
+    }
+    final out = dot < 0 ? b.toString() : '${b.toString()}.$dec';
+    final end = v.selection.end < 0 || v.selection.end > v.text.length
+        ? v.text.length
+        : v.selection.end;
+    final before =
+        v.text.substring(0, end).replaceAll(RegExp(r'[^0-9.]'), '').length;
+    var pos = 0, seen = 0;
+    while (pos < out.length && seen < before) {
+      if (out[pos] != ',') seen++;
+      pos++;
+    }
+    return TextEditingValue(
+        text: out, selection: TextSelection.collapsed(offset: pos));
+  }
+}
+
+/// An amount with the currency chosen in Settings > Finance.
+String _money(double v) {
+  final cur = appSettings.value.currency.trim();
+  final n = NumberFormat('#,##0.##').format(v);
+  return cur.isEmpty ? n : '$cur $n';
+}
+
+/// One payment (Firestore: payments/{id}). `month` is the fee month it pays
+/// for ("2026-11"); `date` is the day the money was received.
+class _Pay {
+  final String id, studentId, month, method, note, date;
+  final double amount; // money received
+  final double discount; // amount forgiven for this month
+  const _Pay(this.id, this.studentId, this.month, this.method, this.note,
+      this.date, this.amount, {this.discount = 0.0});
+
+  factory _Pay.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data() ?? {};
+    final a = m['amount'];
+    return _Pay(
+      d.id,
+      '${m['studentId'] ?? ''}',
+      '${m['month'] ?? ''}',
+      '${m['method'] ?? ''}',
+      '${m['note'] ?? ''}',
+      '${m['date'] ?? ''}',
+      a is num ? a.toDouble() : 0.0,
+      discount: m['discount'] is num ? (m['discount'] as num).toDouble() : 0.0,
+    );
+  }
+}
+
+class _PayInput {
+  final double amount;
+  final String method, note;
+  final DateTime date;
+  const _PayInput(this.amount, this.method, this.date, this.note);
+}
+
+class _PaymentDialog extends StatefulWidget {
+  final String name, monthLabel;
+  final double suggested;
+  final List<String> methods;
+  const _PaymentDialog({
+    required this.name,
+    required this.monthLabel,
+    required this.suggested,
+    required this.methods,
+  });
+
+  @override
+  State<_PaymentDialog> createState() => _PaymentDialogState();
+}
+
+class _PaymentDialogState extends State<_PaymentDialog> {
+  late final _amount = TextEditingController(
+      text: widget.suggested > 0 ? _plainNum(widget.suggested) : '');
+  final _note = TextEditingController();
+  late String _method = widget.methods.first;
+  DateTime _date = DateTime.now();
+  String? _error;
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDate() async {
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  void _submit() {
+    final v = double.tryParse(_amount.text.trim().replaceAll(',', '.'));
+    if (v == null || v <= 0) {
+      setState(() => _error = 'Enter the amount received.');
+      return;
+    }
+    Navigator.pop(context, _PayInput(v, _method, _date, _note.text.trim()));
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Add payment'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(widget.name,
+              style: const TextStyle(fontWeight: FontWeight.w700)),
+          Text('Fee of ${widget.monthLabel}',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _amount,
+            autofocus: true,
+            keyboardType:
+            const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))
+            ],
+            decoration: const InputDecoration(
+              labelText: 'Amount received',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            value: _method,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Method',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final m in widget.methods)
+                DropdownMenuItem(value: m, child: Text(m)),
+            ],
+            onChanged: (v) {
+              if (v != null) setState(() => _method = v);
+            },
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: _pickDate,
+            icon: const Icon(Icons.calendar_today, size: 18),
+            label: Text(DateFormat('EEE, MMM d, yyyy').format(_date)),
+            style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44)),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _note,
+            maxLength: 120,
+            decoration: const InputDecoration(
+              labelText: 'Note (optional)',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          if (_error != null)
+            Text(_error!, style: const TextStyle(color: kRed)),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(onPressed: _submit, child: const Text('Save')),
+    ],
+  );
+}
+
+class _SettleInput {
+  final double discount, amount;
+  final String method, note;
+  final DateTime date;
+  const _SettleInput(
+      this.discount, this.amount, this.method, this.date, this.note);
+}
+
+/// "Modify" screen of a payment: shows the previous due and current due and
+/// lets the cashier give a discount and choose the amount actually received.
+class _SettleDialog extends StatefulWidget {
+  final String name, monthLabel;
+  final double prevDue, currDue;
+  final List<String> methods;
+  const _SettleDialog({
+    required this.name,
+    required this.monthLabel,
+    required this.prevDue,
+    required this.currDue,
+    required this.methods,
+  });
+
+  @override
+  State<_SettleDialog> createState() => _SettleDialogState();
+}
+
+class _SettleDialogState extends State<_SettleDialog> {
+  final _discount = TextEditingController();
+  late final _amount =
+  TextEditingController(text: _commaNum(widget.prevDue + widget.currDue));
+  final _note = TextEditingController();
+  late String _method = widget.methods.first;
+  DateTime _date = DateTime.now();
+  bool _amountEdited = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _discount.dispose();
+    _amount.dispose();
+    _note.dispose();
+    super.dispose();
+  }
+
+  double _num(TextEditingController c) =>
+      _parseMoney(c.text) ?? 0.0;
+
+  double get _disc => _num(_discount);
+
+  double get _total {
+    final c = widget.currDue - _disc;
+    return widget.prevDue + (c > 0 ? c : 0.0);
+  }
+
+  Future<void> _pickDate() async {
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  void _submit() {
+    final dsc = _disc, amt = _num(_amount);
+    if (dsc > widget.currDue) {
+      setState(() => _error = 'The discount cannot be more than the current due.');
+      return;
+    }
+    if (amt <= 0 && dsc <= 0) {
+      setState(() => _error = 'Enter a discount or the amount received.');
+      return;
+    }
+    Navigator.pop(
+        context, _SettleInput(dsc, amt, _method, _date, _note.text.trim()));
+  }
+
+  Widget _kv(String k, String v, {Color? color, bool bold = false}) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text(k, style: const TextStyle(color: Colors.black54)),
+      Text(v,
+          style: TextStyle(
+              color: color,
+              fontWeight: bold ? FontWeight.w800 : FontWeight.w600)),
+    ]),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final remaining = _total - _num(_amount);
+    return AlertDialog(
+      title: const Text('Modify payment'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.name,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            Text('Fee of ${widget.monthLabel}',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 10),
+            _kv('Previous due', _money(widget.prevDue),
+                color: widget.prevDue > 0 ? kRed : kGreen),
+            _kv('Current due', _money(widget.currDue),
+                color: widget.currDue > 0 ? kRed : kGreen),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _discount,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: const [_MoneyFormatter()],
+              decoration: const InputDecoration(
+                labelText: 'Discount (on current due)',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => setState(() {
+                _error = null;
+                if (!_amountEdited) _amount.text = _commaNum(_total);
+              }),
+            ),
+            const Divider(height: 22),
+            _kv('Total to pay', _money(_total), bold: true),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _amount,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              inputFormatters: const [_MoneyFormatter()],
+              decoration: const InputDecoration(
+                labelText: 'Amount received',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => setState(() {
+                _amountEdited = true;
+                _error = null;
+              }),
+            ),
+            if (remaining > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('Still due after this payment: ${_money(remaining)}',
+                    style: TextStyle(fontSize: 12, color: Colors.orange.shade800)),
+              ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: _method,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Method',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: [
+                for (final m in widget.methods)
+                  DropdownMenuItem(value: m, child: Text(m)),
+              ],
+              onChanged: (v) {
+                if (v != null) setState(() => _method = v);
+              },
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _pickDate,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(DateFormat('EEE, MMM d, yyyy').format(_date)),
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 44)),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _note,
+              maxLength: 120,
+              decoration: const InputDecoration(
+                labelText: 'Note (optional)',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            if (_error != null) Text(_error!, style: const TextStyle(color: kRed)),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+/// Monthly school fees: choose a section and a month, see who has paid, and
+/// record payments. Fees per form and the payment methods are set in
+/// Settings > Finance. Payments are saved in the `payments` collection.
+class FinanceScreen extends StatefulWidget {
+  const FinanceScreen({super.key});
+
+  @override
+  State<FinanceScreen> createState() => _FinanceScreenState();
+}
+
+class _FinanceScreenState extends State<FinanceScreen> {
+  final _service = SchoolService();
+  late final Stream<List<SectionInfo>> _secStream = _service.watchSections();
+  final _col = FirebaseFirestore.instance.collection('payments');
+  String? _sectionId;
+  DateTime _month = DateTime(DateTime.now().year, DateTime.now().month);
+  int _filter = -1; // -1 all, 0 unpaid, 1 partial, 2 paid
+  String _search = '';
+  Map<String, String> _twins = {}; // class <-> section twin records
+  late Stream<List<_Pay>> _payStream = _watchPays();
+
+  String get _monthKey => DateFormat('yyyy-MM').format(_month);
+  String get _monthLabel => DateFormat('MMMM yyyy').format(_month);
+
+  @override
+  void initState() {
+    super.initState();
+    ResultService().twinMap().then((m) {
+      if (mounted) setState(() => _twins = m);
+    }).catchError((_) {});
+  }
+
+  Stream<List<_Pay>> _watchPays() => _col
+      .where('month', isEqualTo: _monthKey)
+      .snapshots()
+      .map((q) => [for (final d in q.docs) _Pay.fromDoc(d)])
+      .asBroadcastStream();
+
+  void _setMonth(DateTime m) => setState(() {
+    _month = DateTime(m.year, m.month);
+    _payStream = _watchPays();
+  });
+
+  Future<void> _pickMonth() async {
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _month,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(DateTime.now().year + 2, 12, 31),
+    );
+    if (d != null) _setMonth(d);
+  }
+
+  /// Records a payment for a student. The money received clears the oldest
+  /// previous dues first and the rest goes to the current month; the discount is
+  /// taken off the current month. One batch = all or nothing.
+  Future<void> _settle(
+      StudentInfo s, {
+        required List<({String month, double due})> prev,
+        required double discount,
+        required double received,
+        required String method,
+        required DateTime date,
+        required String note,
+      }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final batch = FirebaseFirestore.instance.batch();
+      final dateStr = DateFormat('yyyy-MM-dd').format(date);
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      void add(String month, double amount, double disc) {
+        batch.set(_col.doc(), {
+          'studentId': s.id,
+          'sectionId': _sectionId ?? '',
+          'month': month,
+          'amount': amount,
+          'discount': disc,
+          'method': method,
+          'date': dateStr,
+          'note': note,
+          'createdBy': uid,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      var rest = received;
+      for (final p in prev) {
+        final a = rest < p.due ? rest : p.due;
+        if (a > 0) {
+          add(p.month, a, 0.0);
+          rest -= a;
+        }
+      }
+      if (rest > 0 || discount > 0) add(_monthKey, rest, discount);
+      await batch.commit().timeout(const Duration(seconds: 30), onTimeout: () {
+        throw Exception('Saving timed out. Check the internet connection.');
+      });
+      messenger.showSnackBar(const SnackBar(content: Text('Payment saved')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text(
+              'Could not save the payment: ${'$e'.replaceFirst('Exception: ', '')}')));
+    }
+  }
+
+  Future<void> _deletePay(_Pay p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete payment?'),
+        content: Text('${_money(p.amount)} received on ${p.date} will be removed.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await _col.doc(p.id).delete();
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not delete: $e')));
+    }
+  }
+
+  /// Payments of this month that belong to [s] (or to its class <-> section twin).
+  List<_Pay> _paysOf(StudentInfo s, List<_Pay> all) {
+    final t = _twins[s.id];
+    return [
+      for (final p in all)
+        if (p.studentId == s.id || (t != null && p.studentId == t)) p
+    ];
+  }
+
+  Future<void> _openStudent(StudentInfo s, double fee) {
+    final t = _twins[s.id];
+    final ids = <String>[s.id, if (t != null && t != s.id) t];
+// every payment of this student, so earlier months can be checked too
+    final stream = _col
+        .where('studentId', whereIn: ids)
+        .snapshots()
+        .map((q) => [for (final d in q.docs) _Pay.fromDoc(d)])
+        .asBroadcastStream();
+    final cur = _monthKey;
+    final curIndex = _month.year * 12 + _month.month;
+    final methods = appSettings.value.paymentMethods.isEmpty
+        ? const ['Cash']
+        : appSettings.value.paymentMethods;
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+          child: StreamBuilder<List<_Pay>>(
+            stream: stream,
+            builder: (ctx, snap) {
+              if (snap.hasError) {
+                return Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text('Could not load payments: ${snap.error}'),
+                );
+              }
+              if (!snap.hasData) {
+                return const SizedBox(
+                    height: 120, child: Center(child: CircularProgressIndicator()));
+              }
+              final all = snap.data!;
+// settled amount (money + discount) of every month
+              final settled = <String, double>{};
+              for (final p in all) {
+                settled[p.month] = (settled[p.month] ?? 0) + p.amount + p.discount;
+              }
+// previous dues: every month from the first month this student has a
+// record up to the month before the selected one
+              final prev = <({String month, double due})>[];
+              if (fee > 0) {
+                final earlier = [for (final p in all) if (p.month.compareTo(cur) < 0) p.month]
+                  ..sort();
+                if (earlier.isNotEmpty) {
+                  var y = int.tryParse(earlier.first.substring(0, 4)) ?? 0;
+                  var m = int.tryParse(earlier.first.substring(5, 7)) ?? 0;
+                  while (y > 0 && m > 0 && y * 12 + m < curIndex) {
+                    final k = '$y-${m.toString().padLeft(2, '0')}';
+                    final due = fee - (settled[k] ?? 0);
+                    if (due > 0) prev.add((month: k, due: due));
+                    m++;
+                    if (m > 12) {
+                      m = 1;
+                      y++;
+                    }
+                  }
+                }
+              }
+              final prevDue = prev.fold<double>(0, (a, p) => a + p.due);
+              final mine = [for (final p in all) if (p.month == cur) p]
+                ..sort((a, b) => b.date.compareTo(a.date));
+              final paid = mine.fold<double>(0, (a, p) => a + p.amount);
+              final disc = mine.fold<double>(0, (a, p) => a + p.discount);
+              final currDue = (fee - paid - disc) > 0 ? fee - paid - disc : 0.0;
+              final total = prevDue + currDue;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(s.name,
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w800)),
+                  Text(_monthLabel,
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.black54)),
+                  const SizedBox(height: 12),
+                  Row(children: [
+                    _stat('Fee', _money(fee), Colors.black87),
+                    _stat('Paid', _money(paid), kGreen),
+                    _stat('Current due', _money(currDue),
+                        currDue > 0 ? kRed : kGreen),
+                  ]),
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    _stat('Previous due', _money(prevDue),
+                        prevDue > 0 ? kRed : kGreen),
+                    _stat('Discount', _money(disc), Colors.black87),
+                    _stat('Total to pay', _money(total), total > 0 ? kRed : kGreen),
+                  ]),
+                  const Divider(height: 24),
+                  if (mine.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text('No payments for this month yet.'),
+                    )
+                  else
+                    Flexible(
+                      child: ListView(shrinkWrap: true, children: [
+                        for (final p in mine)
+                          ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                                p.amount > 0 || p.discount <= 0
+                                    ? _money(p.amount)
+                                    : 'Discount ${_money(p.discount)}',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w700)),
+                            subtitle: Text(
+                                '${p.date} · ${p.method}'
+                                    '${p.amount > 0 && p.discount > 0 ? ' · discount ${_money(p.discount)}' : ''}'
+                                    '${p.note.isEmpty ? '' : '\n${p.note}'}'),
+                            trailing: IconButton(
+                              tooltip: 'Delete payment',
+                              icon: const Icon(Icons.delete_outline),
+                              onPressed: () => _deletePay(p),
+                            ),
+                          ),
+                      ]),
+                    ),
+                  const SizedBox(height: 10),
+                  if (total <= 0)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 8),
+                      child: Text('Fully paid. Nothing is due.',
+                          style: TextStyle(
+                              color: kGreen, fontWeight: FontWeight.w700)),
+                    ),
+                  Row(children: [
+                    if (total > 0)
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            _settle(s,
+                                prev: prev,
+                                discount: 0.0,
+                                received: total,
+                                method: methods.first,
+                                date: DateTime.now(),
+                                note: '');
+                          },
+                          icon: const Icon(Icons.check),
+                          label: Text('Confirm · pay ${_money(total)}'),
+                        ),
+                      ),
+                    if (total > 0) const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          final r = await showDialog<_SettleInput>(
+                            context: ctx,
+                            builder: (_) => _SettleDialog(
+                              name: s.name,
+                              monthLabel: _monthLabel,
+                              prevDue: prevDue,
+                              currDue: currDue,
+                              methods: methods,
+                            ),
+                          );
+                          if (r == null) return;
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          await _settle(s,
+                              prev: prev,
+                              discount: r.discount,
+                              received: r.amount,
+                              method: r.method,
+                              date: r.date,
+                              note: r.note);
+                        },
+                        icon: const Icon(Icons.tune),
+                        label: const Text('Modify'),
+                      ),
+                    ),
+                  ]),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _stat(String label, String value, Color c) => Expanded(
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label,
+          style: const TextStyle(fontSize: 12, color: Colors.black54)),
+      const SizedBox(height: 2),
+      Text(value,
+          style: TextStyle(
+              fontSize: 15, fontWeight: FontWeight.w800, color: c)),
+    ]),
+  );
+
+  Widget _controls(List<SectionInfo> secs) {
+// only whole classes (1A, 1C ...), not divided sub-sections
+    secs = [for (final s in secs) if (!s.isSub) s];
+    final valid = secs.any((s) => s.id == _sectionId);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(children: [
+        DropdownButtonFormField<String>(
+          value: valid ? _sectionId : null,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Class',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            for (final s in secs)
+              DropdownMenuItem(value: s.id, child: Text(s.label)),
+          ],
+          onChanged: (v) => setState(() => _sectionId = v),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          decoration: const InputDecoration(
+            hintText: 'Search student',
+            prefixIcon: Icon(Icons.search),
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onChanged: (v) => setState(() => _search = v.trim().toLowerCase()),
+        ),
+        const SizedBox(height: 10),
+        Row(children: [
+          IconButton(
+            tooltip: 'Previous month',
+            visualDensity: VisualDensity.compact,
+            onPressed: () =>
+                _setMonth(DateTime(_month.year, _month.month - 1)),
+            icon: const Icon(Icons.chevron_left),
+          ),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _pickMonth,
+              icon: const Icon(Icons.calendar_month, size: 18),
+              label: Text(_monthLabel),
+              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Next month',
+            visualDensity: VisualDensity.compact,
+            onPressed: () =>
+                _setMonth(DateTime(_month.year, _month.month + 1)),
+            icon: const Icon(Icons.chevron_right),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _summaryCard(double expected, double collected, double outstanding,
+      List<int> count) {
+    final pct = expected <= 0 ? 0.0 : (collected / expected).clamp(0.0, 1.0);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 4),
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            _stat('Expected', _money(expected), Colors.black87),
+            _stat('Collected', _money(collected), kGreen),
+            _stat('Outstanding', _money(outstanding),
+                outstanding > 0 ? kRed : kGreen),
+          ]),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: pct.toDouble(),
+              minHeight: 8,
+              backgroundColor: Colors.grey.shade200,
+              color: kGreen,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+              '${(pct * 100).round()}% collected · ${count[2]} paid · '
+                  '${count[1]} partial · ${count[0]} unpaid',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _studentCard(
+      int i, StudentInfo s, double paid, double fee, int status) {
+    final c = status == 2
+        ? kGreen
+        : status == 1
+        ? Colors.orange.shade700
+        : kRed;
+    final label = status == 2
+        ? 'Paid'
+        : status == 1
+        ? 'Partial'
+        : 'Unpaid';
+    final bal = fee - paid;
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      child: ListTile(
+        onTap: () => _openStudent(s, fee),
+        leading: CircleAvatar(
+          radius: 14,
+          backgroundColor: c,
+          child: Text('${i + 1}',
+              style: const TextStyle(fontSize: 11, color: Colors.white)),
+        ),
+        title: Text(s.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style:
+            const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600)),
+        subtitle: Text('Paid ${_money(paid)} of ${_money(fee)}'),
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(label,
+                style: TextStyle(
+                    color: c, fontWeight: FontWeight.w700, fontSize: 13)),
+            if (bal > 0)
+              Text('Due ${_money(bal)}',
+                  style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _list(SectionInfo sec, List<StudentInfo> students, List<_Pay> pays) {
+    final fee = appSettings.value.monthlyFees[sec.form] ?? 0.0;
+    int statusOf(double paid) => paid <= 0 ? 0 : (paid >= fee ? 2 : 1);
+    final rows = [
+      for (var i = 0; i < students.length; i++)
+        (
+        i: i,
+        s: students[i],
+        paid: _paysOf(students[i], pays)
+            .fold<double>(0, (a, p) => a + p.amount + p.discount),
+        cash: _paysOf(students[i], pays).fold<double>(0, (a, p) => a + p.amount),
+        ),
+    ];
+    var collected = 0.0, outstanding = 0.0;
+    final count = [0, 0, 0];
+    for (final r in rows) {
+      collected += r.cash;
+      outstanding += (fee - r.paid) > 0 ? (fee - r.paid) : 0.0;
+      count[statusOf(r.paid)]++;
+    }
+    final shown = [
+      for (final r in rows)
+        if ((_filter == -1 || statusOf(r.paid) == _filter) &&
+            (_search.isEmpty || r.s.name.toLowerCase().contains(_search)))
+          r
+    ];
+    Widget chip(String label, int v, int n) => ChoiceChip(
+      label: Text('$label $n'),
+      selected: _filter == v,
+      onSelected: (_) => setState(() => _filter = v),
+    );
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+      children: [
+        if (fee <= 0)
+          Card(
+            color: Colors.orange.shade50,
+            elevation: 0,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                  'No monthly fee is set for ${sec.form}. '
+                      'Set it in Settings > Finance.',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+          ),
+        _summaryCard(fee * students.length, collected, outstanding, count),
+        const SizedBox(height: 8),
+        Wrap(spacing: 8, runSpacing: 4, children: [
+          chip('All', -1, students.length),
+          chip('Unpaid', 0, count[0]),
+          chip('Partial', 1, count[1]),
+          chip('Paid', 2, count[2]),
+        ]),
+        const SizedBox(height: 6),
+        if (shown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('No students in this filter.')),
+          )
+        else
+          for (final r in shown)
+            _studentCard(r.i, r.s, r.paid, fee, statusOf(r.paid)),
+      ],
+    );
+  }
+
+  Widget _body(List<SectionInfo> secs) {
+    SectionInfo? found;
+    for (final x in secs) {
+      if (!x.isSub && x.id == _sectionId) found = x;
+    }
+    if (found == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('Choose a section and a month to see the fees.',
+              textAlign: TextAlign.center),
+        ),
+      );
+    }
+    final SectionInfo sec = found;
+    return StreamBuilder<List<StudentInfo>>(
+      stream: _service.watchStudents(sec.id),
+      builder: (context, st) {
+        if (st.hasError) return Center(child: Text('Error: ${st.error}'));
+        if (!st.hasData) return const Center(child: CircularProgressIndicator());
+        final students = st.data!;
+        if (students.isEmpty) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('This section has no students yet.',
+                  textAlign: TextAlign.center),
+            ),
+          );
+        }
+        return StreamBuilder<List<_Pay>>(
+          stream: _payStream,
+          builder: (context, ps) {
+            if (ps.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('Could not load payments: ${ps.error}',
+                      textAlign: TextAlign.center),
+                ),
+              );
+            }
+            if (!ps.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            return _list(sec, students, ps.data!);
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Finance'),
+      actions: [
+        IconButton(
+          tooltip: 'Finance report',
+          icon: const Icon(Icons.assessment_outlined),
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) =>
+                FinanceReportScreen(month: _month, sectionId: _sectionId),
+          )),
+        ),
+        IconButton(
+          tooltip: 'Manual (printable fee sheet)',
+          icon: const Icon(Icons.edit_note),
+          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+            builder: (_) =>
+                ManualReportScreen(month: _month, sectionId: _sectionId),
+          )),
+        ),
+      ],
+    ),
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: StreamBuilder<List<SectionInfo>>(
+          stream: _secStream,
+          builder: (context, secSnap) {
+            final secs = secSnap.data ?? const <SectionInfo>[];
+// fees can change in Settings while this screen is open
+            return ValueListenableBuilder<AppSettings>(
+              valueListenable: appSettings,
+              builder: (context, _, __) => Column(children: [
+                _controls(secs),
+                Expanded(child: _body(secs)),
+              ]),
+            );
+          },
+        ),
+      ),
+    ),
+  );
+}
+
+// ======================= FINANCE REPORT =======================
+
+class _FinClassRow {
+  final String label;
+  final int students, paidN, partialN, unpaidN;
+  final double fee, expected, collected, discount, due;
+  const _FinClassRow(this.label, this.students, this.paidN, this.partialN,
+      this.unpaidN, this.fee, this.expected, this.collected, this.discount,
+      this.due);
+}
+
+class _FinOwe {
+  final String name, cls, phone;
+  final double paid, due;
+  const _FinOwe(this.name, this.cls, this.phone, this.paid, this.due);
+}
+
+class _FinData {
+  final List<SectionInfo> classes;
+  final List<_FinClassRow> rows;
+  final List<_FinOwe> owe;
+  const _FinData(this.classes, this.rows, this.owe);
+
+  double _sum(double Function(_FinClassRow r) f) =>
+      rows.fold<double>(0, (a, r) => a + f(r));
+  double get expected => _sum((r) => r.expected);
+  double get collected => _sum((r) => r.collected);
+  double get discount => _sum((r) => r.discount);
+  double get due => _sum((r) => r.due);
+  int get students => rows.fold<int>(0, (a, r) => a + r.students);
+  int get paidN => rows.fold<int>(0, (a, r) => a + r.paidN);
+  int get partialN => rows.fold<int>(0, (a, r) => a + r.partialN);
+  int get unpaidN => rows.fold<int>(0, (a, r) => a + r.unpaidN);
+}
+
+String _finPct(double expected, double collected) =>
+    expected <= 0 ? '-' : '${(collected / expected * 100).round()}%';
+
+/// Monthly fee report: totals, a line per class and the students who still
+/// owe. Can be printed or saved as a PDF.
+class FinanceReportScreen extends StatefulWidget {
+  final DateTime month;
+  final String? sectionId;
+  const FinanceReportScreen({super.key, required this.month, this.sectionId});
+
+  @override
+  State<FinanceReportScreen> createState() => _FinanceReportScreenState();
+}
+
+class _FinanceReportScreenState extends State<FinanceReportScreen> {
+  static const _allClasses = '__all__';
+  late DateTime _month = DateTime(widget.month.year, widget.month.month);
+  String _classId = _allClasses;
+  late Future<_FinData> _future = _load();
+  bool _busy = false;
+
+  String get _key => DateFormat('yyyy-MM').format(_month);
+  String get _label => DateFormat('MMMM yyyy').format(_month);
+
+  @override
+  void initState() {
+    super.initState();
+    _classId = widget.sectionId ?? _allClasses;
+  }
+
+  Future<_FinData> _load() async {
+    final svc = SchoolService();
+    final secs = [
+      for (final s in await svc.watchSections().first)
+        if (!s.isSub) s
+    ];
+    final students = await svc.watchAllStudents().first;
+    final snap = await FirebaseFirestore.instance
+        .collection('payments')
+        .where('month', isEqualTo: _key)
+        .get();
+    var twins = <String, String>{};
+    try {
+      twins = await ResultService().twinMap();
+    } catch (_) {}
+    final cash = <String, double>{}, disc = <String, double>{};
+    for (final doc in snap.docs) {
+      final p = _Pay.fromDoc(doc);
+      cash[p.studentId] = (cash[p.studentId] ?? 0) + p.amount;
+      disc[p.studentId] = (disc[p.studentId] ?? 0) + p.discount;
+    }
+    final rows = <_FinClassRow>[];
+    final owe = <_FinOwe>[];
+    for (final sec in secs) {
+      if (_classId != _allClasses && sec.id != _classId) continue;
+      final fee = appSettings.value.monthlyFees[sec.form] ?? 0.0;
+      final mine = [for (final s in students) if (s.sectionId == sec.id) s]
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      var paidN = 0, partialN = 0, unpaidN = 0;
+      var coll = 0.0, dsc = 0.0, due = 0.0;
+      for (final s in mine) {
+        final t = twins[s.id];
+        final other = t != null && t != s.id ? t : null;
+        final c = (cash[s.id] ?? 0) + (other == null ? 0 : (cash[other] ?? 0));
+        final dd = (disc[s.id] ?? 0) + (other == null ? 0 : (disc[other] ?? 0));
+        final settled = c + dd;
+        final owed = fee - settled > 0 ? fee - settled : 0.0;
+        coll += c;
+        dsc += dd;
+        due += owed;
+        if (settled <= 0) {
+          unpaidN++;
+        } else if (settled >= fee) {
+          paidN++;
+        } else {
+          partialN++;
+        }
+        if (owed > 0) owe.add(_FinOwe(s.name, sec.label, s.phoneText, settled, owed));
+      }
+      rows.add(_FinClassRow(sec.label, mine.length, paidN, partialN, unpaidN, fee,
+          fee * mine.length, coll, dsc, due));
+    }
+    return _FinData(secs, rows, owe);
+  }
+
+  void _setMonth(DateTime m) => setState(() {
+    _month = DateTime(m.year, m.month);
+    _future = _load();
+  });
+
+  Future<void> _pickMonth() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _month,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(DateTime.now().year + 2, 12, 31),
+    );
+    if (picked != null) _setMonth(picked);
+  }
+
+  String _className(_FinData data) {
+    if (_classId == _allClasses) return 'All classes';
+    for (final s in data.classes) {
+      if (s.id == _classId) return 'Class ${s.label}';
+    }
+    return 'All classes';
+  }
+
+  Future<Uint8List> _buildPdf(_FinData data) async {
+    String c(String t) => t.replaceAll('–', '-').replaceAll('·', '-');
+    bool left(List<String> head, int j) =>
+        head[j] == 'Student' || head[j] == 'Class' || head[j] == 'Phone';
+
+    pw.Widget cell(String t, {bool head = false, bool isLeft = false}) =>
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 4),
+          child: pw.Text(c(t),
+              textAlign: isLeft ? pw.TextAlign.left : pw.TextAlign.center,
+              style: pw.TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: head ? pw.FontWeight.bold : pw.FontWeight.normal)),
+        );
+
+    List<pw.Widget> table(String title, List<String> head,
+        List<List<String>> rows, List<int> weights, String empty) =>
+        [
+          pw.SizedBox(height: 14),
+          pw.Text(c(title),
+              style: pw.TextStyle(fontSize: 12.5, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 4),
+          if (rows.isEmpty)
+            pw.Text(empty, style: const pw.TextStyle(fontSize: 10))
+          else
+            pw.Table(
+              border: pw.TableBorder.all(width: 0.5),
+              columnWidths: {
+                for (var i = 0; i < weights.length; i++)
+                  i: pw.FlexColumnWidth(weights[i].toDouble()),
+              },
+              children: [
+                pw.TableRow(
+                  decoration: pw.BoxDecoration(color: PdfColors.grey300),
+                  children: [
+                    for (var j = 0; j < head.length; j++)
+                      cell(head[j], head: true, isLeft: left(head, j)),
+                  ],
+                ),
+                for (final r in rows)
+                  pw.TableRow(children: [
+                    for (var j = 0; j < r.length; j++)
+                      cell(r[j], isLeft: left(head, j)),
+                  ]),
+              ],
+            ),
+        ];
+
+    final doc = pw.Document();
+    final logoImg = pdfLogoImage(LogoPlace.sections);
+    doc.addPage(pw.MultiPage(
+      maxPages: 100000,
+      pageTheme: pdfPageTheme(const pw.EdgeInsets.all(36),
+          background: pdfWatermark(LogoPlace.sections)),
+      footer: (ctx) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${ctx.pageNumber} of ${ctx.pagesCount}',
+            style: const pw.TextStyle(fontSize: 8)),
+      ),
+      build: (ctx) => [
+        if (logoImg != null) pdfLogoBlock(logoImg),
+        pw.Text('FINANCE REPORT',
+            style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 4),
+        pw.Text(c(_label),
+            style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 2),
+        pw.Text(c(_className(data)), style: const pw.TextStyle(fontSize: 10)),
+        pw.Text(
+            'Generated ${DateFormat('MMM d, yyyy HH:mm').format(DateTime.now())}',
+            style: const pw.TextStyle(fontSize: 9)),
+        ...table(
+          'Summary',
+          ['Students', 'Expected', 'Collected', 'Discount', 'Outstanding', 'Collected %'],
+          [
+            [
+              '${data.students}',
+              _money(data.expected),
+              _money(data.collected),
+              _money(data.discount),
+              _money(data.due),
+              _finPct(data.expected, data.collected),
+            ]
+          ],
+          const [2, 3, 3, 3, 3, 2],
+          '',
+        ),
+        ...table(
+          'By class',
+          ['Class', 'Students', 'Paid', 'Partial', 'Unpaid', 'Expected', 'Collected', 'Outstanding'],
+          [
+            for (final r in data.rows)
+              [
+                r.label,
+                '${r.students}',
+                '${r.paidN}',
+                '${r.partialN}',
+                '${r.unpaidN}',
+                _money(r.expected),
+                _money(r.collected),
+                _money(r.due),
+              ]
+          ],
+          const [2, 2, 2, 2, 2, 3, 3, 3],
+          'No classes.',
+        ),
+        ...table(
+          'Students who owe (${data.owe.length})',
+          ['#', 'Student', 'Class', 'Phone', 'Paid', 'Due'],
+          [
+            for (var i = 0; i < data.owe.length; i++)
+              [
+                '${i + 1}',
+                data.owe[i].name,
+                data.owe[i].cls,
+                data.owe[i].phone,
+                _money(data.owe[i].paid),
+                _money(data.owe[i].due),
+              ]
+          ],
+          const [1, 6, 2, 4, 3, 3],
+          'Nobody owes for this month.',
+        ),
+      ],
+    ));
+    return doc.save();
+  }
+
+  Future<void> _export(bool print) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      final data = await _future;
+      final name = 'Finance-report-$_key';
+      final bytes = await _buildPdf(data);
+      if (print) {
+        if (mounted) setState(() => _busy = false);
+        await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+      } else {
+        final path = await _downloadInBrowser(bytes, '$name.pdf', 'application/pdf');
+        messenger.showSnackBar(SnackBar(
+            duration: const Duration(seconds: 6),
+            content: Text(path == null && !kIsWeb
+                ? 'Download cancelled (nothing was saved).'
+                : 'PDF saved${path == null ? ' - check your Downloads folder' : '\nSaved to: $path'}')));
+      }
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _stat(String label, String value, Color c) => Expanded(
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+      const SizedBox(height: 2),
+      Text(value,
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: c)),
+    ]),
+  );
+
+  Widget _content(_FinData data) {
+    final pct = data.expected <= 0
+        ? 0.0
+        : (data.collected / data.expected).clamp(0.0, 1.0).toDouble();
+    final valid = data.classes.any((s) => s.id == _classId);
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+      children: [
+        DropdownButtonFormField<String>(
+          value: valid ? _classId : _allClasses,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Class',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            const DropdownMenuItem(value: _allClasses, child: Text('All classes')),
+            for (final s in data.classes)
+              DropdownMenuItem(value: s.id, child: Text(s.label)),
+          ],
+          onChanged: (v) {
+            if (v == null) return;
+            setState(() {
+              _classId = v;
+              _future = _load();
+            });
+          },
+        ),
+        const SizedBox(height: 10),
+        Card(
+          margin: EdgeInsets.zero,
+          elevation: 0,
+          color: Colors.white,
+          shape: _kSettingsCardShape,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                _stat('Expected', _money(data.expected), Colors.black87),
+                _stat('Collected', _money(data.collected), kGreen),
+                _stat('Outstanding', _money(data.due),
+                    data.due > 0 ? kRed : kGreen),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                _stat('Students', '${data.students}', Colors.black87),
+                _stat('Discount', _money(data.discount), Colors.black87),
+                _stat('Collected %', _finPct(data.expected, data.collected),
+                    Colors.black87),
+              ]),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: pct,
+                  minHeight: 8,
+                  backgroundColor: Colors.grey.shade200,
+                  color: kGreen,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                  '${data.paidN} paid · ${data.partialN} partial · ${data.unpaidN} unpaid',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 14),
+        const Text('By class',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        if (data.rows.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: Text('No classes.')),
+          )
+        else
+          for (final r in data.rows)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 3),
+              child: ListTile(
+                title: Text(r.label,
+                    style: const TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: Text('${r.students} students · ${r.paidN} paid · '
+                    '${r.partialN} partial · ${r.unpaidN} unpaid\n'
+                    'Collected ${_money(r.collected)} of ${_money(r.expected)}'),
+                isThreeLine: true,
+                trailing: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(_finPct(r.expected, r.collected),
+                        style: const TextStyle(fontWeight: FontWeight.w800)),
+                    if (r.due > 0)
+                      Text('Due ${_money(r.due)}',
+                          style: const TextStyle(fontSize: 11, color: kRed)),
+                  ],
+                ),
+              ),
+            ),
+        const SizedBox(height: 14),
+        Text('Students who owe (${data.owe.length})',
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        if (data.owe.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: Text('Nobody owes for this month.')),
+          )
+        else
+          for (var i = 0; i < data.owe.length; i++)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 3),
+              child: ListTile(
+                dense: true,
+                leading: CircleAvatar(
+                  radius: 14,
+                  backgroundColor: kRed,
+                  child: Text('${i + 1}',
+                      style: const TextStyle(fontSize: 11, color: Colors.white)),
+                ),
+                title: Text(data.owe[i].name,
+                    maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                    '${data.owe[i].cls}${data.owe[i].phone.isEmpty ? '' : ' · ${data.owe[i].phone}'}'),
+                trailing: Text(_money(data.owe[i].due),
+                    style: const TextStyle(
+                        color: kRed, fontWeight: FontWeight.w700)),
+              ),
+            ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Finance report'),
+      actions: [
+        if (_busy)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 14),
+            child: Center(
+              child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
+          )
+        else ...[
+          IconButton(
+            tooltip: 'Print',
+            onPressed: () => _export(true),
+            icon: const Icon(Icons.print),
+          ),
+          IconButton(
+            tooltip: 'Save as PDF',
+            onPressed: () => _export(false),
+            icon: const Icon(Icons.picture_as_pdf),
+          ),
+        ],
+      ],
+    ),
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Row(children: [
+              IconButton(
+                tooltip: 'Previous month',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _setMonth(DateTime(_month.year, _month.month - 1)),
+                icon: const Icon(Icons.chevron_left),
+              ),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickMonth,
+                  icon: const Icon(Icons.calendar_month, size: 18),
+                  label: Text(_label),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Next month',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _setMonth(DateTime(_month.year, _month.month + 1)),
+                icon: const Icon(Icons.chevron_right),
+              ),
+            ]),
+          ),
+          Expanded(
+            child: FutureBuilder<_FinData>(
+              future: _future,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text('Could not load the report: ${snap.error}',
+                          textAlign: TextAlign.center),
+                    ),
+                  );
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return _content(snap.data!);
+              },
+            ),
+          ),
+        ]),
+      ),
+    ),
+  );
+}
+
+// ======================= MANUAL FEE SHEET =======================
+
+class _ManClass {
+  final SectionInfo sec;
+  final List<StudentInfo> students;
+  const _ManClass(this.sec, this.students);
+}
+
+class _ManData {
+  final List<_ManClass> classes;
+  const _ManData(this.classes);
+}
+
+/// "Manual" report: a printable list (number, student, phones and three blank
+/// month columns: this month and the next two) for collecting fees by hand.
+class ManualReportScreen extends StatefulWidget {
+  final DateTime month;
+  final String? sectionId;
+  const ManualReportScreen({super.key, required this.month, this.sectionId});
+
+  @override
+  State<ManualReportScreen> createState() => _ManualReportScreenState();
+}
+
+class _ManualReportScreenState extends State<ManualReportScreen> {
+  static const _allClasses = '__all__';
+  late DateTime _month = DateTime(widget.month.year, widget.month.month);
+  String _classId = _allClasses;
+  late final Future<_ManData> _future = _load();
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _classId = widget.sectionId ?? _allClasses;
+  }
+
+  List<DateTime> get _months =>
+      [for (var i = 0; i < 3; i++) DateTime(_month.year, _month.month + i)];
+  List<String> get _monthNames =>
+      [for (final m in _months) DateFormat('MMMM').format(m)];
+  String get _period =>
+      '${DateFormat('MMMM yyyy').format(_months.first)} - ${DateFormat('MMMM yyyy').format(_months.last)}';
+
+  Future<_ManData> _load() async {
+    final svc = SchoolService();
+    final secs = [
+      for (final s in await svc.watchSections().first)
+        if (!s.isSub) s
+    ];
+    final students = await svc.watchAllStudents().first;
+    return _ManData([
+      for (final sec in secs)
+        _ManClass(
+            sec,
+            [for (final s in students) if (s.sectionId == sec.id) s]
+              ..sort((a, b) =>
+                  a.name.toLowerCase().compareTo(b.name.toLowerCase()))),
+    ]);
+  }
+
+  List<_ManClass> _selected(_ManData data) => [
+    for (final c in data.classes)
+      if ((_classId == _allClasses || c.sec.id == _classId) &&
+          c.students.isNotEmpty)
+        c
+  ];
+
+  void _setMonth(DateTime m) => setState(() => _month = DateTime(m.year, m.month));
+
+  Future<void> _pickMonth() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _month,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(DateTime.now().year + 2, 12, 31),
+    );
+    if (picked != null) _setMonth(picked);
+  }
+
+  String _className(_ManData data) {
+    if (_classId == _allClasses) return 'All classes';
+    for (final c in data.classes) {
+      if (c.sec.id == _classId) return 'Class ${c.sec.label}';
+    }
+    return 'All classes';
+  }
+
+  Future<Uint8List> _buildPdf(_ManData data) async {
+    String c(String t) => t.replaceAll('–', '-').replaceAll('·', '-');
+    final head = ['#', 'Student', 'Phone', ..._monthNames];
+    const weights = [1.2, 7.8, 8.3, 3.3, 3.3, 3.3];
+
+// Times New Roman: headings 13 pt bold, names / numbers / phones 12 pt regular
+    pw.Widget cell(String t, {bool head = false, bool left = false}) => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 1.5),
+      child: pw.Text(c(t),
+          textAlign: left ? pw.TextAlign.left : pw.TextAlign.center,
+          style: pw.TextStyle(
+              fontSize: head ? 13 : 12,
+              fontWeight: head ? pw.FontWeight.bold : pw.FontWeight.normal)),
+    );
+
+    final doc = pw.Document();
+    final logoImg = pdfLogoImage(LogoPlace.sections);
+    final sel = _selected(data);
+    final stamp = DateFormat('MMM d, yyyy HH:mm').format(DateTime.now());
+    doc.addPage(pw.MultiPage(
+      maxPages: 100000,
+      pageTheme: pdfPageTheme(const pw.EdgeInsets.all(28),
+          background: pdfWatermark(LogoPlace.sections),
+          theme: pw.ThemeData.withFont(
+              base: pw.Font.times(),
+              bold: pw.Font.timesBold(),
+              italic: pw.Font.timesItalic(),
+              boldItalic: pw.Font.timesBoldItalic())),
+      footer: (ctx) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('Page ${ctx.pageNumber} of ${ctx.pagesCount}',
+            style: const pw.TextStyle(fontSize: 8)),
+      ),
+      build: (ctx) => [
+        for (var k = 0; k < sel.length; k++) ...[
+          if (k > 0) pw.NewPage(),
+          if (logoImg != null) pdfLogoBlock(logoImg),
+          pw.Text('MANUAL FEE SHEET',
+              style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 4),
+          pw.Text(c(_period),
+              style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold)),
+          pw.SizedBox(height: 2),
+          pw.Text(
+              c('Class ${sel[k].sec.label}   |   ${sel[k].students.length} students'
+                  '   |   Monthly fee: ${_money(appSettings.value.monthlyFees[sel[k].sec.form] ?? 0.0)}'),
+              style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)),
+          pw.Text('Generated $stamp', style: const pw.TextStyle(fontSize: 10)),
+          pw.SizedBox(height: 8),
+          pw.Table(
+            border: pw.TableBorder.all(width: 0.5),
+            columnWidths: {
+              for (var i = 0; i < weights.length; i++)
+                i: pw.FlexColumnWidth(weights[i].toDouble()),
+            },
+            children: [
+              pw.TableRow(
+                repeat: true,
+                decoration: pw.BoxDecoration(color: PdfColors.grey300),
+                children: [
+                  for (var j = 0; j < head.length; j++)
+                    cell(head[j], head: true, left: j == 1 || j == 2),
+                ],
+              ),
+              for (var i = 0; i < sel[k].students.length; i++)
+                pw.TableRow(children: [
+                  cell('${i + 1}'),
+                  cell(sel[k].students[i].name, left: true),
+                  cell(sel[k].students[i].phoneText, left: true),
+                  cell(''),
+                  cell(''),
+                  cell(''),
+                ]),
+            ],
+          ),
+        ],
+      ],
+    ));
+    return doc.save();
+  }
+
+  Future<void> _export(bool print) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      final data = await _future;
+      if (_selected(data).isEmpty) {
+        messenger.showSnackBar(const SnackBar(
+            content: Text('There are no students for this selection.')));
+        return;
+      }
+      final name =
+          'Manual-${DateFormat('yyyy-MM').format(_month)}-${_classId == _allClasses ? 'all' : _className(data).replaceAll('Class ', '')}';
+      final bytes = await _buildPdf(data);
+      if (print) {
+        if (mounted) setState(() => _busy = false);
+        await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+      } else {
+        final path = await _downloadInBrowser(bytes, '$name.pdf', 'application/pdf');
+        messenger.showSnackBar(SnackBar(
+            duration: const Duration(seconds: 6),
+            content: Text(path == null && !kIsWeb
+                ? 'Download cancelled (nothing was saved).'
+                : 'PDF saved${path == null ? ' - check your Downloads folder' : '\nSaved to: $path'}')));
+      }
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _content(_ManData data) {
+    final valid = data.classes.any((c) => c.sec.id == _classId);
+    final sel = _selected(data);
+    final names = _monthNames;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+      children: [
+        DropdownButtonFormField<String>(
+          value: valid ? _classId : _allClasses,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Class',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            const DropdownMenuItem(value: _allClasses, child: Text('All classes')),
+            for (final c in data.classes)
+              DropdownMenuItem(value: c.sec.id, child: Text(c.sec.label)),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => _classId = v);
+          },
+        ),
+        const SizedBox(height: 8),
+        Text(
+            'Columns: ${names.join(', ')}. Print it and write the payments by hand.',
+            style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        const SizedBox(height: 8),
+        if (sel.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('There are no students for this selection.')),
+          )
+        else
+          for (final c in sel) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 4),
+              child: Text('Class ${c.sec.label} · ${c.students.length} students',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+            ),
+            for (var i = 0; i < c.students.length; i++)
+              Card(
+                margin: const EdgeInsets.symmetric(vertical: 2),
+                child: ListTile(
+                  dense: true,
+                  leading: CircleAvatar(
+                    radius: 13,
+                    child: Text('${i + 1}', style: const TextStyle(fontSize: 11)),
+                  ),
+                  title: Text(c.students[i].name,
+                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(c.students[i].phoneText.isEmpty
+                      ? 'No phone'
+                      : c.students[i].phoneText),
+                ),
+              ),
+          ],
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Manual'),
+      actions: [
+        if (_busy)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 14),
+            child: Center(
+              child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
+          )
+        else ...[
+          IconButton(
+            tooltip: 'Print',
+            onPressed: () => _export(true),
+            icon: const Icon(Icons.print),
+          ),
+          IconButton(
+            tooltip: 'Save as PDF',
+            onPressed: () => _export(false),
+            icon: const Icon(Icons.picture_as_pdf),
+          ),
+        ],
+      ],
+    ),
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Row(children: [
+              IconButton(
+                tooltip: 'Previous month',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _setMonth(DateTime(_month.year, _month.month - 1)),
+                icon: const Icon(Icons.chevron_left),
+              ),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickMonth,
+                  icon: const Icon(Icons.calendar_month, size: 18),
+                  label: Text(_period),
+                  style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Next month',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _setMonth(DateTime(_month.year, _month.month + 1)),
+                icon: const Icon(Icons.chevron_right),
+              ),
+            ]),
+          ),
+          Expanded(
+            child: FutureBuilder<_ManData>(
+              future: _future,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text('Could not load the list: ${snap.error}',
+                          textAlign: TextAlign.center),
+                    ),
+                  );
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return _content(snap.data!);
+              },
+            ),
+          ),
+        ]),
+      ),
+    ),
+  );
 }
 
 // ======================= ATTENDANCE REPORT =======================
@@ -19998,7 +22236,7 @@ class _CheatPanelState extends State<_CheatPanel> {
         return StreamBuilder<UserProfile>(
           stream: UserProfile.watchMine(),
           builder: (context, ps) {
-            final admin = ps.data?.isAdmin == true;
+            final admin = ps.data?.fullAccess == true;
 // a teacher only sees students cheated in a subject they teach
             final entries = admin
                 ? allEntries
@@ -21881,7 +24119,7 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
   void initState() {
     super.initState();
     UserProfile.watchMine().first.then((p) {
-      if (mounted) setState(() => _admin = p.isAdmin);
+      if (mounted) setState(() => _admin = p.fullAccess);
     }).catchError((_) {});
     _service.get(widget.student.id, widget.exam, raw: true).then((r) async {
       var absent = <String, Set<String>>{};
@@ -23100,10 +25338,8 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                           const Text('Student affairs',
                               style: TextStyle(fontSize: 12)),
                           const SizedBox(height: 4),
-                          _pageChips(
-                              st.affairsAccess,
-                                  (v) => _run(context,
-                                      () => appSettings.update({'affairsAccess': v}))),
+                          const Text('Full access: every page and every action.',
+                              style: TextStyle(fontSize: 12, color: Colors.black54)),
                         ],
                       ),
                     ),
@@ -23345,7 +25581,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
         '${UserProfile.roleLabel(u.role)}'
             '${u.pending ? ' (not signed in yet)' : ''}'
             '${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
-            '${u.isAdmin ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
+            '${u.fullAccess ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
             '${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
             '${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
         style: const TextStyle(fontSize: 12),
@@ -23390,7 +25626,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
           },
         ),
         const SizedBox(height: 12),
-        Text(u.isAdmin ? 'Pages (administrators see all)' : 'Pages this user can see',
+        Text(u.fullAccess ? 'Pages (administrators and Student affairs see all)' : 'Pages this user can see',
             style: const TextStyle(fontSize: 12)),
         const SizedBox(height: 6),
         _pageChips(
@@ -23399,7 +25635,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                   () => users
                   .doc(u.uid)
                   .set({..._base(u), 'access': v}, SetOptions(merge: true))),
-          enabled: !isMe && !u.isAdmin,
+          enabled: !isMe && !u.fullAccess,
         ),
         if (u.role != 'student') ...[
           const Divider(height: 24),
@@ -23430,7 +25666,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
             ),
           ),
         ],
-        if (!isMe && !u.isAdmin && u.access != null)
+        if (!isMe && !u.fullAccess && u.access != null)
           Align(
             alignment: Alignment.centerRight,
             child: TextButton(
@@ -23888,7 +26124,7 @@ Future<void> editTeacherDialog(BuildContext context,
     }
   } catch (_) {}
   if (!context.mounted) return;
-  final showPages = isAdminMe && up?.isAdmin != true;
+  final showPages = isAdminMe && up?.fullAccess != true;
   var access = <String>[
     ...(up?.access ??
         (up != null
