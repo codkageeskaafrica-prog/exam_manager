@@ -11190,14 +11190,23 @@ class SchoolService {
     return _recordsOf(d.data()?['records']);
   }
 
+  /// studentId -> note written for an absent student ('' = none).
+  Future<Map<String, String>> getAttendanceNotes(
+      String sectionId, String dateKey,
+      {String subject = ''}) async {
+    final d = await _attendance.doc(_attId(sectionId, dateKey, subject)).get();
+    return _recordsOf(d.data()?['notes']);
+  }
+
   Future<void> saveAttendance(
       String sectionId, String dateKey, Map<String, String> records,
-      {String subject = ''}) {
+      {String subject = '', Map<String, String> notes = const {}}) {
     return _attendance.doc(_attId(sectionId, dateKey, subject)).set({
       'sectionId': sectionId,
       'date': dateKey,
       'subject': subject.trim(),
       'records': records,
+      'notes': notes,
       'updatedBy': _uid,
       'updatedAt': FieldValue.serverTimestamp(),
     }).timeout(const Duration(seconds: 30), onTimeout: () {
@@ -14323,24 +14332,7 @@ class _StudentAttendanceBodyState extends State<_StudentAttendanceBody> {
   late Future<List<_AttEntry>> _f = _load();
   String _filter = 'all';
 
-  Future<List<_AttEntry>> _load() async {
-    final q = await FirebaseFirestore.instance
-        .collection('attendance')
-        .where(FieldPath(['records', widget.studentId]),
-        whereIn: ['present', 'absent', 'late'])
-        .get();
-    return [
-      for (final d in q.docs)
-        _AttEntry(
-          '${d.data()['date'] ?? ''}',
-          '${d.data()['subject'] ?? ''}'.trim(),
-          '${(d.data()['records'] as Map?)?[widget.studentId] ?? ''}',
-        ),
-    ]..sort((a, b) {
-      final c = b.dateKey.compareTo(a.dateKey);
-      return c != 0 ? c : a.subject.compareTo(b.subject);
-    });
-  }
+  Future<List<_AttEntry>> _load() => _loadAttendanceOf(widget.studentId);
 
   DateTime? _parse(String k) {
     try {
@@ -14526,9 +14518,57 @@ class StudentDetailScreen extends StatefulWidget {
 }
 
 class _AttEntry {
-  final String dateKey, subject, mark;
-  const _AttEntry(this.dateKey, this.subject, this.mark);
+  final String dateKey, subject, mark, note;
+  const _AttEntry(this.dateKey, this.subject, this.mark, [this.note = '']);
   bool get present => mark == 'present' || mark == 'late';
+}
+
+/// Every saved register that has a mark for this student. A student can
+/// exist twice (whole class + divided section, the "twin"), and the
+/// register may have been saved on either copy, so both are read - the
+/// same way the results already do. One query per record id (different
+/// field paths cannot share one whereIn). If both copies were marked for
+/// the same date and subject, it is counted once (the opened record wins).
+Future<List<_AttEntry>> _loadAttendanceOf(String id) async {
+  final col = FirebaseFirestore.instance.collection('attendance');
+  String? twin;
+  try {
+    twin = (await ResultService().twinMap())[id];
+  } catch (_) {}
+
+  Future<List<_AttEntry>> one(String sid) async {
+    final q = await col
+        .where(FieldPath(['records', sid]),
+        whereIn: ['present', 'absent', 'late'])
+        .get();
+    return [
+      for (final d in q.docs)
+        _AttEntry(
+          '${d.data()['date'] ?? ''}',
+          '${d.data()['subject'] ?? ''}'.trim(),
+          '${(d.data()['records'] as Map?)?[sid] ?? ''}',
+          '${(d.data()['notes'] as Map?)?[sid] ?? ''}'.trim(),
+        ),
+    ];
+  }
+
+  final own = await one(id);
+  var other = <_AttEntry>[];
+  if (twin != null) {
+    try {
+      other = await one(twin);
+    } catch (_) {}
+  }
+  final seen = <String>{for (final e in own) '${e.dateKey}|${e.subject}'};
+  final list = <_AttEntry>[
+    ...own,
+    for (final e in other)
+      if (seen.add('${e.dateKey}|${e.subject}')) e,
+  ]..sort((a, b) {
+    final c = b.dateKey.compareTo(a.dateKey);
+    return c != 0 ? c : a.subject.compareTo(b.subject);
+  });
+  return list;
 }
 
 class _StudentDetailScreenState extends State<StudentDetailScreen> {
@@ -14658,25 +14698,8 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
 
   /// Every register (any section, any date) that has a mark for this
   /// student. Queries one field path, so no extra Firestore index is needed.
-  Future<List<_AttEntry>> _loadAttendance() async {
-    final q = await FirebaseFirestore.instance
-        .collection('attendance')
-        .where(FieldPath(['records', widget.student.id]),
-        whereIn: ['present', 'absent', 'late'])
-        .get();
-    final list = <_AttEntry>[
-      for (final d in q.docs)
-        _AttEntry(
-          '${d.data()['date'] ?? ''}',
-          '${d.data()['subject'] ?? ''}'.trim(),
-          '${(d.data()['records'] as Map?)?[widget.student.id] ?? ''}',
-        ),
-    ]..sort((a, b) {
-      final c = b.dateKey.compareTo(a.dateKey);
-      return c != 0 ? c : a.subject.compareTo(b.subject);
-    });
-    return list;
-  }
+  Future<List<_AttEntry>> _loadAttendance() =>
+      _loadAttendanceOf(widget.student.id);
 
   DateTime? _parse(String k) {
     try {
@@ -15487,9 +15510,16 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         child: Center(child: Text('No attendance records.')),
       ));
     }
-    String? lastMonth;
+// Short list: ONE row per day (the subjects of that day are joined).
+    final byDay = <String, List<_AttEntry>>{};
     for (final e in shown) {
-      final d = _parse(e.dateKey);
+      byDay.putIfAbsent(e.dateKey, () => []).add(e);
+    }
+    String cap(String m) => m.isEmpty ? '' : m[0].toUpperCase() + m.substring(1);
+    String subj(_AttEntry e) => e.subject.isEmpty ? 'Whole day' : e.subject;
+    String? lastMonth;
+    for (final day in byDay.entries) {
+      final d = _parse(day.key);
       final month = d == null ? 'Unknown date' : DateFormat('MMMM yyyy').format(d);
       if (month != lastMonth) {
         lastMonth = month;
@@ -15500,22 +15530,43 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
                   fontWeight: FontWeight.w700, color: Colors.black54)),
         ));
       }
-      final c = e.mark == 'absent'
-          ? kRed
-          : e.mark == 'late'
-          ? kLate
-          : kGreen;
+      final list = day.value;
+      final marks = list.map((e) => e.mark).toSet();
+      final uniform = marks.length == 1;
+      final nAbsent = list.where((e) => e.mark == 'absent').length;
+      final nLate = list.where((e) => e.mark == 'late').length;
+      final c = nAbsent > 0 ? kRed : (nLate > 0 ? kLate : kGreen);
+      final String subtitle;
+      final String trailing;
+      if (uniform) {
+        subtitle = list.map(subj).join(', ');
+        trailing = cap(marks.first);
+      } else {
+        subtitle = [
+          for (final m in ['absent', 'late', 'present'])
+            if (list.any((e) => e.mark == m))
+              '${cap(m)}: ${list.where((e) => e.mark == m).map(subj).join(', ')}',
+        ].join(' · ');
+        trailing = nAbsent > 0 ? '$nAbsent absent' : '$nLate late';
+      }
       children.add(ListTile(
         dense: true,
-        leading: Icon(
-            e.mark == 'absent' ? Icons.cancel : Icons.check_circle,
-            color: c),
+        leading: Icon(nAbsent > 0 ? Icons.cancel : Icons.check_circle, color: c),
         title: Text(d == null
-            ? e.dateKey
+            ? day.key
             : DateFormat('EEE, MMM d, yyyy').format(d)),
-        subtitle: Text(e.subject.isEmpty ? 'Whole day' : e.subject),
-        trailing: Text(
-            e.mark.isEmpty ? '' : e.mark[0].toUpperCase() + e.mark.substring(1),
+        subtitle: Text(
+            [
+              subtitle,
+              for (final n in {
+                for (final e in list)
+                  if (e.mark == 'absent' && e.note.isNotEmpty) e.note
+              })
+                'Note: $n',
+            ].join('\n'),
+            maxLines: 6,
+            overflow: TextOverflow.ellipsis),
+        trailing: Text(trailing,
             style: TextStyle(color: c, fontWeight: FontWeight.w700)),
       ));
     }
@@ -15646,6 +15697,61 @@ class _StackBar extends StatelessWidget {
   }
 }
 
+/// Small dialog to write the reason / note for an absent student.
+class _NoteDialog extends StatefulWidget {
+  final String name, initial;
+  const _NoteDialog({required this.name, required this.initial});
+  @override
+  State<_NoteDialog> createState() => _NoteDialogState();
+}
+
+class _NoteDialogState extends State<_NoteDialog> {
+  late final _c = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Absence note'),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(widget.name,
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _c,
+          autofocus: true,
+          maxLines: 3,
+          maxLength: 200,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            hintText: 'e.g. Sick, family emergency, late...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+      ],
+    ),
+    actions: [
+      if (widget.initial.trim().isNotEmpty)
+        TextButton(
+            onPressed: () => Navigator.pop(context, ''),
+            child: const Text('Remove')),
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+          onPressed: () => Navigator.pop(context, _c.text),
+          child: const Text('Save')),
+    ],
+  );
+}
+
 class AttendanceScreen extends StatefulWidget {
   const AttendanceScreen({super.key});
 
@@ -15671,6 +15777,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       _subjects.isEmpty ? 'All subjects' : _subjectOrder.join(', ');
   DateTime _date = DateTime.now();
   Map<String, String> _marks = {};
+  Map<String, String> _notes = {}; // studentId -> note (only for absent)
   bool _loading = false;
   bool _saving = false;
   bool _dirty = false;
@@ -15692,15 +15799,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
 // A student absent in ANY chosen subject is shown absent for all of them.
       final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
       final merged = <String, String>{};
+      final mergedNotes = <String, String>{};
       for (final k in keys) {
         final m = await _service.getAttendance(id, _dateKey, subject: k);
+        final n = await _service.getAttendanceNotes(id, _dateKey, subject: k);
         for (final e in m.entries) {
           if (merged[e.key] == 'absent') continue;
           merged[e.key] = e.value;
         }
+        for (final e in n.entries) {
+          if (e.value.trim().isNotEmpty) mergedNotes.putIfAbsent(e.key, () => e.value);
+        }
       }
       if (!mounted || t != _token) return;
       setState(() {
+        _notes = mergedNotes;
 // the Late option was removed: old late marks count as present
         _marks = {
           for (final e in merged.entries)
@@ -15712,6 +15825,7 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       if (!mounted || t != _token) return;
       setState(() {
         _marks = {};
+        _notes = {};
         _loading = false;
       });
       ScaffoldMessenger.of(context)
@@ -15756,6 +15870,23 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     if (d != null) _setDate(d);
   }
 
+  /// Add / edit / remove the note of an absent student.
+  Future<void> _editNote(StudentInfo s) async {
+    final r = await showDialog<String>(
+      context: context,
+      builder: (_) => _NoteDialog(name: s.name, initial: _notes[s.id] ?? ''),
+    );
+    if (r == null || !mounted) return;
+    setState(() {
+      if (r.trim().isEmpty) {
+        _notes.remove(s.id);
+      } else {
+        _notes[s.id] = r.trim();
+      }
+      _dirty = true;
+    });
+  }
+
   Future<void> _save(List<StudentInfo> students) async {
     final id = _sectionId;
     if (id == null) return;
@@ -15766,9 +15897,16 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
         for (final s in students)
           if (_marks[s.id] != null) s.id: _marks[s.id]!,
       };
+// a note is kept only for students who are marked absent
+      final notes = {
+        for (final s in students)
+          if (_marks[s.id] == 'absent' && (_notes[s.id] ?? '').trim().isNotEmpty)
+            s.id: _notes[s.id]!.trim(),
+      };
       final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
       for (final k in keys) {
-        await _service.saveAttendance(id, _dateKey, records, subject: k);
+        await _service.saveAttendance(id, _dateKey, records,
+            subject: k, notes: notes);
       }
       if (!mounted) return;
       setState(() {
@@ -16105,11 +16243,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Text(s.name,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 14.5, fontWeight: FontWeight.w600)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(s.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 14.5, fontWeight: FontWeight.w600)),
+                        if (mark == 'absent')
+                          InkWell(
+                            onTap: _saving ? null : () => _editNote(s),
+                            child: Padding(
+                              padding: const EdgeInsets.only(top: 3, bottom: 1),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(
+                                    (_notes[s.id] ?? '').trim().isEmpty
+                                        ? Icons.note_add_outlined
+                                        : Icons.edit_note,
+                                    size: 15,
+                                    color: kRed),
+                                const SizedBox(width: 4),
+                                Flexible(
+                                    child: Text(
+                                        (_notes[s.id] ?? '').trim().isEmpty
+                                            ? 'Add note'
+                                            : _notes[s.id]!.trim(),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            color: (_notes[s.id] ?? '').trim().isEmpty
+                                                ? kRed
+                                                : Colors.grey.shade700,
+                                            fontStyle: (_notes[s.id] ?? '').trim().isEmpty
+                                                ? FontStyle.normal
+                                                : FontStyle.italic))),
+                              ]),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                   _markButton(
                       s, 'present', Icons.check, kGreen, 'Present'),
