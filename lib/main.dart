@@ -6765,8 +6765,8 @@ class AppPages {
 /// Who the signed-in person is and which pages they may open
 /// (Firestore: users/{uid}).
 ///  - role 'admin'   : sees every page and manages the permissions.
-///  - role 'affairs' (student affairs): full access, every page and every
-///    admin-level view (only managing users / roles stays with the admin).
+///  - role 'affairs' (student affairs): sees only the pages in `access`;
+///    when `access` is not set, the default of that role.
 ///  - role 'teacher' / 'student': sees the
 ///    pages in `access`; when `access`
 ///    is not set, the default of that role (Settings > Users & permissions).
@@ -6809,8 +6809,8 @@ class UserProfile {
 
   bool get isAdmin => role == 'admin';
 
-  /// Administrators and Student affairs can open everything.
-  bool get fullAccess => role == 'admin' || role == 'affairs';
+  /// Only administrators can open everything.
+  bool get fullAccess => role == 'admin';
 
   List<String> effectiveAccess(AppSettings st) {
     if (fullAccess) return AppPages.all;
@@ -9417,7 +9417,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       stream: _me,
       builder: (context, me) {
         // only an administrator manages users (a rules error is shown there)
-        final admin = me.hasError || me.data?.isAdmin == true;
+        final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
             if (c.id != 3 || admin) c
@@ -25267,7 +25267,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
             ),
           );
         }
-        if (mine.data?.isAdmin != true) return const SizedBox.shrink();
+        if (mine.data?.fullAccess != true) return const SizedBox.shrink();
         if (!_teachersSynced) {
 // Every teacher / staff member in Teachers must be in this list.
           _teachersSynced = true;
@@ -25338,8 +25338,11 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                           const Text('Student affairs',
                               style: TextStyle(fontSize: 12)),
                           const SizedBox(height: 4),
-                          const Text('Full access: every page and every action.',
-                              style: TextStyle(fontSize: 12, color: Colors.black54)),
+                          const SizedBox(height: 4),
+                          _pageChips(
+                              st.affairsAccess,
+                                  (v) => _run(context,
+                                      () => appSettings.update({'affairsAccess': v}))),
                         ],
                       ),
                     ),
@@ -25626,7 +25629,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
           },
         ),
         const SizedBox(height: 12),
-        Text(u.fullAccess ? 'Pages (administrators and Student affairs see all)' : 'Pages this user can see',
+        Text(u.fullAccess ? 'Pages (administrators see all)' : 'Pages this user can see',
             style: const TextStyle(fontSize: 12)),
         const SizedBox(height: 6),
         _pageChips(
@@ -26101,14 +26104,15 @@ Future<void> editTeacherDialog(BuildContext context,
       String newId = ''}) async {
   void toast(String m) => ScaffoldMessenger.of(context)
       .showSnackBar(SnackBar(content: Text(m)));
-// Only the administrator sets the pages of a person (users/{id}.access).
-  var isAdminMe = false;
+// Only the administrator sets the pages and account type of a person.
+  var isAdminMe = false; // administrator
+  var meId = '';
   UserProfile? up; // the user of this person, when there is one
   try {
     final users = FirebaseFirestore.instance.collection('users');
-    final meId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    meId = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (meId.isNotEmpty) {
-      isAdminMe = UserProfile.fromDoc(await users.doc(meId).get()).isAdmin;
+      isAdminMe = UserProfile.fromDoc(await users.doc(meId).get()).fullAccess;
     }
     if (isAdminMe) {
       final id = t?.id ?? newId;
@@ -26125,6 +26129,10 @@ Future<void> editTeacherDialog(BuildContext context,
   } catch (_) {}
   if (!context.mounted) return;
   final showPages = isAdminMe && up?.fullAccess != true;
+// the account type (Teacher / Student affairs / Admin) of an existing account
+  final canRole = isAdminMe && up != null && up.uid != meId;
+  var acctRole = up?.role ?? 'teacher';
+  var roleEdited = false;
   var access = <String>[
     ...(up?.access ??
         (up != null
@@ -26201,6 +26209,28 @@ Future<void> editTeacherDialog(BuildContext context,
                     border: OutlineInputBorder(),
                   ),
                 ),
+                if (canRole) ...[
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: acctRole,
+                    decoration: const InputDecoration(
+                      labelText: 'Account type (access level)',
+                      helperText: 'Only Admin can open everything.',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: [
+                      for (final r in UserProfile.roles)
+                        DropdownMenuItem(value: r, child: Text(UserProfile.roleLabel(r))),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setD(() {
+                        acctRole = v;
+                        roleEdited = true;
+                      });
+                    },
+                  ),
+                ],
                 if (showPages) ...[
                   const SizedBox(height: 16),
                   const Text('Pages this person can see',
@@ -26388,6 +26418,12 @@ Future<void> editTeacherDialog(BuildContext context,
   if (result == null || !context.mounted) return;
   try {
     final savedId = await TeacherService().save(result);
+    if (canRole && roleEdited) {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(up!.uid)
+          .set({'role': acctRole}, SetOptions(merge: true));
+    }
     if (showPages && accessEdited) {
       await FirebaseFirestore.instance
           .collection('users')
