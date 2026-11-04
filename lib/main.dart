@@ -15389,53 +15389,66 @@ if (!ExamService.subjects.contains(s)) s,
 final belowMin =
 limits.totalMin > 0 && avg != null && v.total < limits.totalMin;
 
-Widget subjectRow(String sub) {
+Widget subjectTile(String sub, double w) {
 final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
 final mark = v.marks[sub];
-final c = mark == null ? Colors.grey : _gradeColor(_gradeOf(mark));
-return Padding(
-padding: const EdgeInsets.symmetric(vertical: 5),
-child: Row(children: [
-SizedBox(
-width: 92,
-child: Text(sub,
+final c = cheated
+? kCheatColor
+    : mark == null
+? Colors.grey
+    : _gradeColor(_gradeOf(mark));
+return Container(
+width: w,
+padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+decoration: BoxDecoration(
+color: c.withAlpha(16),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: c.withAlpha(56))),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Text(sub,
+maxLines: 1,
 overflow: TextOverflow.ellipsis,
 style: const TextStyle(
-fontSize: 13, fontWeight: FontWeight.w600))),
-Expanded(
-child: ClipRRect(
-borderRadius: BorderRadius.circular(5),
+fontSize: 12.5,
+fontWeight: FontWeight.w600,
+color: Colors.black54)),
+const SizedBox(height: 4),
+if (cheated)
+Row(children: [
+const Icon(Icons.gavel, size: 16, color: kCheatColor),
+const SizedBox(width: 4),
+const Text('Cheated',
+style: TextStyle(
+fontSize: 14,
+fontWeight: FontWeight.w800,
+color: kCheatColor)),
+])
+else
+Row(
+crossAxisAlignment: CrossAxisAlignment.baseline,
+textBaseline: TextBaseline.alphabetic,
+children: [
+Text(mark == null ? '–' : _fmtMark(mark),
+style: TextStyle(
+fontSize: 24,
+height: 1.1,
+fontWeight: FontWeight.w800,
+color: c)),
+if (mark != null)
+Text(' / ${_fmtMark(maxMark)}',
+style: const TextStyle(
+fontSize: 12, color: Colors.black45)),
+]),
+const SizedBox(height: 8),
+ClipRRect(
+borderRadius: BorderRadius.circular(4),
 child: LinearProgressIndicator(
 value: cheated || mark == null
 ? 0
     : (mark / maxMark).clamp(0.0, 1.0),
-minHeight: 8,
-backgroundColor: Colors.grey.shade200,
+minHeight: 5,
+backgroundColor: c.withAlpha(32),
 color: c,
-),
-),
-),
-const SizedBox(width: 10),
-SizedBox(
-width: 78,
-child: Align(
-alignment: Alignment.centerRight,
-child: cheated
-? _tag('Cheated', kCheatColor, icon: Icons.gavel)
-    : mark == null
-? const Text('-')
-    : Container(
-constraints: const BoxConstraints(minWidth: 46),
-padding: const EdgeInsets.symmetric(
-horizontal: 10, vertical: 3),
-decoration: BoxDecoration(
-color: c.withAlpha(30),
-borderRadius: BorderRadius.circular(20)),
-child: Text(_fmtMark(mark),
-textAlign: TextAlign.center,
-style: TextStyle(
-fontWeight: FontWeight.w800, color: c)),
-),
 ),
 ),
 ]),
@@ -15504,29 +15517,68 @@ _note('Marked as cheated in all subjects. No mark counts.')
 else if (v.cheatedSubs.isNotEmpty)
 _note('Cheated in ${v.cheatedSubs.join(', ')}. '
 'Those marks are not counted.'),
-for (final sub in subs) subjectRow(sub),
+LayoutBuilder(builder: (context, box) {
+final cols = box.maxWidth >= 560 ? 4 : (box.maxWidth >= 330 ? 3 : 2);
+final w = (box.maxWidth - (cols - 1) * 8) / cols;
+return Wrap(spacing: 8, runSpacing: 8, children: [
+for (final sub in subs) subjectTile(sub, w),
+]);
+}),
 if (!v.cheatedAll && avg != null) ...[
-const Divider(height: 18),
-Row(children: [
-const Expanded(
-child: Text('Total',
-style: TextStyle(fontWeight: FontWeight.w700))),
+const SizedBox(height: 12),
+Container(
+padding: const EdgeInsets.symmetric(vertical: 10),
+decoration: BoxDecoration(
+color: const Color(0xFFF6F8FB),
+borderRadius: BorderRadius.circular(12)),
+child: Row(children: [
+Expanded(
+child: Column(children: [
+const Text('Total',
+style: TextStyle(fontSize: 11.5, color: Colors.black54)),
+const SizedBox(height: 2),
 Text(
 '${_fmtMark(v.total)}'
 '${limits.totalMax > 0 ? ' / ${_fmtMark(limits.totalMax)}' : ''}',
 style: TextStyle(
+fontSize: 17,
 fontWeight: FontWeight.w800,
 color: belowMin ? kRed : Colors.black87)),
 ]),
-const SizedBox(height: 4),
-Row(children: [
-const Expanded(
-child: Text('Average',
-style: TextStyle(fontWeight: FontWeight.w700))),
-Text('${_f1(avg)}  ·  Grade $g',
+),
+Container(width: 1, height: 30, color: _line),
+Expanded(
+child: Column(children: [
+const Text('Average',
+style: TextStyle(fontSize: 11.5, color: Colors.black54)),
+const SizedBox(height: 2),
+Text(_f1(avg),
 style: TextStyle(
-fontWeight: FontWeight.w800, color: _gradeColor(g!))),
+fontSize: 17,
+fontWeight: FontWeight.w800,
+color: _gradeColor(g!))),
 ]),
+),
+Container(width: 1, height: 30, color: _line),
+Expanded(
+child: Column(children: [
+const Text('Grade',
+style: TextStyle(fontSize: 11.5, color: Colors.black54)),
+const SizedBox(height: 2),
+Text(g!,
+style: TextStyle(
+fontSize: 17,
+fontWeight: FontWeight.w800,
+color: _gradeColor(g))),
+]),
+),
+]),
+),
+if (belowMin) ...[
+const SizedBox(height: 8),
+_tag('Below the minimum total (${_fmtMark(limits.totalMin)})', kRed,
+icon: Icons.warning_amber_rounded),
+],
 ],
 ],
 ),
