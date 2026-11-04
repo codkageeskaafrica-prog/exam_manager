@@ -14723,6 +14723,7 @@ Future<List<_AttEntry>> _loadAttendanceOf(String id) async {
 }
 
 class _StudentDetailScreenState extends State<StudentDetailScreen> {
+<<<<<<< HEAD
   late final Stream<DocumentSnapshot<Map<String, dynamic>>> _docStream =
   FirebaseFirestore.instance
       .collection('students')
@@ -14743,6 +14744,28 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       if (mounted) setState(() => _admin = p.fullAccess);
     }).catchError((_) {});
   }
+=======
+late final Stream<DocumentSnapshot<Map<String, dynamic>>> _docStream =
+FirebaseFirestore.instance
+    .collection('students')
+    .doc(widget.student.id)
+    .snapshots();
+late Future<List<_AttEntry>> _attFuture = _loadAttendance();
+late Future<Map<String, ResultMarks>> _resFuture = _loadResults();
+late Future<_RealSection> _secFuture = _loadRealSection();
+String _filter = 'all'; // all | present | absent | late
+String? _twin; // the same student's record in the class <-> section twin
+bool _admin = false;
+
+@override
+void initState() {
+super.initState();
+CheatService.start();
+UserProfile.watchMine().first.then((p) {
+if (mounted) setState(() => _admin = p.fullAccess);
+}).catchError((_) {});
+}
+>>>>>>> 3ac1bf1 (update)
 
   /// The real section of the student. A student of a whole class (2B) is
   /// usually saved a second time in a divided section (2B-A): that copy (the
@@ -15151,6 +15174,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
   }
 
 
+<<<<<<< HEAD
   // ---------------- admin editing ----------------
   Widget _adminBar(Map<String, dynamic> m) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
@@ -15616,6 +15640,473 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       },
     );
   }
+=======
+// ---------------- admin editing ----------------
+Widget _adminBar(Map<String, dynamic> m) => Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: Wrap(spacing: 8, runSpacing: 8, children: [
+FilledButton.tonalIcon(
+onPressed: () => _editProfile(m),
+icon: const Icon(Icons.edit, size: 18),
+label: const Text('Edit details'),
+),
+OutlinedButton.icon(
+onPressed: _moveSection,
+icon: const Icon(Icons.swap_horiz, size: 18),
+label: const Text('Change section / class'),
+),
+]),
+);
+
+Future<void> _editProfile(Map<String, dynamic> m) async {
+final name =
+TextEditingController(text: '${m['name'] ?? widget.student.name}');
+final no = TextEditingController(text: '${m['studentNo'] ?? ''}');
+final phones = TextEditingController(
+text: m['phones'] is List
+? (m['phones'] as List).join(', ')
+    : '${m['phone'] ?? ''}');
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Edit student details'),
+content: SizedBox(
+width: 380,
+child: SingleChildScrollView(
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+TextField(
+controller: name,
+textCapitalization: TextCapitalization.words,
+decoration: const InputDecoration(
+labelText: 'Student name', border: OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+TextField(
+controller: no,
+decoration: const InputDecoration(
+labelText: 'Student ID', border: OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+TextField(
+controller: phones,
+keyboardType: TextInputType.phone,
+decoration: const InputDecoration(
+labelText: 'Phone number(s)',
+helperText: 'Separate several numbers with a comma. If the '
+'student already has a login, it keeps its old phone number.',
+helperMaxLines: 3,
+border: OutlineInputBorder(),
+),
+),
+]),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Save')),
+],
+),
+);
+final newName = name.text.trim();
+final newNo = cleanStudentNo(no.text);
+final newPhones = phones.text;
+name.dispose();
+no.dispose();
+phones.dispose();
+if (ok != true || !mounted) return;
+final messenger = ScaffoldMessenger.of(context);
+if (newName.isEmpty) {
+messenger.showSnackBar(const SnackBar(content: Text('Enter the name.')));
+return;
+}
+try {
+final col = FirebaseFirestore.instance.collection('students');
+final twin = await _twinId;
+final oldNo = '${m['studentNo'] ?? ''}'.trim();
+if (newNo.isNotEmpty && newNo != oldNo) {
+final q = await col.where('studentNo', isEqualTo: newNo).get();
+if (q.docs.any((d) => d.id != widget.student.id && d.id != twin)) {
+messenger.showSnackBar(
+SnackBar(content: Text('Another student already has ID $newNo.')));
+return;
+}
+}
+final svc = SchoolService();
+await svc.updateStudent(widget.student.id, newName, newPhones);
+if (newNo != oldNo) {
+await col
+    .doc(widget.student.id)
+    .update({'studentNo': newNo, 'studentNoAuto': false});
+}
+if (twin != null) {
+try {
+await svc.updateStudent(twin, newName, newPhones);
+} catch (_) {} // the twin copy is optional
+}
+messenger.showSnackBar(const SnackBar(content: Text('Student updated')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+}
+}
+
+Future<void> _moveSection() async {
+final messenger = ScaffoldMessenger.of(context);
+final from = widget.section;
+final all = await SchoolService().watchSections().first;
+final targets = [
+for (final x in all)
+if (x.form == from.form && x.id != from.id) x
+];
+if (!mounted) return;
+if (targets.isEmpty) {
+messenger.showSnackBar(
+SnackBar(content: Text('There is no other section in ${from.form}.')));
+return;
+}
+final to = await showDialog<SectionInfo>(
+context: context,
+builder: (ctx) => SimpleDialog(
+title: Text('Move "${widget.student.name}" to...'),
+children: [
+for (final t in targets)
+SimpleDialogOption(
+onPressed: () => Navigator.pop(ctx, t),
+child: Text(t.fullName, style: const TextStyle(fontSize: 16))),
+],
+),
+);
+if (to == null || !mounted) return;
+try {
+await SchoolService().moveStudent(widget.student.id, to.id);
+if (!mounted) return;
+Navigator.pop(context); // this page still shows the old section
+messenger.showSnackBar(SnackBar(content: Text('Moved to ${to.fullName}')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+}
+}
+
+// results
+Future<void> _editResult(String exam) async {
+await _openResultEditor(
+context, widget.student, widget.section.fullName, exam,
+form: widget.section.form);
+if (mounted) setState(() => _resFuture = _loadResults());
+}
+
+Future<void> _addResult() async {
+final pick = await showDialog<String>(
+context: context,
+builder: (ctx) => SimpleDialog(
+title: const Text('Choose the exam'),
+children: [
+for (final e in appSettings.value.examOptions)
+SimpleDialogOption(
+onPressed: () => Navigator.pop(ctx, e),
+child:
+Text(appSettings.value.isExamOpen(e) ? e : '$e (closed)')),
+],
+),
+);
+if (pick != null) await _editResult(pick);
+}
+
+// attendance
+Future<void> _editDayMarks(List<_AttEntry> list) async {
+String k(_AttEntry e) => '${e.docId}|${e.sid}';
+final marks = {
+for (final e in list) k(e): e.mark == 'late' ? 'present' : e.mark
+};
+final d = _parse(list.first.dateKey);
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
+title: Text(d == null
+? list.first.dateKey
+    : DateFormat('EEE, MMM d, yyyy').format(d)),
+content: SizedBox(
+width: 400,
+child: SingleChildScrollView(
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+for (final e in list)
+Padding(
+padding: const EdgeInsets.symmetric(vertical: 6),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(e.subject.isEmpty ? 'Whole day' : e.subject,
+style:
+const TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 4),
+SegmentedButton<String>(
+showSelectedIcon: false,
+segments: const [
+ButtonSegment(
+value: 'present', label: Text('Present')),
+ButtonSegment(
+value: 'absent', label: Text('Absent')),
+ButtonSegment(
+value: 'remove', label: Text('Remove')),
+],
+selected: {marks[k(e)]!},
+onSelectionChanged: (v) =>
+setD(() => marks[k(e)] = v.first),
+),
+]),
+),
+]),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Save')),
+],
+),
+),
+);
+if (ok != true || !mounted) return;
+final messenger = ScaffoldMessenger.of(context);
+try {
+final col = FirebaseFirestore.instance.collection('attendance');
+final batch = FirebaseFirestore.instance.batch();
+var n = 0;
+for (final e in list) {
+final v = marks[k(e)]!;
+if (e.docId.isEmpty || v == e.mark) continue;
+batch.update(col.doc(e.docId), {
+'records.${e.sid}':
+v == 'remove' ? FieldValue.delete() : v,
+});
+n++;
+}
+if (n > 0) await batch.commit();
+if (!mounted) return;
+setState(() => _attFuture = _loadAttendance());
+messenger.showSnackBar(SnackBar(
+content: Text(n == 0 ? 'Nothing changed' : 'Attendance updated')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+}
+}
+
+Future<void> _addAttendance() async {
+var date = DateTime.now();
+var subject = '';
+var mark = 'present';
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
+title: const Text('Add attendance'),
+content: SizedBox(
+width: 380,
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+OutlinedButton.icon(
+onPressed: () async {
+final p = await showDatePicker(
+context: ctx,
+initialDate: date,
+firstDate: DateTime(2020),
+lastDate: DateTime.now().add(const Duration(days: 365)),
+);
+if (p != null) setD(() => date = p);
+},
+icon: const Icon(Icons.calendar_today, size: 18),
+label: Text(DateFormat('EEE, MMM d, yyyy').format(date)),
+style: OutlinedButton.styleFrom(
+minimumSize: const Size(double.infinity, 44)),
+),
+const SizedBox(height: 12),
+DropdownButtonFormField<String>(
+value: subject,
+isExpanded: true,
+decoration: const InputDecoration(
+labelText: 'Subject',
+border: OutlineInputBorder(),
+isDense: true),
+items: [
+const DropdownMenuItem(value: '', child: Text('Whole day')),
+for (final s in ExamService.subjects)
+DropdownMenuItem(value: s, child: Text(s)),
+],
+onChanged: (v) => setD(() => subject = v ?? ''),
+),
+const SizedBox(height: 12),
+SegmentedButton<String>(
+showSelectedIcon: false,
+segments: const [
+ButtonSegment(value: 'present', label: Text('Present')),
+ButtonSegment(value: 'absent', label: Text('Absent')),
+],
+selected: {mark},
+onSelectionChanged: (v) => setD(() => mark = v.first),
+),
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Save')),
+],
+),
+),
+);
+if (ok != true || !mounted) return;
+final messenger = ScaffoldMessenger.of(context);
+try {
+final key = DateFormat('yyyy-MM-dd').format(date);
+final id = SchoolService()._attId(widget.student.sectionId, key, subject);
+await FirebaseFirestore.instance.collection('attendance').doc(id).set({
+'sectionId': widget.student.sectionId,
+'date': key,
+'subject': subject,
+'records': {widget.student.id: mark},
+'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+'updatedAt': FieldValue.serverTimestamp(),
+}, SetOptions(merge: true));
+if (!mounted) return;
+setState(() => _attFuture = _loadAttendance());
+messenger.showSnackBar(const SnackBar(content: Text('Attendance added')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+}
+}
+
+Widget _overview() {
+final sec = widget.section;
+return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+stream: _docStream,
+builder: (context, snap) {
+final m = snap.data?.data() ?? {};
+final linked = (m['accountUid'] is String) &&
+(m['accountUid'] as String).isNotEmpty;
+final hasPhone = '${m['phone'] ?? ''}'.isNotEmpty;
+final noId = '${m['studentNo'] ?? ''}'.trim().isEmpty;
+final phones = <String>[
+if (m['phones'] is List)
+for (final p in (m['phones'] as List))
+if ('$p'.trim().isNotEmpty) '$p'.trim()
+];
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+children: [
+_statsRow(),
+const SizedBox(height: 12),
+if (_admin) _adminBar(m),
+_box('Class & section', Icons.groups_outlined, [
+_kv(Icons.school_outlined, 'Form', _val(sec.form)),
+_kv(Icons.class_outlined, 'Class',
+_val(SectionInfo.code(sec.form, sec.classKey))),
+FutureBuilder<_RealSection>(
+future: _secFuture,
+builder: (context, s) {
+final r = s.data;
+final real = r?.sec;
+final Widget secVal = s.connectionState != ConnectionState.done
+? _val('…')
+    : real != null
+? Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+_val('Section ${real.subName}'),
+Text(real.fullName,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+])
+    : _val(r != null && r.classDivided
+? 'Not placed in a section yet'
+    : 'Whole class (no sections)');
+return Column(children: [
+_kv(Icons.groups_outlined, 'Section', secVal),
+if (r != null && r.size != null)
+_kv(Icons.people_outline, 'Students here',
+_val('${r.size} in ${(real ?? sec).fullName}')),
+]);
+},
+),
+]),
+_box('Contact', Icons.phone_outlined, [
+if (phones.isEmpty)
+_kv(Icons.phone_outlined, 'Phone number', _val('Not saved'))
+else
+for (var i = 0; i < phones.length; i++)
+_kv(Icons.phone_outlined, i == 0 ? 'Phone number(s)' : '',
+_val(phones[i])),
+]),
+_box('Login', Icons.key_outlined, [
+_kv(
+Icons.person_outline,
+'Username / password',
+_val(!hasPhone
+? 'No phone number, cannot log in'
+    : '${m['phone']}  (same for both)')),
+_kv(
+Icons.link,
+'Student account',
+Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+runSpacing: 4,
+children: [
+linked
+? _tag('Linked', kGreen, icon: Icons.check_circle)
+    : _tag('Not linked', kLate, icon: Icons.link_off),
+if (!linked && hasPhone)
+_smallBtn(Icons.key, 'Create login', () {
+runAccountCreation(context,
+ids: [widget.student.id], quiet: true);
+}),
+]),
+),
+]),
+_box('Record', Icons.badge_outlined, [
+_kv(
+Icons.tag,
+'Student ID',
+noId
+? Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+runSpacing: 4,
+children: [
+_val('Not set yet'),
+_smallBtn(Icons.auto_fix_high, 'Generate', () async {
+final messenger = ScaffoldMessenger.of(context);
+try {
+await SchoolService()
+    .generateStudentNo(widget.student.id);
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content:
+Text('Could not generate the ID: $e')));
+}
+}),
+])
+    : _val('${m['studentNo']}'.trim())),
+_kv(Icons.event_available_outlined, 'Added',
+_val(_fmtDate(m['createdAt'] as Timestamp?))),
+if (m['updatedAt'] != null)
+_kv(Icons.update, 'Last updated',
+_val(_fmtDate(m['updatedAt'] as Timestamp?))),
+]),
+],
+);
+},
+);
+}
+>>>>>>> 3ac1bf1 (update)
 
 // ---------------- results tab ----------------
   Widget _overallCard(List<_ExamView> views) {
@@ -15767,6 +16258,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       );
     }
 
+<<<<<<< HEAD
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       elevation: 0,
@@ -15860,6 +16352,101 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       ),
     );
   }
+=======
+return Card(
+margin: const EdgeInsets.only(bottom: 12),
+elevation: 0,
+color: Colors.white,
+clipBehavior: Clip.antiAlias,
+shape: _kSettingsCardShape,
+child: Theme(
+data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+child: ExpansionTile(
+initiallyExpanded: expanded,
+tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+expandedCrossAxisAlignment: CrossAxisAlignment.start,
+leading: v.cheatedAll
+? Container(
+width: 42,
+height: 42,
+decoration: BoxDecoration(
+shape: BoxShape.circle,
+color: kCheatColor.withAlpha(30),
+border: Border.all(color: kCheatColor, width: 2)),
+child: const Icon(Icons.gavel, size: 20, color: kCheatColor),
+)
+    : g == null
+? const Icon(Icons.hourglass_empty, color: Colors.black38)
+    : _gradeBadge(g, 42),
+title: Row(children: [
+Flexible(
+child: Text(v.exam,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 15.5, fontWeight: FontWeight.w700))),
+if (!v.open) ...[
+const SizedBox(width: 8),
+_tag('Closed', Colors.blueGrey),
+],
+]),
+subtitle: Text(
+v.cheatedAll
+? 'Marked as cheated'
+    : avg == null
+? 'No marks counted'
+    : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}'
+'${belowMin ? ' · below min' : ''}',
+style: TextStyle(
+fontSize: 12.5,
+color: belowMin || v.cheatedAll ? kRed : Colors.black54,
+fontWeight:
+belowMin || v.cheatedAll ? FontWeight.w700 : FontWeight.w400)),
+children: [
+if (v.cheatedAll)
+_note('Marked as cheated in all subjects. No mark counts.')
+else if (v.cheatedSubs.isNotEmpty)
+_note('Cheated in ${v.cheatedSubs.join(', ')}. '
+'Those marks are not counted.'),
+for (final sub in subs) subjectRow(sub),
+if (_admin)
+Align(
+alignment: Alignment.centerRight,
+child: TextButton.icon(
+onPressed: () => _editResult(v.exam),
+icon: const Icon(Icons.edit, size: 16),
+label: const Text('Edit marks'),
+),
+),
+if (!v.cheatedAll && avg != null) ...[
+const Divider(height: 18),
+Row(children: [
+const Expanded(
+child: Text('Total',
+style: TextStyle(fontWeight: FontWeight.w700))),
+Text(
+'${_fmtMark(v.total)}'
+'${limits.totalMax > 0 ? ' / ${_fmtMark(limits.totalMax)}' : ''}',
+style: TextStyle(
+fontWeight: FontWeight.w800,
+color: belowMin ? kRed : Colors.black87)),
+]),
+const SizedBox(height: 4),
+Row(children: [
+const Expanded(
+child: Text('Average',
+style: TextStyle(fontWeight: FontWeight.w700))),
+Text('${_f1(avg)}  ·  Grade $g',
+style: TextStyle(
+fontWeight: FontWeight.w800, color: _gradeColor(g!))),
+]),
+],
+],
+),
+),
+);
+}
+>>>>>>> 3ac1bf1 (update)
 
   Widget _note(String t) => Container(
     width: double.infinity,
@@ -15880,6 +16467,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     ]),
   );
 
+<<<<<<< HEAD
   Widget _resultsTab() => FutureBuilder<Map<String, ResultMarks>>(
     future: _resFuture,
     builder: (context, snap) {
@@ -15978,6 +16566,106 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       );
     },
   );
+=======
+Widget _resultsTab() => FutureBuilder<Map<String, ResultMarks>>(
+future: _resFuture,
+builder: (context, snap) {
+if (snap.hasError) {
+return _msg('Could not load results: ${snap.error}', Icons.error_outline);
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+return ValueListenableBuilder<Map<String, Map<String, CheatEntry>>>(
+valueListenable: CheatService.byExam,
+builder: (context, _, __) {
+final views = _views(snap.data!);
+if (views.isEmpty && _admin) {
+return Column(children: [
+Padding(
+padding: const EdgeInsets.all(16),
+child: Align(
+alignment: Alignment.centerLeft,
+child: FilledButton.tonalIcon(
+onPressed: _addResult,
+icon: const Icon(Icons.add),
+label: const Text('Add / edit exam result'),
+),
+),
+),
+Expanded(
+child: _msg('No results yet for this student.',
+Icons.emoji_events_outlined)),
+]);
+}
+if (views.isEmpty) {
+return _msg('No results yet for this student.',
+Icons.emoji_events_outlined);
+}
+return RefreshIndicator(
+onRefresh: () async {
+setState(() => _resFuture = _loadResults());
+await _resFuture;
+},
+child: ListView(
+physics: const AlwaysScrollableScrollPhysics(),
+padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+children: [
+if (_admin) ...[
+Align(
+alignment: Alignment.centerLeft,
+child: FilledButton.tonalIcon(
+onPressed: _addResult,
+icon: const Icon(Icons.add),
+label: const Text('Add / edit exam result'),
+),
+),
+const SizedBox(height: 10),
+],
+_overallCard(views),
+for (var i = 0; i < views.length; i++)
+_examCard(views[i], i == 0),
+],
+),
+);
+},
+);
+},
+);
+
+// ---------------- attendance tab ----------------
+Widget _attendanceTab() => FutureBuilder<List<_AttEntry>>(
+future: _attFuture,
+builder: (context, snap) {
+if (snap.hasError) {
+return _msg('Could not load attendance: ${snap.error}', Icons.error_outline);
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+children: [
+if (_admin)
+Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: Align(
+alignment: Alignment.centerLeft,
+child: FilledButton.tonalIcon(
+onPressed: _addAttendance,
+icon: const Icon(Icons.add),
+label: const Text('Add attendance'),
+),
+),
+),
+_summary(snap.data!),
+_generalNote(),
+_history(snap.data!),
+],
+);
+},
+);
+>>>>>>> 3ac1bf1 (update)
 
   /// The same student can exist twice (whole class + divided section, the
   /// "twin"). The general note is kept on BOTH records, so it shows (and stays)
@@ -16206,6 +16894,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       ));
     }
 // Short list: ONE row per day (the subjects of that day are joined).
+<<<<<<< HEAD
     final byDay = <String, List<_AttEntry>>{};
     for (final e in shown) {
       byDay.putIfAbsent(e.dateKey, () => []).add(e);
@@ -16306,6 +16995,108 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               crossAxisAlignment: CrossAxisAlignment.start, children: children),
         ));
   }
+=======
+final byDay = <String, List<_AttEntry>>{};
+for (final e in shown) {
+byDay.putIfAbsent(e.dateKey, () => []).add(e);
+}
+String cap(String m) => m.isEmpty ? '' : m[0].toUpperCase() + m.substring(1);
+String subj(_AttEntry e) => e.subject.isEmpty ? 'Whole day' : e.subject;
+String? lastMonth;
+for (final day in byDay.entries) {
+final d = _parse(day.key);
+final month = d == null ? 'Unknown date' : DateFormat('MMMM yyyy').format(d);
+if (month != lastMonth) {
+lastMonth = month;
+children.add(Padding(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 2),
+child: Text(month,
+style: const TextStyle(
+fontWeight: FontWeight.w700, color: Colors.black54)),
+));
+}
+final list = day.value;
+final marks = list.map((e) => e.mark).toSet();
+final uniform = marks.length == 1;
+final nAbsent = list.where((e) => e.mark == 'absent').length;
+final nLate = list.where((e) => e.mark == 'late').length;
+final c = nAbsent > 0 ? kRed : (nLate > 0 ? kLate : kGreen);
+final String subtitle;
+final String trailing;
+if (uniform) {
+subtitle = list.map(subj).join(', ');
+trailing = cap(marks.first);
+} else {
+subtitle = [
+for (final m in ['absent', 'late', 'present'])
+if (list.any((e) => e.mark == m))
+'${cap(m)}: ${list.where((e) => e.mark == m).map(subj).join(', ')}',
+].join(' · ');
+trailing = nAbsent > 0 ? '$nAbsent absent' : '$nLate late';
+}
+final dayNote = {
+for (final e in list)
+if (e.note.isNotEmpty) e.note
+}.join(' · ');
+children.add(ListTile(
+dense: true,
+onTap: () => _editDayNote(list),
+leading: Icon(nAbsent > 0 ? Icons.cancel : Icons.check_circle, color: c),
+title: Text(d == null
+? day.key
+    : DateFormat('EEE, MMM d, yyyy').format(d)),
+subtitle: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(subtitle, maxLines: 3, overflow: TextOverflow.ellipsis),
+Padding(
+padding: const EdgeInsets.only(top: 3),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(
+dayNote.isEmpty ? Icons.note_add_outlined : Icons.edit_note,
+size: 14,
+color: dayNote.isEmpty ? Colors.grey.shade600 : c),
+const SizedBox(width: 4),
+Flexible(
+child: Text(dayNote.isEmpty ? 'Add note' : dayNote,
+maxLines: 3,
+overflow: TextOverflow.ellipsis,
+style: TextStyle(
+fontSize: 12,
+fontStyle: dayNote.isEmpty
+? FontStyle.normal
+    : FontStyle.italic,
+color: dayNote.isEmpty
+? Colors.grey.shade600
+    : Colors.grey.shade800))),
+]),
+),
+],
+),
+trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+Text(trailing,
+style: TextStyle(color: c, fontWeight: FontWeight.w700)),
+if (_admin)
+IconButton(
+tooltip: 'Edit marks',
+icon: const Icon(Icons.edit_calendar_outlined, size: 20),
+onPressed: () => _editDayMarks(list),
+),
+]),
+));
+}
+return Card(
+margin: EdgeInsets.zero,
+elevation: 0,
+color: Colors.white,
+shape: _kSettingsCardShape,
+child: Padding(
+padding: const EdgeInsets.only(bottom: 8),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start, children: children),
+));
+}
+>>>>>>> 3ac1bf1 (update)
 
   @override
   Widget build(BuildContext context) {
@@ -22629,6 +23420,7 @@ class _CheatPanelState extends State<_CheatPanel> {
     }
   }
 
+<<<<<<< HEAD
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<Map<String, Map<String, CheatEntry>>>(
@@ -22648,6 +23440,27 @@ class _CheatPanelState extends State<_CheatPanel> {
           stream: UserProfile.watchMine(),
           builder: (context, ps) {
             final admin = ps.data?.fullAccess == true;
+=======
+@override
+Widget build(BuildContext context) {
+return ValueListenableBuilder<Map<String, Map<String, CheatEntry>>>(
+valueListenable: CheatService.byExam,
+builder: (context, all, _) {
+final list = (all[widget.exam]?.values.toList() ?? <CheatEntry>[])
+..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+final seen = <String>{};
+final allEntries = <CheatEntry>[];
+for (final e in list) {
+final t = widget.twins[e.id];
+if (t != null && seen.contains(t)) continue; // twin record
+seen.add(e.id);
+allEntries.add(e);
+}
+return StreamBuilder<UserProfile>(
+stream: UserProfile.watchMine(),
+builder: (context, ps) {
+final admin = ps.data?.fullAccess == true;
+>>>>>>> 3ac1bf1 (update)
 // a teacher only sees students cheated in a subject they teach
             final entries = admin
                 ? allEntries
@@ -24526,6 +25339,7 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
   bool _saving = false;
   String? _error;
 
+<<<<<<< HEAD
   @override
   void initState() {
     super.initState();
@@ -24546,6 +25360,28 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
             c.text = _fmtMark(v);
           }
         });
+=======
+@override
+void initState() {
+super.initState();
+UserProfile.watchMine().first.then((p) {
+if (mounted) setState(() => _admin = p.fullAccess);
+}).catchError((_) {});
+_service.get(widget.student.id, widget.exam, raw: true).then((r) async {
+var absent = <String, Set<String>>{};
+try {
+absent = await _service.absentSubjects(
+[widget.student.id], _ctrl.keys.toList());
+} catch (_) {} // no access to attendance: no pre-fill
+if (!mounted) return;
+setState(() {
+r.marks.forEach((k, v) {
+final c = _ctrl[k]; if (c == null || r.cheatedSubs.contains(k)) { _hidden[k] = v;
+} else {
+c.text = _fmtMark(v);
+}
+});
+>>>>>>> 3ac1bf1 (update)
 // in the cheating list: every field shows Cheated (locked, never saved)
         if (CheatService.isCheated(widget.exam, widget.student.id)) {
           for (final c in _ctrl.values) {
@@ -25638,6 +26474,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
         if (mine.hasError) {
 // Usually the Firestore rule for "users" is missing: say so instead
 // of hiding the card.
+<<<<<<< HEAD
           return Padding(
             padding: const EdgeInsets.only(bottom: 12),
             child: Card(
@@ -25809,6 +26646,179 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                         }
                         final accounts =
                         snap.data!.docs.map(UserProfile.fromDoc).toList();
+=======
+return Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: Card(
+margin: EdgeInsets.zero,
+color: const Color(0xFFFFF4E5),
+child: Padding(
+padding: const EdgeInsets.all(16),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Row(children: [
+Icon(Icons.admin_panel_settings,
+size: 20, color: kBlue),
+SizedBox(width: 8),
+Text('Users & permissions',
+style: TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+const SizedBox(height: 8),
+const Text(
+'The users list cannot be read. In the Firebase '
+'console (Firestore > Rules) add this line inside '
+'"match /databases/{database}/documents", '
+'publish, then reopen Settings:',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 6),
+const SelectableText(
+'match /users/{docId} { allow read, write: if request.auth != null; }',
+style:
+TextStyle(fontFamily: 'monospace', fontSize: 12)),
+const SizedBox(height: 6),
+Text('${mine.error}',
+style: const TextStyle(
+fontSize: 11, color: Colors.black54)),
+],
+),
+),
+),
+);
+}
+if (mine.data?.fullAccess != true) return const SizedBox.shrink();
+if (!_teachersSynced) {
+// Every teacher / staff member in Teachers must be in this list.
+_teachersSynced = true;
+TeacherService().syncAllUsers();
+}
+final users = FirebaseFirestore.instance.collection('users');
+return Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: Card(
+margin: EdgeInsets.zero,
+elevation: 0,
+color: Colors.white,
+shape: _kSettingsCardShape,
+child: Padding(
+padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+if (widget.part == 0) ...[
+const Row(children: [
+Icon(Icons.admin_panel_settings, size: 20, color: kBlue),
+SizedBox(width: 8),
+Text('Users & permissions',
+style: TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+const SizedBox(height: 8),
+const Text(
+'Choose which pages each user can see. Administrators '
+'always see everything. Users only see the pages '
+'ticked for them.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+const SizedBox(height: 14),
+],
+if (widget.part != 1) ...[
+const Text('Default access for new accounts',
+style: TextStyle(fontWeight: FontWeight.w600)),
+if (widget.part == 2)
+const Padding(
+padding: EdgeInsets.only(top: 2),
+child: Text(
+'The pages a new teacher, student or student-affairs account '
+'can open. You can still change them for each user.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+),
+const SizedBox(height: 8),
+ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Text('Teachers',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.teacherAccess,
+(v) => _run(context,
+() => appSettings.update({'teacherAccess': v}))),
+const SizedBox(height: 10),
+const Text('Students',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.studentAccess,
+(v) => _run(context,
+() => appSettings.update({'studentAccess': v}))),
+const SizedBox(height: 10),
+const Text('Student affairs',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+const SizedBox(height: 4),
+_pageChips(
+st.affairsAccess,
+(v) => _run(context,
+() => appSettings.update({'affairsAccess': v}))),
+],
+),
+),
+],
+if (widget.part == 0) const Divider(height: 28),
+if (widget.part != 2) ...[
+if (widget.part == 0) ...[
+const Text('Users',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+],
+TextField(
+controller: _search,
+onChanged: (_) => setState(() {}),
+decoration: InputDecoration(
+hintText: 'Search name, phone or email',
+prefixIcon: const Icon(Icons.search),
+suffixIcon: _search.text.isEmpty
+? null
+    : IconButton(
+icon: const Icon(Icons.clear),
+onPressed: () => setState(_search.clear)),
+border: const OutlineInputBorder(),
+isDense: true,
+),
+),
+const SizedBox(height: 8),
+Wrap(spacing: 8, runSpacing: 4, children: [
+for (final r in ['all', ...UserProfile.roles, 'unapproved'])
+ChoiceChip(
+label: Text(
+r == 'all'
+? 'All roles'
+    : r == 'unapproved'
+? 'Unapproved'
+    : UserProfile.roleLabel(r)),
+selected: _roleFilter == r,
+onSelected: (_) => setState(() => _roleFilter = r),
+),
+]),
+const SizedBox(height: 4),
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: users.snapshots(),
+builder: (context, snap) {
+if (snap.hasError) {
+return Text('Error: ${snap.error}');
+}
+if (!snap.hasData) {
+return const Padding(
+padding: EdgeInsets.all(12),
+child: Center(child: CircularProgressIndicator()),
+);
+}
+final accounts =
+snap.data!.docs.map(UserProfile.fromDoc).toList();
+>>>>>>> 3ac1bf1 (update)
 // Everybody in Teachers must be here too: a teacher /
 // staff member without an account yet is listed as
 // "not signed in yet" (set up now, linked at the first
@@ -25961,6 +26971,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
     final r = rec;
     final phone = u.phone.isNotEmpty ? u.phone : (r?.phone ?? '');
 // a student's email is just the phone number: show it once
+<<<<<<< HEAD
     final shownEmail = u.email.endsWith('@$kStudentEmailDomain') ? '' : u.email;
     return ExpansionTile(
       tilePadding: EdgeInsets.zero,
@@ -26117,6 +27128,164 @@ class _PermissionsCardState extends State<_PermissionsCard> {
       ],
     );
   }
+=======
+final shownEmail = u.email.endsWith('@$kStudentEmailDomain') ? '' : u.email;
+return ExpansionTile(
+tilePadding: EdgeInsets.zero,
+childrenPadding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
+expandedCrossAxisAlignment: CrossAxisAlignment.start,
+leading: CircleAvatar(
+child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
+),
+title: Text(isMe ? '$title (you)' : title),
+trailing: u.approved
+? null
+    : Row(mainAxisSize: MainAxisSize.min, children: [
+if (!u.rejected)
+TextButton(
+style: TextButton.styleFrom(
+foregroundColor: Colors.red,
+visualDensity: VisualDensity.compact),
+onPressed: () => _run(context,
+() => users.doc(u.uid).update({'rejected': true})),
+child: const Text('Reject')),
+const SizedBox(width: 4),
+FilledButton.tonal(
+style: FilledButton.styleFrom(
+visualDensity: VisualDensity.compact),
+onPressed: () => _run(
+context,
+() => users.doc(u.uid).update(
+{'approved': true, 'rejected': FieldValue.delete()})),
+child: const Text('Approve')),
+]),
+subtitle: Text(
+'${UserProfile.roleLabel(u.role)}'
+'${u.pending ? ' (not signed in yet)' : ''}'
+'${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
+'${u.fullAccess ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
+'${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
+'${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
+style: const TextStyle(fontSize: 12),
+),
+children: [
+if (!u.approved && !u.rejected && !isMe)
+Align(
+alignment: Alignment.centerLeft,
+child: Padding(
+padding: const EdgeInsets.only(bottom: 8),
+child: OutlinedButton.icon(
+icon: const Icon(Icons.block, size: 18),
+label: const Text('Reject sign up'),
+onPressed: () => _run(context,
+() => users.doc(u.uid).update({'rejected': true})),
+),
+),
+),
+if (isMe)
+const Padding(
+padding: EdgeInsets.only(bottom: 8),
+child: Text('This is your own account, so it cannot be changed '
+'here (you cannot lock yourself out).',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+),
+DropdownButtonFormField<String>(
+value: u.role,
+decoration: const InputDecoration(
+labelText: 'Role', border: OutlineInputBorder(), isDense: true),
+items: [
+for (final r in UserProfile.roles)
+DropdownMenuItem(value: r, child: Text(UserProfile.roleLabel(r))),
+],
+onChanged: isMe
+? null
+    : (v) {
+if (v == null || v == u.role) return;
+_run(context,
+() => users
+    .doc(u.uid)
+    .set({..._base(u), 'role': v}, SetOptions(merge: true)));
+},
+),
+const SizedBox(height: 12),
+Text(u.fullAccess ? 'Pages (administrators see all)' : 'Pages this user can see',
+style: const TextStyle(fontSize: 12)),
+const SizedBox(height: 6),
+_pageChips(
+eff,
+(v) => _run(context,
+() => users
+    .doc(u.uid)
+    .set({..._base(u), 'access': v}, SetOptions(merge: true))),
+enabled: !isMe && !u.fullAccess,
+),
+if (u.role != 'student') ...[
+const Divider(height: 24),
+Text('Teacher / staff details',
+style: const TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+Text(
+r == null
+? 'Not set yet: no role, subjects or forms.'
+    : '${r.role}'
+'${r.assignments.isNotEmpty ? ' · ${assignmentsText(r.assignments)}' : (r.isTeaching ? ' · no subjects yet' : ' · non-teaching staff')}',
+style: const TextStyle(
+fontSize: 13, fontWeight: FontWeight.w600, color: kBlue),
+),
+const SizedBox(height: 6),
+Align(
+alignment: Alignment.centerLeft,
+child: OutlinedButton.icon(
+icon: const Icon(Icons.edit_outlined, size: 18),
+label: Text(r == null
+? 'Set role, subjects and forms'
+    : 'Edit role, subjects and forms'),
+onPressed: () => editTeacherDialog(context,
+t: r,
+presetName: u.name,
+presetEmail: u.email,
+newId: u.uid),
+),
+),
+],
+if (!isMe && !u.fullAccess && u.access != null)
+Align(
+alignment: Alignment.centerRight,
+child: TextButton(
+onPressed: () => _run(
+context,
+() => users
+    .doc(u.uid)
+    .update({'access': FieldValue.delete()})),
+child: const Text('Use the default for this role'),
+),
+),
+if (!u.approved)
+Align(
+alignment: Alignment.centerLeft,
+child: FilledButton.icon(
+icon: const Icon(Icons.check, size: 18),
+label: const Text('Approve'),
+onPressed: () => _run(
+context,
+() => users.doc(u.uid).update(
+{'approved': true, 'rejected': FieldValue.delete()})),
+),
+),
+if (!isMe)
+Align(
+alignment: Alignment.centerRight,
+child: TextButton.icon(
+icon: const Icon(Icons.delete_outline, size: 18, color: Colors.red),
+label: const Text('Delete user',
+style: TextStyle(color: Colors.red)),
+onPressed: () => _deleteUser(context, u, r),
+),
+),
+],
+);
+}
+>>>>>>> 3ac1bf1 (update)
 }
 
 // ======================= TEACHERS / STAFF =======================
@@ -26509,6 +27678,7 @@ class TeacherService {
 /// and by Settings > Users. [presetName] / [presetEmail] / [newId] fill in a
 /// new record made from an existing user (the record id = the account id).
 Future<void> editTeacherDialog(BuildContext context,
+<<<<<<< HEAD
     {TeacherInfo? t,
       String presetName = '',
       String presetEmail = '',
@@ -26556,6 +27726,55 @@ Future<void> editTeacherDialog(BuildContext context,
   final email = TextEditingController(text: t?.email ?? presetEmail);
   var role = t?.role ?? 'Teacher';
   var allSec = t?.allSections ?? false;
+=======
+{TeacherInfo? t,
+String presetName = '',
+String presetEmail = '',
+String newId = ''}) async {
+void toast(String m) => ScaffoldMessenger.of(context)
+    .showSnackBar(SnackBar(content: Text(m)));
+// Only the administrator sets the pages and account type of a person.
+var isAdminMe = false; // administrator
+var meId = '';
+UserProfile? up; // the user of this person, when there is one
+try {
+final users = FirebaseFirestore.instance.collection('users');
+meId = FirebaseAuth.instance.currentUser?.uid ?? '';
+if (meId.isNotEmpty) {
+isAdminMe = UserProfile.fromDoc(await users.doc(meId).get()).fullAccess;
+}
+if (isAdminMe) {
+final id = t?.id ?? newId;
+if (id.isNotEmpty) {
+final d = await users.doc(id).get();
+if (d.exists) up = UserProfile.fromDoc(d);
+}
+final mail = (t?.email ?? presetEmail).trim().toLowerCase();
+if (up == null && mail.isNotEmpty) {
+final q = await users.where('email', isEqualTo: mail).limit(1).get();
+if (q.docs.isNotEmpty) up = UserProfile.fromDoc(q.docs.first);
+}
+}
+} catch (_) {}
+if (!context.mounted) return;
+final showPages = isAdminMe && up?.fullAccess != true;
+// the account type (Teacher / Student affairs / Admin) of an existing account
+final canRole = isAdminMe && up != null && up.uid != meId;
+var acctRole = up?.role ?? 'teacher';
+var roleEdited = false;
+var access = <String>[
+...(up?.access ??
+(up != null
+? up.effectiveAccess(appSettings.value)
+    : appSettings.value.teacherAccess))
+];
+var accessEdited = false;
+final name = TextEditingController(text: t?.name ?? presetName);
+final phone = TextEditingController(text: t?.phone ?? '');
+final email = TextEditingController(text: t?.email ?? presetEmail);
+var role = t?.role ?? 'Teacher';
+var allSec = t?.allSections ?? false;
+>>>>>>> 3ac1bf1 (update)
 // subject -> the forms in which it is taught
   final assign = <String, Set<String>>{
     for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
@@ -26563,6 +27782,7 @@ Future<void> editTeacherDialog(BuildContext context,
   };
   String? error, assignError;
 
+<<<<<<< HEAD
   final result = await showDialog<TeacherInfo>(
     context: context,
     builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
@@ -26845,6 +28065,290 @@ Future<void> editTeacherDialog(BuildContext context,
   } catch (e) {
     toast('Failed: $e');
   }
+=======
+final result = await showDialog<TeacherInfo>(
+context: context,
+builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+const teaching = true; // staff can also be given subjects and forms
+return AlertDialog(
+title: Text(t == null ? 'Add teacher / staff' : 'Edit teacher / staff'),
+content: SizedBox(
+width: 440,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+TextField(
+controller: name,
+autofocus: t == null,
+textCapitalization: TextCapitalization.words,
+decoration: InputDecoration(
+labelText: 'Full name',
+errorText: error,
+border: const OutlineInputBorder(),
+),
+),
+const SizedBox(height: 12),
+DropdownButtonFormField<String>(
+value: role,
+decoration: const InputDecoration(
+labelText: 'Role',
+border: OutlineInputBorder(),
+),
+items: [
+for (final r in TeacherInfo.roles)
+DropdownMenuItem(value: r, child: Text(r)),
+],
+onChanged: (v) => setD(() => role = v ?? role),
+),
+const SizedBox(height: 12),
+TextField(
+controller: phone,
+keyboardType: TextInputType.phone,
+decoration: const InputDecoration(
+labelText: 'Phone (optional)',
+border: OutlineInputBorder(),
+),
+),
+const SizedBox(height: 12),
+TextField(
+controller: email,
+keyboardType: TextInputType.emailAddress,
+decoration: const InputDecoration(
+labelText: 'Email (optional)',
+helperText:
+'The teacher signs in with this email as both email and password',
+helperMaxLines: 2,
+border: OutlineInputBorder(),
+),
+),
+if (canRole) ...[
+const SizedBox(height: 16),
+DropdownButtonFormField<String>(
+value: acctRole,
+decoration: const InputDecoration(
+labelText: 'Account type (access level)',
+helperText: 'Only Admin can open everything.',
+border: OutlineInputBorder(),
+),
+items: [
+for (final r in UserProfile.roles)
+DropdownMenuItem(value: r, child: Text(UserProfile.roleLabel(r))),
+],
+onChanged: (v) {
+if (v == null) return;
+setD(() {
+acctRole = v;
+roleEdited = true;
+});
+},
+),
+],
+if (showPages) ...[
+const SizedBox(height: 16),
+const Text('Pages this person can see',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 2),
+Text(
+up?.access == null && !accessEdited
+? 'Using the default pages for teachers. Tick to change.'
+    : 'Tick the pages this person can open.',
+style: TextStyle(
+fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 6),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final pg in AppPages.all)
+FilterChip(
+label: Text(AppPages.labels[pg]!),
+selected: access.contains(pg),
+onSelected: (on) => setD(() {
+accessEdited = true;
+access = [
+for (final x in AppPages.all)
+if (x == pg ? on : access.contains(x)) x
+];
+}),
+),
+]),
+],
+const SizedBox(height: 8),
+SwitchListTile(
+contentPadding: EdgeInsets.zero,
+value: allSec,
+onChanged: (v) => setD(() => allSec = v),
+title: const Text('Take attendance for ALL sections',
+style: TextStyle(fontWeight: FontWeight.w600)),
+subtitle: const Text(
+'Off: only the forms this person teaches. On: every form, class '
+'and section (needs the Attendance page ticked above).'),
+),
+if (teaching) ...[
+const SizedBox(height: 16),
+const Text('Subjects taught',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 6),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final sub in ExamService.subjects)
+FilterChip(
+label: Text(sub),
+selected: assign.containsKey(sub),
+onSelected: (on) => setD(() {
+assignError = null;
+if (on) {
+assign.putIfAbsent(sub, () => <String>{});
+} else {
+assign.remove(sub);
+}
+}),
+),
+]),
+if (assign.isNotEmpty) ...[
+const SizedBox(height: 16),
+const Text('Forms for each subject',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 2),
+Text(
+'Tick the forms in which the teacher teaches each subject.',
+style: TextStyle(
+fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 8),
+for (final sub in ExamService.subjects)
+if (assign.containsKey(sub))
+Container(
+width: double.infinity,
+margin: const EdgeInsets.only(bottom: 8),
+padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+decoration: BoxDecoration(
+border: Border.all(
+color: assign[sub]!.isEmpty
+? Colors.red.shade300
+    : Colors.grey.shade300),
+borderRadius: BorderRadius.circular(10),
+),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Row(children: [
+Expanded(
+child: Text(sub,
+style: const TextStyle(
+fontWeight: FontWeight.w700)),
+),
+TextButton(
+style: TextButton.styleFrom(
+visualDensity: VisualDensity.compact),
+onPressed: () => setD(() {
+assignError = null;
+assign[sub]!.length ==
+ExamService.forms.length
+? assign[sub]!.clear()
+    : assign[sub]!
+    .addAll(ExamService.forms);
+}),
+child: Text(assign[sub]!.length ==
+ExamService.forms.length
+? 'Clear'
+    : 'All forms'),
+),
+]),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final f in ExamService.forms)
+FilterChip(
+label: Text(f),
+selected: assign[sub]!.contains(f),
+onSelected: (on) => setD(() {
+assignError = null;
+on
+? assign[sub]!.add(f)
+    : assign[sub]!.remove(f);
+}),
+),
+]),
+],
+),
+),
+],
+if (assignError != null)
+Padding(
+padding: const EdgeInsets.only(top: 4),
+child: Text(assignError!,
+style: const TextStyle(color: Colors.red)),
+),
+],
+],
+),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () {
+if (name.text.trim().isEmpty) {
+setD(() => error = 'Enter the name');
+return;
+}
+if (teaching && assign.values.any((v) => v.isEmpty)) {
+setD(() => assignError =
+'Choose at least one form for every subject (or untick the subject).');
+return;
+}
+// keep the usual order; Staff have no subjects
+final asg = <String, List<String>>{
+if (teaching)
+for (final x in ExamService.subjects)
+if (assign.containsKey(x))
+x: [
+for (final f in ExamService.forms)
+if (assign[x]!.contains(f)) f
+],
+};
+Navigator.pop(
+ctx,
+TeacherInfo(
+id: t?.id ?? newId,
+name: name.text.trim(),
+role: role,
+phone: phone.text.trim(),
+email: email.text.trim(),
+subjects: asg.keys.toList(),
+forms: formsOfAssignments(asg),
+assignments: asg,
+allSections: allSec,
+),
+);
+},
+child: const Text('Save'),
+),
+],
+);
+}),
+);
+name.dispose();
+phone.dispose();
+email.dispose();
+if (result == null || !context.mounted) return;
+try {
+final savedId = await TeacherService().save(result);
+if (canRole && roleEdited) {
+await FirebaseFirestore.instance
+    .collection('users')
+    .doc(up!.uid)
+    .set({'role': acctRole}, SetOptions(merge: true));
+}
+if (showPages && accessEdited) {
+await FirebaseFirestore.instance
+    .collection('users')
+    .doc(up?.uid ?? savedId)
+    .set({'access': access}, SetOptions(merge: true));
+}
+toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
+} catch (e) {
+toast('Failed: $e');
+}
+>>>>>>> 3ac1bf1 (update)
 }
 
 class TeachersScreen extends StatefulWidget {
