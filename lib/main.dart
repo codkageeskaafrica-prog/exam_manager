@@ -14733,11 +14733,15 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
   late Future<_RealSection> _secFuture = _loadRealSection();
   String _filter = 'all'; // all | present | absent | late
   String? _twin; // the same student's record in the class <-> section twin
+  bool _admin = false;
 
   @override
   void initState() {
     super.initState();
     CheatService.start();
+    UserProfile.watchMine().first.then((p) {
+      if (mounted) setState(() => _admin = p.fullAccess);
+    }).catchError((_) {});
   }
 
   /// The real section of the student. A student of a whole class (2B) is
@@ -15146,6 +15150,350 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     ]);
   }
 
+
+  // ---------------- admin editing ----------------
+  Widget _adminBar(Map<String, dynamic> m) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Wrap(spacing: 8, runSpacing: 8, children: [
+      FilledButton.tonalIcon(
+        onPressed: () => _editProfile(m),
+        icon: const Icon(Icons.edit, size: 18),
+        label: const Text('Edit details'),
+      ),
+      OutlinedButton.icon(
+        onPressed: _moveSection,
+        icon: const Icon(Icons.swap_horiz, size: 18),
+        label: const Text('Change section / class'),
+      ),
+    ]),
+  );
+
+  Future<void> _editProfile(Map<String, dynamic> m) async {
+    final name =
+    TextEditingController(text: '${m['name'] ?? widget.student.name}');
+    final no = TextEditingController(text: '${m['studentNo'] ?? ''}');
+    final phones = TextEditingController(
+        text: m['phones'] is List
+            ? (m['phones'] as List).join(', ')
+            : '${m['phone'] ?? ''}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit student details'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: name,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                    labelText: 'Student name', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: no,
+                decoration: const InputDecoration(
+                    labelText: 'Student ID', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: phones,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: 'Phone number(s)',
+                  helperText: 'Separate several numbers with a comma. If the '
+                      'student already has a login, it keeps its old phone number.',
+                  helperMaxLines: 3,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ]),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    final newName = name.text.trim();
+    final newNo = cleanStudentNo(no.text);
+    final newPhones = phones.text;
+    name.dispose();
+    no.dispose();
+    phones.dispose();
+    if (ok != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (newName.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('Enter the name.')));
+      return;
+    }
+    try {
+      final col = FirebaseFirestore.instance.collection('students');
+      final twin = await _twinId;
+      final oldNo = '${m['studentNo'] ?? ''}'.trim();
+      if (newNo.isNotEmpty && newNo != oldNo) {
+        final q = await col.where('studentNo', isEqualTo: newNo).get();
+        if (q.docs.any((d) => d.id != widget.student.id && d.id != twin)) {
+          messenger.showSnackBar(
+              SnackBar(content: Text('Another student already has ID $newNo.')));
+          return;
+        }
+      }
+      final svc = SchoolService();
+      await svc.updateStudent(widget.student.id, newName, newPhones);
+      if (newNo != oldNo) {
+        await col
+            .doc(widget.student.id)
+            .update({'studentNo': newNo, 'studentNoAuto': false});
+      }
+      if (twin != null) {
+        try {
+          await svc.updateStudent(twin, newName, newPhones);
+        } catch (_) {} // the twin copy is optional
+      }
+      messenger.showSnackBar(const SnackBar(content: Text('Student updated')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  Future<void> _moveSection() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final from = widget.section;
+    final all = await SchoolService().watchSections().first;
+    final targets = [
+      for (final x in all)
+        if (x.form == from.form && x.id != from.id) x
+    ];
+    if (!mounted) return;
+    if (targets.isEmpty) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('There is no other section in ${from.form}.')));
+      return;
+    }
+    final to = await showDialog<SectionInfo>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Move "${widget.student.name}" to...'),
+        children: [
+          for (final t in targets)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, t),
+                child: Text(t.fullName, style: const TextStyle(fontSize: 16))),
+        ],
+      ),
+    );
+    if (to == null || !mounted) return;
+    try {
+      await SchoolService().moveStudent(widget.student.id, to.id);
+      if (!mounted) return;
+      Navigator.pop(context); // this page still shows the old section
+      messenger.showSnackBar(SnackBar(content: Text('Moved to ${to.fullName}')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  // results
+  Future<void> _editResult(String exam) async {
+    await _openResultEditor(
+        context, widget.student, widget.section.fullName, exam,
+        form: widget.section.form);
+    if (mounted) setState(() => _resFuture = _loadResults());
+  }
+
+  Future<void> _addResult() async {
+    final pick = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Choose the exam'),
+        children: [
+          for (final e in appSettings.value.examOptions)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, e),
+                child:
+                Text(appSettings.value.isExamOpen(e) ? e : '$e (closed)')),
+        ],
+      ),
+    );
+    if (pick != null) await _editResult(pick);
+  }
+
+  // attendance
+  Future<void> _editDayMarks(List<_AttEntry> list) async {
+    String k(_AttEntry e) => '${e.docId}|${e.sid}';
+    final marks = {
+      for (final e in list) k(e): e.mark == 'late' ? 'present' : e.mark
+    };
+    final d = _parse(list.first.dateKey);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text(d == null
+              ? list.first.dateKey
+              : DateFormat('EEE, MMM d, yyyy').format(d)),
+          content: SizedBox(
+            width: 400,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                for (final e in list)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(e.subject.isEmpty ? 'Whole day' : e.subject,
+                              style:
+                              const TextStyle(fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 4),
+                          SegmentedButton<String>(
+                            showSelectedIcon: false,
+                            segments: const [
+                              ButtonSegment(
+                                  value: 'present', label: Text('Present')),
+                              ButtonSegment(
+                                  value: 'absent', label: Text('Absent')),
+                              ButtonSegment(
+                                  value: 'remove', label: Text('Remove')),
+                            ],
+                            selected: {marks[k(e)]!},
+                            onSelectionChanged: (v) =>
+                                setD(() => marks[k(e)] = v.first),
+                          ),
+                        ]),
+                  ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final col = FirebaseFirestore.instance.collection('attendance');
+      final batch = FirebaseFirestore.instance.batch();
+      var n = 0;
+      for (final e in list) {
+        final v = marks[k(e)]!;
+        if (e.docId.isEmpty || v == e.mark) continue;
+        batch.update(col.doc(e.docId), {
+          FieldPath(['records', e.sid]):
+          v == 'remove' ? FieldValue.delete() : v,
+        });
+        n++;
+      }
+      if (n > 0) await batch.commit();
+      if (!mounted) return;
+      setState(() => _attFuture = _loadAttendance());
+      messenger.showSnackBar(SnackBar(
+          content: Text(n == 0 ? 'Nothing changed' : 'Attendance updated')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  Future<void> _addAttendance() async {
+    var date = DateTime.now();
+    var subject = '';
+    var mark = 'present';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Add attendance'),
+          content: SizedBox(
+            width: 380,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final p = await showDatePicker(
+                    context: ctx,
+                    initialDate: date,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime.now().add(const Duration(days: 365)),
+                  );
+                  if (p != null) setD(() => date = p);
+                },
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(DateFormat('EEE, MMM d, yyyy').format(date)),
+                style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 44)),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: subject,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Subject',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('Whole day')),
+                  for (final s in ExamService.subjects)
+                    DropdownMenuItem(value: s, child: Text(s)),
+                ],
+                onChanged: (v) => setD(() => subject = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'present', label: Text('Present')),
+                  ButtonSegment(value: 'absent', label: Text('Absent')),
+                ],
+                selected: {mark},
+                onSelectionChanged: (v) => setD(() => mark = v.first),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final key = DateFormat('yyyy-MM-dd').format(date);
+      final id = SchoolService()._attId(widget.student.sectionId, key, subject);
+      await FirebaseFirestore.instance.collection('attendance').doc(id).set({
+        'sectionId': widget.student.sectionId,
+        'date': key,
+        'subject': subject,
+        'records': {widget.student.id: mark},
+        'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      if (!mounted) return;
+      setState(() => _attFuture = _loadAttendance());
+      messenger.showSnackBar(const SnackBar(content: Text('Attendance added')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
   Widget _overview() {
     final sec = widget.section;
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -15166,6 +15514,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
           children: [
             _statsRow(),
             const SizedBox(height: 12),
+            if (_admin) _adminBar(m),
             _box('Class & section', Icons.groups_outlined, [
               _kv(Icons.school_outlined, 'Form', _val(sec.form)),
               _kv(Icons.class_outlined, 'Class',
@@ -15474,6 +15823,15 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               _note('Cheated in ${v.cheatedSubs.join(', ')}. '
                   'Those marks are not counted.'),
             for (final sub in subs) subjectRow(sub),
+            if (_admin)
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () => _editResult(v.exam),
+                  icon: const Icon(Icons.edit, size: 16),
+                  label: const Text('Edit marks'),
+                ),
+              ),
             if (!v.cheatedAll && avg != null) ...[
               const Divider(height: 18),
               Row(children: [
@@ -15535,6 +15893,24 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         valueListenable: CheatService.byExam,
         builder: (context, _, __) {
           final views = _views(snap.data!);
+          if (views.isEmpty && _admin) {
+            return Column(children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.tonalIcon(
+                    onPressed: _addResult,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Add / edit exam result'),
+                  ),
+                ),
+              ),
+              Expanded(
+                  child: _msg('No results yet for this student.',
+                      Icons.emoji_events_outlined)),
+            ]);
+          }
           if (views.isEmpty) {
             return _msg('No results yet for this student.',
                 Icons.emoji_events_outlined);
@@ -15548,6 +15924,17 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
               children: [
+                if (_admin) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: FilledButton.tonalIcon(
+                      onPressed: _addResult,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add / edit exam result'),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 _overallCard(views),
                 for (var i = 0; i < views.length; i++)
                   _examCard(views[i], i == 0),
@@ -15571,7 +15958,23 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       }
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
-        children: [_summary(snap.data!), _generalNote(), _history(snap.data!)],
+        children: [
+          if (_admin)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonalIcon(
+                  onPressed: _addAttendance,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add attendance'),
+                ),
+              ),
+            ),
+          _summary(snap.data!),
+          _generalNote(),
+          _history(snap.data!),
+        ],
       );
     },
   );
@@ -15880,8 +16283,16 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
             ),
           ],
         ),
-        trailing: Text(trailing,
-            style: TextStyle(color: c, fontWeight: FontWeight.w700)),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(trailing,
+              style: TextStyle(color: c, fontWeight: FontWeight.w700)),
+          if (_admin)
+            IconButton(
+              tooltip: 'Edit marks',
+              icon: const Icon(Icons.edit_calendar_outlined, size: 20),
+              onPressed: () => _editDayMarks(list),
+            ),
+        ]),
       ));
     }
     return Card(
