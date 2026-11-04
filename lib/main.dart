@@ -17826,7 +17826,11 @@ class _FinanceScreenState extends State<FinanceScreen> {
 final _service = SchoolService();
 late final Stream<List<SectionInfo>> _secStream = _service.watchSections();
 final _col = FirebaseFirestore.instance.collection('payments');
-String? _sectionId;
+/// The class picked in the list. [_allId] = every class (the default).
+static const _allId = '__all__';
+String? _sectionId = _allId;
+late final Stream<List<StudentInfo>> _allStudents =
+_service.watchAllStudents().asBroadcastStream();
 DateTime _month = DateTime(DateTime.now().year, DateTime.now().month);
 int _filter = -1; // -1 all, 0 unpaid, 1 partial, 2 paid
 String _search = '';
@@ -17885,7 +17889,7 @@ final uid = FirebaseAuth.instance.currentUser?.uid;
 void add(String month, double amount, double disc) {
 batch.set(_col.doc(), {
 'studentId': s.id,
-'sectionId': _sectionId ?? '',
+'sectionId': s.sectionId,
 'month': month,
 'amount': amount,
 'discount': disc,
@@ -18151,7 +18155,7 @@ fontSize: 15, fontWeight: FontWeight.w800, color: c)),
 Widget _controls(List<SectionInfo> secs) {
 // only whole classes (1A, 1C ...), not divided sub-sections
 secs = [for (final s in secs) if (!s.isSub) s];
-final valid = secs.any((s) => s.id == _sectionId);
+final valid = _sectionId == _allId || secs.any((s) => s.id == _sectionId);
 return Padding(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
 child: Column(children: [
@@ -18164,6 +18168,7 @@ border: OutlineInputBorder(),
 isDense: true,
 ),
 items: [
+const DropdownMenuItem(value: _allId, child: Text('All classes')),
 for (final s in secs)
 DropdownMenuItem(value: s.id, child: Text(s.label)),
 ],
@@ -18246,7 +18251,8 @@ style: const TextStyle(fontSize: 12, color: Colors.black54)),
 }
 
 Widget _studentCard(
-int i, StudentInfo s, double paid, double fee, int status) {
+int i, StudentInfo s, double paid, double fee, int status,
+{String? cls}) {
 final c = status == 2
 ? kGreen
     : status == 1
@@ -18273,7 +18279,8 @@ maxLines: 2,
 overflow: TextOverflow.ellipsis,
 style:
 const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600)),
-subtitle: Text('Paid ${_money(paid)} of ${_money(fee)}'),
+subtitle: Text(
+'${cls == null ? '' : '$cls · '}Paid ${_money(paid)} of ${_money(fee)}'),
 trailing: Column(
 mainAxisAlignment: MainAxisAlignment.center,
 crossAxisAlignment: CrossAxisAlignment.end,
@@ -18290,29 +18297,40 @@ style: const TextStyle(fontSize: 11, color: Colors.black54)),
 );
 }
 
-Widget _list(SectionInfo sec, List<StudentInfo> students, List<_Pay> pays) {
-final fee = appSettings.value.monthlyFees[sec.form] ?? 0.0;
-int statusOf(double paid) => paid <= 0 ? 0 : (paid >= fee ? 2 : 1);
+Widget _list(List<SectionInfo> secs, List<StudentInfo> students, List<_Pay> pays,
+{bool all = false}) {
+final secOf = {for (final x in secs) x.id: x};
+// every student pays the fee of the form of his / her own class
+double feeOf(StudentInfo s) =>
+appSettings.value.monthlyFees[secOf[s.sectionId]?.form ?? ''] ?? 0.0;
+int statusOf(double paid, double fee) =>
+paid <= 0 ? 0 : (paid >= fee ? 2 : 1);
 final rows = [
 for (var i = 0; i < students.length; i++)
 (
 i: i,
 s: students[i],
+fee: feeOf(students[i]),
 paid: _paysOf(students[i], pays)
     .fold<double>(0, (a, p) => a + p.amount + p.discount),
 cash: _paysOf(students[i], pays).fold<double>(0, (a, p) => a + p.amount),
 ),
 ];
-var collected = 0.0, outstanding = 0.0;
+var expected = 0.0, collected = 0.0, outstanding = 0.0;
 final count = [0, 0, 0];
 for (final r in rows) {
+expected += r.fee;
 collected += r.cash;
-outstanding += (fee - r.paid) > 0 ? (fee - r.paid) : 0.0;
-count[statusOf(r.paid)]++;
+outstanding += (r.fee - r.paid) > 0 ? (r.fee - r.paid) : 0.0;
+count[statusOf(r.paid, r.fee)]++;
 }
+final noFee = [
+for (final f in {for (final x in secs) x.form})
+if ((appSettings.value.monthlyFees[f] ?? 0.0) <= 0) f
+];
 final shown = [
 for (final r in rows)
-if ((_filter == -1 || statusOf(r.paid) == _filter) &&
+if ((_filter == -1 || statusOf(r.paid, r.fee) == _filter) &&
 (_search.isEmpty || r.s.name.toLowerCase().contains(_search)))
 r
 ];
@@ -18324,19 +18342,19 @@ onSelected: (_) => setState(() => _filter = v),
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
 children: [
-if (fee <= 0)
+if (noFee.isNotEmpty)
 Card(
 color: Colors.orange.shade50,
 elevation: 0,
 child: Padding(
 padding: const EdgeInsets.all(12),
 child: Text(
-'No monthly fee is set for ${sec.form}. '
+'No monthly fee is set for ${noFee.join(', ')}. '
 'Set it in Settings > Finance.',
 style: const TextStyle(fontSize: 13)),
 ),
 ),
-_summaryCard(fee * students.length, collected, outstanding, count),
+_summaryCard(expected, collected, outstanding, count),
 const SizedBox(height: 8),
 Wrap(spacing: 8, runSpacing: 4, children: [
 chip('All', -1, students.length),
@@ -18352,12 +18370,70 @@ child: Center(child: Text('No students in this filter.')),
 )
 else
 for (final r in shown)
-_studentCard(r.i, r.s, r.paid, fee, statusOf(r.paid)),
+_studentCard(r.i, r.s, r.paid, r.fee, statusOf(r.paid, r.fee),
+cls: all ? secOf[r.s.sectionId]?.label : null),
 ],
 );
 }
 
+/// Every class together (the default): the students of all whole classes,
+/// class by class, each with the fee of his / her own form.
+Widget _allBody(List<SectionInfo> whole) {
+if (whole.isEmpty) {
+return const Center(
+child: Padding(
+padding: EdgeInsets.all(24),
+child: Text('There are no classes yet.', textAlign: TextAlign.center),
+),
+);
+}
+final order = {for (var i = 0; i < whole.length; i++) whole[i].id: i};
+return StreamBuilder<List<StudentInfo>>(
+stream: _allStudents,
+builder: (context, st) {
+if (st.hasError) return Center(child: Text('Error: ${st.error}'));
+if (!st.hasData) return const Center(child: CircularProgressIndicator());
+final students = [
+for (final x in st.data!)
+if (order.containsKey(x.sectionId)) x
+]..sort((a, b) {
+final c = order[a.sectionId]!.compareTo(order[b.sectionId]!);
+return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+});
+if (students.isEmpty) {
+return const Center(
+child: Padding(
+padding: EdgeInsets.all(24),
+child: Text('There are no students yet.', textAlign: TextAlign.center),
+),
+);
+}
+return StreamBuilder<List<_Pay>>(
+stream: _payStream,
+builder: (context, ps) {
+if (ps.hasError) {
+return Center(
+child: Padding(
+padding: const EdgeInsets.all(24),
+child: Text('Could not load payments: ${ps.error}',
+textAlign: TextAlign.center),
+),
+);
+}
+if (!ps.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+return _list(whole, students, ps.data!, all: true);
+},
+);
+},
+);
+}
+
 Widget _body(List<SectionInfo> secs) {
+if (_sectionId == _allId) {
+return _allBody([for (final x in secs) if (!x.isSub) x]);
+}
 SectionInfo? found;
 for (final x in secs) {
 if (!x.isSub && x.id == _sectionId) found = x;
@@ -18402,7 +18478,7 @@ textAlign: TextAlign.center),
 if (!ps.hasData) {
 return const Center(child: CircularProgressIndicator());
 }
-return _list(sec, students, ps.data!);
+return _list([sec], students, ps.data!);
 },
 );
 },
@@ -18419,7 +18495,9 @@ tooltip: 'Finance report',
 icon: const Icon(Icons.assessment_outlined),
 onPressed: () => Navigator.of(context).push(MaterialPageRoute(
 builder: (_) =>
-FinanceReportScreen(month: _month, sectionId: _sectionId),
+FinanceReportScreen(
+month: _month,
+sectionId: _sectionId == _allId ? null : _sectionId),
 )),
 ),
 IconButton(
@@ -18427,7 +18505,9 @@ tooltip: 'Manual (printable fee sheet)',
 icon: const Icon(Icons.edit_note),
 onPressed: () => Navigator.of(context).push(MaterialPageRoute(
 builder: (_) =>
-ManualReportScreen(month: _month, sectionId: _sectionId),
+ManualReportScreen(
+month: _month,
+sectionId: _sectionId == _allId ? null : _sectionId),
 )),
 ),
 ],
