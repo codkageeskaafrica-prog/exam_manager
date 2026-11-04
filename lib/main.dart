@@ -6767,6 +6767,9 @@ class AppPages {
 ///  - role 'admin'   : sees every page and manages the permissions.
 ///  - role 'affairs' (student affairs): full access, every page and every
 ///    admin-level view (only managing users / roles stays with the admin).
+///  - role 'finance': sees the pages in `access` (default: Finance only) and,
+///    when the administrator ticked classes (`financeSections`), only those
+///    classes. No class ticked = every class.
 ///  - role 'teacher' / 'student': sees the
 ///    pages in `access`; when `access`
 ///    is not set, the default of that role (Settings > Users & permissions).
@@ -6788,6 +6791,10 @@ class UserProfile {
 
   /// The administrator refused this sign up.
   final bool rejected;
+
+  /// Finance role: the classes (whole classes like 1A) this person may manage.
+  /// Empty = every class.
+  final List<String> financeSections;
   const UserProfile({
     required this.uid,
     required this.role,
@@ -6800,9 +6807,10 @@ class UserProfile {
     this.pending = false,
     this.approved = true,
     this.rejected = false,
+    this.financeSections = const [],
   });
 
-  static const roles = ['admin', 'teacher', 'affairs', 'student'];
+  static const roles = ['admin', 'teacher', 'affairs', 'finance', 'student'];
   static String roleLabel(String r) => r == 'affairs'
       ? 'Student affairs'
       : (r.isEmpty ? r : r[0].toUpperCase() + r.substring(1));
@@ -6818,6 +6826,7 @@ class UserProfile {
     if (a != null) return a;
     if (role == 'student') return st.studentAccess;
     if (role == 'affairs') return st.affairsAccess;
+    if (role == 'finance') return st.financeAccess;
     return st.teacherAccess;
   }
 
@@ -6836,6 +6845,12 @@ class UserProfile {
       pending: m['pendingLogin'] == true,
       approved: m['approved'] != false,
       rejected: m['rejected'] == true,
+      financeSections: m['financeSections'] is List
+          ? [
+        for (final e in (m['financeSections'] as List))
+          if (e is String) e
+      ]
+          : const <String>[],
       access: a is List
           ? [
         for (final e in a)
@@ -6957,6 +6972,10 @@ class TeacherScope {
   /// A student account: sees only the own record (see [_LinkStudentBody]).
   final bool isStudent;
   final String studentId, sectionId;
+
+  /// A Finance account: limited to these classes (empty = every class).
+  final bool isFinance;
+  final List<String> financeSectionIds;
   const TeacherScope({
     this.restricted = false,
     this.allSections = false,
@@ -6966,6 +6985,8 @@ class TeacherScope {
     this.isStudent = false,
     this.studentId = '',
     this.sectionId = '',
+    this.isFinance = false,
+    this.financeSectionIds = const [],
   });
 
   /// Limited to a part of the data (a teacher or a student).
@@ -6997,6 +7018,14 @@ class TeacherScope {
 
   List<SectionInfo> filterSections(List<SectionInfo> l) {
     if (isStudent) return [for (final s in l) if (s.id == sectionId) s];
+    if (isFinance && financeSectionIds.isNotEmpty) {
+      // the ticked classes and the sections they were divided into
+      final keys = {
+        for (final s in l)
+          if (financeSectionIds.contains(s.id)) '${s.form}|${s.classKey}'
+      };
+      return [for (final s in l) if (keys.contains('${s.form}|${s.classKey}')) s];
+    }
     if (allSections) return l;
     return restricted ? [for (final s in l) if (forms.contains(s.form)) s] : l;
   }
@@ -7113,6 +7142,12 @@ class _ScopeGateState extends State<_ScopeGate> {
         isStudent: true,
         studentId: _stuWatched,
         sectionId: '${_stu?['sectionId'] ?? ''}',
+      );
+    } else if (role == 'finance') {
+      final fs = _user?['financeSections'];
+      teacherScope.value = TeacherScope(
+        isFinance: true,
+        financeSectionIds: fs is List ? [for (final e in fs) if (e is String) e] : const <String>[],
       );
     } else if (role == 'teacher') {
       final asg = parseTeacherAssignments(_teacher);
@@ -8169,6 +8204,9 @@ class AppSettings {
   /// Default pages of the Student affairs role.
   final List<String> affairsAccess;
 
+  /// Default pages of the Finance role.
+  final List<String> financeAccess;
+
   /// What is ticked when an exam dialog is opened.
   final bool uploadHeading, uploadAutoFormat, uploadNumber;
 
@@ -8205,6 +8243,7 @@ class AppSettings {
       AppPages.attendance,
       AppPages.result,
     ],
+    this.financeAccess = const [AppPages.finance],
     this.uploadHeading = true,
     this.uploadAutoFormat = true,
     this.uploadNumber = true,
@@ -8362,6 +8401,7 @@ class AppSettings {
       teacherAccess: pages('teacherAccess', d.teacherAccess),
       studentAccess: pages('studentAccess', d.studentAccess),
       affairsAccess: pages('affairsAccess', d.affairsAccess),
+      financeAccess: pages('financeAccess', d.financeAccess),
       uploadHeading: flag('uploadHeading', d.uploadHeading),
       uploadAutoFormat: flag('uploadAutoFormat', d.uploadAutoFormat),
       uploadNumber: flag('uploadNumber', d.uploadNumber),
@@ -26021,7 +26061,7 @@ if (widget.part == 2)
 const Padding(
 padding: EdgeInsets.only(top: 2),
 child: Text(
-'The pages a new teacher, student or student-affairs account '
+'The pages a new teacher, student, finance or student-affairs account '
 'can open. You can still change them for each user.',
 style: TextStyle(fontSize: 12, color: Colors.black54)),
 ),
@@ -26046,6 +26086,14 @@ _pageChips(
 st.studentAccess,
 (v) => _run(context,
 () => appSettings.update({'studentAccess': v}))),
+const SizedBox(height: 10),
+const Text('Finance',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 4),
+_pageChips(
+st.financeAccess,
+(v) => _run(context,
+() => appSettings.update({'financeAccess': v}))),
 const SizedBox(height: 10),
 const Text('Student affairs',
 style: TextStyle(fontSize: 12)),
@@ -26294,6 +26342,7 @@ subtitle: Text(
 '${u.pending ? ' (not signed in yet)' : ''}'
 '${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
 '${u.fullAccess ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
+'${u.role == 'finance' ? (u.financeSections.isEmpty ? ' · all classes' : ' · ${u.financeSections.length} class${u.financeSections.length == 1 ? '' : 'es'}') : ''}'
 '${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
 '${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
 style: const TextStyle(fontSize: 12),
@@ -26349,6 +26398,17 @@ eff,
     .set({..._base(u), 'access': v}, SetOptions(merge: true))),
 enabled: !isMe && !u.fullAccess,
 ),
+if (u.role == 'finance') ...[
+const Divider(height: 24),
+_FinanceClassesPicker(
+selected: u.financeSections,
+enabled: !isMe,
+onChanged: (v) => _run(
+context,
+() => users.doc(u.uid).set(
+{..._base(u), 'financeSections': v}, SetOptions(merge: true))),
+),
+],
 if (u.role != 'student') ...[
 const Divider(height: 24),
 Text('Teacher / staff details',
@@ -26415,6 +26475,91 @@ onPressed: () => _deleteUser(context, u, r),
 ],
 );
 }
+}
+
+/// Finance accounts: the classes (1A, 1B ...) the person may manage in
+/// Finance. No class ticked = every class.
+class _FinanceClassesPicker extends StatelessWidget {
+final List<String> selected;
+final bool enabled;
+final ValueChanged<List<String>> onChanged;
+const _FinanceClassesPicker({
+required this.selected,
+required this.enabled,
+required this.onChanged,
+});
+
+@override
+Widget build(BuildContext context) =>
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: FirebaseFirestore.instance.collection('sections').snapshots(),
+builder: (context, snap) {
+if (snap.hasError) {
+return Text('Could not load the classes: ${snap.error}',
+style: const TextStyle(color: Colors.red, fontSize: 12));
+}
+if (!snap.hasData) {
+return const Padding(
+padding: EdgeInsets.all(8),
+child: LinearProgressIndicator(),
+);
+}
+// whole classes only (1A, 1B ...), not the divided sections
+final all = <SectionInfo>[
+for (final d in snap.data!.docs)
+if (!SectionInfo.fromDoc(d).isSub) SectionInfo.fromDoc(d)
+];
+all.sort((a, b) {
+final c = a.form.compareTo(b.form);
+return c != 0 ? c : a.name.compareTo(b.name);
+});
+final byForm = <String, List<SectionInfo>>{};
+for (final s in all) {
+byForm.putIfAbsent(s.form, () => []).add(s);
+}
+return Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Text('Classes this finance user can manage',
+style: TextStyle(fontSize: 12)),
+const SizedBox(height: 6),
+ChoiceChip(
+label: const Text('All classes'),
+selected: selected.isEmpty,
+onSelected: enabled ? (_) => onChanged(const <String>[]) : null,
+),
+for (final e in byForm.entries) ...[
+const SizedBox(height: 10),
+Text(e.key,
+style: const TextStyle(
+fontSize: 12, fontWeight: FontWeight.w700)),
+const SizedBox(height: 4),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final s in e.value)
+FilterChip(
+label: Text(s.label),
+selected: selected.contains(s.id),
+onSelected: enabled
+? (on) => onChanged([
+for (final x in all)
+if (x.id == s.id ? on : selected.contains(x.id))
+x.id
+])
+    : null,
+),
+]),
+],
+const SizedBox(height: 8),
+Text(
+selected.isEmpty
+? 'No class ticked: this user can open every class.'
+    : 'Only the ticked classes are shown in Finance '
+'(fees, payments and reports).',
+style: const TextStyle(fontSize: 12, color: Colors.black54)),
+],
+);
+},
+);
 }
 
 // ======================= TEACHERS / STAFF =======================
@@ -26947,7 +27092,7 @@ style: TextStyle(fontWeight: FontWeight.w600)),
 const SizedBox(height: 2),
 Text(
 up?.access == null && !accessEdited
-? 'Using the default pages for teachers. Tick to change.'
+? 'Using the default pages for ${acctRole == 'finance' ? 'the Finance role' : acctRole == 'student' ? 'students' : 'teachers'}. Tick to change.'
     : 'Tick the pages this person can open.',
 style: TextStyle(
 fontSize: 12.5, color: Colors.grey.shade700)),
