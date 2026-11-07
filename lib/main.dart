@@ -1126,6 +1126,318 @@ class ExamService {
     return doc.save();
   }
 
+  // ---------------- Combined result report (PDF) ----------------
+  /// One table per group (form / class): a row per student and a column per
+  /// SUBJECT. Total mode: each subject shows the marks of the picked exams
+  /// ADDED, then Total, Out of, %, Grade, Rank. Weighted mode: each subject
+  /// shows the weighted %, then Average %, Grade, Rank. With [detail] the
+  /// value of every exam is printed small under the subject.
+  Future<Uint8List> buildCombinedPdf({
+    required List<String> exams,
+    required Map<String, double> weights,
+    required List<CombinedGroup> groups,
+    required bool missingAsZero,
+    bool detail = false,
+    bool extras = false, // Total mode: Out of, %, Grade, Rank
+  }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
+    final usable = [for (final g in groups) if (g.rows.isNotEmpty) g];
+    if (usable.isEmpty) {
+      throw Exception('There are no students to put in the report.');
+    }
+
+    pw.MemoryImage? headerImg;
+    final letterhead = await getLetterhead();
+    if (letterhead != null) {
+      try {
+        headerImg = pw.MemoryImage(
+            _sniff(letterhead) != null ? letterhead : await _toPng(letterhead));
+      } catch (_) {}
+    }
+    final topImg = headerImg;
+    final stampImg = pw.MemoryImage(base64Decode(_footerStampBase64));
+    final logoImg = pdfLogoImage(LogoPlace.result);
+    final wmBg = pdfWatermark(LogoPlace.result);
+    final heading = await getHeading();
+    final st = appSettings.value;
+
+    String safe(String t) => String.fromCharCodes([
+      for (final r in t.runes)
+        r == 0x2018 || r == 0x2019
+            ? 0x27
+            : r == 0x2013 || r == 0x2014
+            ? 0x2D
+            : r > 255
+            ? 0x3F
+            : r
+    ]);
+    const grey = PdfColor(0.85, 0.85, 0.85);
+    const zebra = PdfColor(0.96, 0.96, 0.96);
+    PdfColor gradeColor(String g) => g == 'A' || g == 'B'
+        ? PdfColors.green800
+        : g == 'C' || g == 'D'
+        ? PdfColors.orange800
+        : PdfColors.red800;
+    pw.Widget bar(String t, {bool boxed = false, double size = 11}) =>
+        pw.Container(
+          width: double.infinity,
+          alignment: pw.Alignment.center,
+          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+          decoration: pw.BoxDecoration(
+              color: grey, border: boxed ? pw.Border.all(width: 1) : null),
+          child: pw.Text(safe(t),
+              style: pw.TextStyle(fontSize: size, fontWeight: pw.FontWeight.bold)),
+        );
+
+    final theme = pw.ThemeData.withFont(
+        base: pw.Font.times(), bold: pw.Font.timesBold());
+    final doc = pw.Document();
+    final total = exams.fold(0.0, (a, e) => a + (weights[e] ?? 0));
+    final orderLine = exams.join(' / ');
+
+    for (final g in usable) {
+      final sum = g.sumMode;
+      final full = !sum || extras; // show Out of / % / Grade / Rank / *
+      final multi = {for (final r in g.rows) r.classLabel}.length > 1;
+      final subjects = g.subjects;
+      final fs = subjects.length > 8 ? 7.5 : subjects.length > 6 ? 8.5 : 9.5;
+      pw.Widget cell(String t,
+          {bool bold = false, bool left = false, PdfColor? color}) =>
+          pw.Padding(
+            padding: const pw.EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+            child: pw.Align(
+              alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
+              child: pw.Text(safe(t),
+                  style: pw.TextStyle(
+                      fontSize: fs,
+                      color: color,
+                      fontWeight:
+                      bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+            ),
+          );
+      // subject value + (optional) the value of each exam under it
+      pw.Widget subjCell(CombinedRow r, String sub) {
+        final c = r.subjectCombined[sub];
+        if (c == null) return cell('-');
+        final star =
+        full && r.partial.contains(sub) && !missingAsZero ? '*' : '';
+        final small = detail
+            ? exams.map((e) {
+          if (sum) {
+            final v = r.subjectRaw[sub]?[e];
+            return v == null ? '-' : _n1(v);
+          }
+          final v = r.subjectPct[sub]?[e];
+          return v == null ? '-' : '${v.round()}';
+        }).join('/')
+            : '';
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 1),
+          child: pw.Column(
+            mainAxisSize: pw.MainAxisSize.min,
+            children: [
+              pw.Text(safe('${sum ? _n1(c) : _pct1(c)}$star'),
+                  style: pw.TextStyle(
+                      fontSize: fs, fontWeight: pw.FontWeight.bold)),
+              if (small.isNotEmpty)
+                pw.Text(safe(small),
+                    style: pw.TextStyle(
+                        fontSize: fs - 2.5, color: PdfColors.grey700)),
+            ],
+          ),
+        );
+      }
+
+      final widths = <int, pw.TableColumnWidth>{
+        0: const pw.FixedColumnWidth(26),
+        1: const pw.FlexColumnWidth(4.0),
+        2: const pw.FixedColumnWidth(44),
+      };
+      var col = 3;
+      if (multi) widths[col++] = const pw.FixedColumnWidth(32);
+      for (final _ in subjects) {
+        widths[col++] = pw.FlexColumnWidth(detail ? 1.7 : 1.25);
+      }
+      if (sum) {
+        widths[col++] = const pw.FlexColumnWidth(1.2); // total
+        if (extras) {
+          widths[col++] = const pw.FixedColumnWidth(38); // out of
+          widths[col++] = const pw.FixedColumnWidth(38); // percent
+        }
+      } else {
+        widths[col++] = const pw.FlexColumnWidth(1.3); // average
+      }
+      if (full) {
+        widths[col++] = const pw.FixedColumnWidth(32); // grade
+        widths[col++] = const pw.FixedColumnWidth(32); // rank
+      }
+
+      var anyPartial = false;
+      final rows = <pw.TableRow>[
+        pw.TableRow(
+          repeat: true,
+          decoration: const pw.BoxDecoration(color: grey),
+          children: [
+            cell('No.', bold: true),
+            cell('Student name', bold: true, left: true),
+            cell('ID', bold: true),
+            if (multi) cell('Class', bold: true),
+            for (final sub in subjects) cell(sub, bold: true),
+            if (sum) ...[
+              cell('Total', bold: true),
+              if (extras) ...[
+                cell('Out of', bold: true),
+                cell('%', bold: true),
+              ],
+            ] else
+              cell('Average %', bold: true),
+            if (full) ...[
+              cell('Grade', bold: true),
+              cell('Rank', bold: true),
+            ],
+          ],
+        ),
+        for (var i = 0; i < g.rows.length; i++)
+          pw.TableRow(
+            decoration: i.isOdd ? const pw.BoxDecoration(color: zebra) : null,
+            children: () {
+              final r = g.rows[i];
+              final c = r.combined;
+              final p = r.percent;
+              final gr = p == null ? null : _gradeOf(p);
+              if (r.partial.isNotEmpty) anyPartial = true;
+              return [
+                cell('${i + 1}'),
+                cell(r.student.name, left: true),
+                cell(r.student.studentNo.isEmpty ? '-' : r.student.studentNo),
+                if (multi) cell(r.classLabel),
+                for (final sub in subjects) subjCell(r, sub),
+                if (sum) ...[
+                  cell(c == null ? '-' : _n1(c), bold: true),
+                  if (extras) ...[
+                    cell(c == null ? '-' : _n1(r.totalMax)),
+                    cell(p == null ? '-' : _pct1(p)),
+                  ],
+                ] else
+                  cell(c == null ? '-' : _pct1(c), bold: true),
+                if (full) ...[
+                  cell(gr ?? '-',
+                      bold: true, color: gr == null ? null : gradeColor(gr)),
+                  cell(c == null ? '-' : '${r.rank}', bold: true),
+                ],
+              ];
+            }(),
+          ),
+      ];
+
+      final scored = [for (final r in g.rows) if (r.percent != null) r];
+      final groupAvg = scored.isEmpty
+          ? null
+          : scored.fold(0.0, (a, r) => a + r.percent!) / scored.length;
+      final gradeCount = <String, int>{};
+      for (final r in scored) {
+        final gr = _gradeOf(r.percent!);
+        gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
+      }
+      final totals = [for (final r in g.rows) if (r.combined != null) r.combined!];
+      final totalAvg = totals.isEmpty
+          ? null
+          : totals.fold(0.0, (a, b) => a + b) / totals.length;
+      final stats = '${g.rows.length} students | ${scored.length} with '
+          'results${full ? (groupAvg == null ? '' : ' | average ${_pct1(groupAvg)}%') : (totalAvg == null ? '' : ' | average total ${_n1(totalAvg)}')}';
+      final key = [
+        for (var i = 0; i < AppSettings.gradeLetters.length; i++)
+          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
+        'F below ${_fmtMark(st.grades.last)}',
+      ].join('   ');
+      final counts = [
+        for (final l in [...AppSettings.gradeLetters, 'F'])
+          if ((gradeCount[l] ?? 0) > 0) '$l: ${gradeCount[l]}'
+      ].join('   ');
+      final infoLine = sum
+          ? 'Total of: ${exams.join(' + ')}'
+          : 'Weights: ${exams.map((e) => '$e ${_n1((weights[e] ?? 0) / total * 100)}%').join('  |  ')}';
+
+      doc.addPage(pw.MultiPage(
+        maxPages: 100000,
+        pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4.landscape,
+          margin: const pw.EdgeInsets.fromLTRB(28, 20, 28, 20),
+          theme: theme,
+          buildBackground: wmBg,
+        ),
+        footer: (ctx) => pw.Column(
+          mainAxisSize: pw.MainAxisSize.min,
+          children: [
+            pw.Divider(thickness: 0.5),
+            pw.Text(
+                safe('Combined report | ${g.title} | '
+                    'Page ${ctx.pageNumber} of ${ctx.pagesCount}'),
+                textAlign: pw.TextAlign.center,
+                style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 3),
+            pw.Center(child: pw.Image(stampImg, height: 36, fit: pw.BoxFit.contain)),
+          ],
+        ),
+        build: (ctx) => [
+          if (logoImg != null) pdfLogoBlock(logoImg),
+          if (topImg != null)
+            pw.Image(topImg,
+                width: double.infinity, height: 80, fit: pw.BoxFit.contain),
+          pw.SizedBox(height: 6),
+          bar(sum ? 'COMBINED RESULTS - TOTAL MARKS' : 'COMBINED RESULTS - WEIGHTED %',
+              boxed: true, size: 13),
+          bar(g.title.toUpperCase(), size: 15),
+          bar('ACADEMIC YEAR ${heading.academicYear}   |   $stats', size: 10),
+          bar(infoLine, size: 9),
+          pw.SizedBox(height: 8),
+          pw.Table(
+            border: pw.TableBorder.all(width: 0.5),
+            columnWidths: widths,
+            children: rows,
+          ),
+          pw.SizedBox(height: 8),
+          if (full && counts.isNotEmpty)
+            pw.Text(safe('Grades: $counts'),
+                style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
+          if (full)
+            pw.Text(safe('Grading (${sum ? 'total as a %' : 'average %'}): $key'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (!full)
+            pw.Text(
+                safe('Each subject = the marks of the ticked exams added together. '
+                    'Total = all the subject totals added together.'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (detail)
+            pw.Text(
+                safe(sum
+                    ? 'Bold = the marks of the subject added over the exams. '
+                    'Small numbers under it = the mark in each exam in this '
+                    'order: $orderLine ("-" = no mark).'
+                    : 'Bold = the subject combined over the exams. Small numbers '
+                    'under it = the % of each exam in this order: $orderLine '
+                    '("-" = no mark).'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (full)
+            pw.Text(
+                safe(missingAsZero
+                    ? 'A missing exam counts as 0 (it stays in "Out of").'
+                    : anyPartial
+                    ? (sum
+                    ? '* The subject has no mark in one or more of the exams; only '
+                    'the exams with a mark are added and counted in "Out of".'
+                    : '* The subject has no mark in one or more of the exams; those '
+                    'exams are left out and the other weights re-scaled.')
+                    : 'A missing exam is left out.'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+        ],
+      ));
+    }
+    return doc.save();
+  }
+
   // ---------------- Cheating report (PDF) ----------------
   /// A PDF with the students marked as cheated in [exam]: a red title band,
   /// summary cards, bar charts per subject and per class, and the list. The
@@ -12700,29 +13012,50 @@ child: CircularProgressIndicator(strokeWidth: 2)),
 );
 }
 return Row(mainAxisSize: MainAxisSize.min, children: [
-IconButton(
+_BarAction(
+label: 'Upload',
 tooltip: 'Upload student list (Excel / CSV)',
-icon: const Icon(Icons.upload_file),
-onPressed: _upload,
+icon: Icons.upload_file,
+color: const Color(0xFF2E7D32),
+onTap: _upload,
 ),
 PopupMenuButton<String>(
 tooltip: 'Download sections',
-icon: const Icon(Icons.download),
+shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+child: const _BarAction(
+icon: Icons.download,
+label: 'Download',
+color: Color(0xFF00897B),
+),
 onSelected: (v) => v == 'docx' ? _downloadDocx() : _downloadPdf(),
 itemBuilder: (_) => const [
-PopupMenuItem(value: 'pdf', child: Text('Download sections (PDF)')),
-PopupMenuItem(value: 'docx', child: Text('Download sections (Word)')),
+PopupMenuItem(
+value: 'pdf',
+child: ListTile(
+dense: true,
+leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
+title: Text('Download sections (PDF)'))),
+PopupMenuItem(
+value: 'docx',
+child: ListTile(
+dense: true,
+leading: Icon(Icons.description, color: Color(0xFF1565C0)),
+title: Text('Download sections (Word)'))),
 ],
 ),
-IconButton(
+_BarAction(
+label: 'Print',
 tooltip: 'Print sections',
-icon: const Icon(Icons.print),
-onPressed: _printAll,
+icon: Icons.print,
+color: const Color(0xFF546E7A),
+onTap: _printAll,
 ),
-IconButton(
+_BarAction(
+label: 'Delete all',
 tooltip: 'Delete all sections',
-icon: const Icon(Icons.delete_sweep),
-onPressed: _deleteAll,
+icon: Icons.delete_sweep,
+color: const Color(0xFFC62828),
+onTap: _deleteAll,
 ),
 ]);
 }
@@ -13916,31 +14249,50 @@ child: CircularProgressIndicator(strokeWidth: 2)),
 ),
 )
 else ...[
-IconButton(
+_BarAction(
+label: 'Logins',
 tooltip: 'Create login accounts for all students',
-icon: const Icon(Icons.key),
-onPressed: () => runAccountCreation(context),
+icon: Icons.key,
+color: const Color(0xFFEF6C00),
+onTap: () => runAccountCreation(context),
 ),
-IconButton(
+_BarAction(
+label: 'Merge',
 tooltip: 'Merge duplicate students',
-icon: const Icon(Icons.merge_type),
-onPressed: () => _mergeDuplicates(secs, all),
+icon: Icons.merge_type,
+color: const Color(0xFF6A1B9A),
+onTap: () => _mergeDuplicates(secs, all),
 ),
-IconButton(
+_BarAction(
+label: 'Upload',
 tooltip: 'Upload student list (Excel / CSV)',
-icon: const Icon(Icons.upload_file),
-onPressed: _upload,
+icon: Icons.upload_file,
+color: const Color(0xFF2E7D32),
+onTap: _upload,
 ),
 PopupMenuButton<String>(
 tooltip: 'Download',
-icon: const Icon(Icons.download),
+shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+child: const _BarAction(
+icon: Icons.download,
+label: 'Download',
+color: Color(0xFF00897B),
+),
 onSelected: (v) =>
 v == 'template' ? _template() : _exportList(shown, secById),
 itemBuilder: (_) => const [
 PopupMenuItem(
-value: 'list', child: Text('Download this list (CSV)')),
+value: 'list',
+child: ListTile(
+dense: true,
+leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
+title: Text('Download this list (CSV)'))),
 PopupMenuItem(
-value: 'template', child: Text('Download empty template')),
+value: 'template',
+child: ListTile(
+dense: true,
+leading: Icon(Icons.file_present, color: Color(0xFF1565C0)),
+title: Text('Download empty template'))),
 ],
 ),
 ],
@@ -18490,20 +18842,24 @@ Widget build(BuildContext context) => Scaffold(
 appBar: AppBar(
 title: const Text('Finance'),
 actions: [
-IconButton(
+_BarAction(
+label: 'Report',
 tooltip: 'Finance report',
-icon: const Icon(Icons.assessment_outlined),
-onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+icon: Icons.assessment_outlined,
+color: const Color(0xFF1565C0),
+onTap: () => Navigator.of(context).push(MaterialPageRoute(
 builder: (_) =>
 FinanceReportScreen(
 month: _month,
 sectionId: _sectionId == _allId ? null : _sectionId),
 )),
 ),
-IconButton(
+_BarAction(
+label: 'Manual',
 tooltip: 'Manual (printable fee sheet)',
-icon: const Icon(Icons.edit_note),
-onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+icon: Icons.edit_note,
+color: const Color(0xFFEF6C00),
+onTap: () => Navigator.of(context).push(MaterialPageRoute(
 builder: (_) =>
 ManualReportScreen(
 month: _month,
@@ -18992,15 +19348,19 @@ child: CircularProgressIndicator(strokeWidth: 2)),
 ),
 )
 else ...[
-IconButton(
+_BarAction(
+label: 'Print',
 tooltip: 'Print',
-onPressed: () => _export(true),
-icon: const Icon(Icons.print),
+icon: Icons.print,
+color: const Color(0xFF546E7A),
+onTap: () => _export(true),
 ),
-IconButton(
+_BarAction(
+label: 'PDF',
 tooltip: 'Save as PDF',
-onPressed: () => _export(false),
-icon: const Icon(Icons.picture_as_pdf),
+icon: Icons.picture_as_pdf,
+color: const Color(0xFFC62828),
+onTap: () => _export(false),
 ),
 ],
 ],
@@ -19340,15 +19700,19 @@ child: CircularProgressIndicator(strokeWidth: 2)),
 ),
 )
 else ...[
-IconButton(
+_BarAction(
+label: 'Print',
 tooltip: 'Print',
-onPressed: () => _export(true),
-icon: const Icon(Icons.print),
+icon: Icons.print,
+color: const Color(0xFF546E7A),
+onTap: () => _export(true),
 ),
-IconButton(
+_BarAction(
+label: 'PDF',
 tooltip: 'Save as PDF',
-onPressed: () => _export(false),
-icon: const Icon(Icons.picture_as_pdf),
+icon: Icons.picture_as_pdf,
+color: const Color(0xFFC62828),
+onTap: () => _export(false),
 ),
 ],
 ],
@@ -20755,21 +21119,28 @@ child: CircularProgressIndicator(strokeWidth: 2)),
 ),
 )
 else ...[
-IconButton(
+_BarAction(
+label: 'Print',
 tooltip: 'Print',
-onPressed: () => _export('print'),
-icon: const Icon(Icons.print),
+icon: Icons.print,
+color: const Color(0xFF546E7A),
+onTap: () => _export('print'),
 ),
 PopupMenuButton<String>(
 tooltip: 'Download',
-icon: const Icon(Icons.download),
+shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+child: const _BarAction(
+icon: Icons.download,
+label: 'Download',
+color: Color(0xFF00897B),
+),
 onSelected: _export,
 itemBuilder: (_) => const [
 PopupMenuItem(
 value: 'pdf',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.picture_as_pdf),
+leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
 title: Text('Download PDF'),
 ),
 ),
@@ -20777,22 +21148,27 @@ PopupMenuItem(
 value: 'docx',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.description),
+leading: Icon(Icons.description, color: Color(0xFF1565C0)),
 title: Text('Download Word'),
 ),
 ),
 ],
 ),
 ],
-IconButton(
+_BarAction(
+label: 'Delete',
 tooltip: 'Delete report',
-onPressed: _busy ? null : _deleteReport,
-icon: const Icon(Icons.delete_outline),
+icon: Icons.delete_outline,
+color: const Color(0xFFC62828),
+enabled: !_busy,
+onTap: _busy ? null : _deleteReport,
 ),
-IconButton(
+_BarAction(
+label: 'Refresh',
 tooltip: 'Refresh',
-onPressed: _reload,
-icon: const Icon(Icons.refresh),
+icon: Icons.refresh,
+color: const Color(0xFF2E7D32),
+onTap: _reload,
 ),
 ],
 ),
@@ -20934,6 +21310,618 @@ required this.results,
 });
 }
 
+
+// =====================================================================
+// COMBINED REPORT: one report that joins the results of several exams,
+// SUBJECT BY SUBJECT (English of every exam, Somali of every exam, ...).
+//  - TOTAL MARKS mode: the marks are simply added (Mid-term 30 + Monthly1 12
+//    = 42). The report shows the total of every subject, the grand total,
+//    what it is out of, the % (used for the grade) and the rank.
+//  - WEIGHTED % mode: every mark becomes a % of that exam's highest mark
+//    (Settings > Exams > Mark limits) and the % are averaged with weights.
+// =====================================================================
+class CombinedRow {
+final StudentInfo student;
+final String classLabel;
+/// subject -> exam -> mark (null = no mark in that exam)
+final Map<String, Map<String, double?>> subjectRaw;
+/// subject -> exam -> % of that exam's highest mark
+final Map<String, Map<String, double?>> subjectPct;
+/// subject -> total marks (Total mode) or weighted % (Weighted mode)
+final Map<String, double?> subjectCombined;
+/// subjects where at least one picked exam had no mark
+final Set<String> partial;
+/// grand total of the subjects (Total mode) or mean % (Weighted mode)
+final double? combined;
+/// what the grand total is out of (Total mode); 100 in Weighted mode
+final double totalMax;
+/// overall % of the student, used for the grade
+final double? percent;
+int rank = 0;
+CombinedRow({
+required this.student,
+required this.classLabel,
+required this.subjectRaw,
+required this.subjectPct,
+required this.subjectCombined,
+required this.partial,
+required this.combined,
+required this.totalMax,
+required this.percent,
+});
+}
+
+class CombinedGroup {
+final String title;
+final bool sumMode;
+final List<String> subjects; // columns, in the school's subject order
+final List<CombinedRow> rows; // best first, students without marks last
+const CombinedGroup({
+required this.title,
+required this.sumMode,
+required this.subjects,
+required this.rows,
+});
+}
+
+String _pct1(double v) => v.toStringAsFixed(1);
+String _n1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+/// Joins the results of [exams] subject by subject for the students of every
+/// group. [sumMode] true: the marks are added. false: weighted % ([weights]
+/// are relative numbers such as 10, 10, 30, 50 or 1, 1, 1, 1).
+/// [missingAsZero] true: an exam without a mark counts as 0 (and its highest
+/// mark stays in "out of"); false: it is left out (and the weights re-scaled).
+Future<List<CombinedGroup>> buildCombinedGroups({
+required List<String> exams,
+required Map<String, double> weights,
+required List<ResultReportGroup> groups,
+bool missingAsZero = false,
+bool sumMode = true,
+}) async {
+final svc = ResultService();
+final perExam = <String, Map<String, ResultMarks>>{};
+for (final e in exams) {
+perExam[e] = await svc.watchResults(e).first;
+}
+
+final out = <CombinedGroup>[];
+for (final g in groups) {
+final rows = <CombinedRow>[];
+final seen = <String>{}; // subjects that have a mark in this group
+for (final s in g.students) {
+final form = SchoolService.formOf(s);
+final subs = <String>{
+for (final e in exams) ...(perExam[e]?[s.id]?.marks.keys ?? const <String>[]),
+};
+final subjRaw = <String, Map<String, double?>>{};
+final subjPct = <String, Map<String, double?>>{};
+final subjComb = <String, double?>{};
+final subjMax = <String, double>{};
+final partial = <String>{};
+for (final sub in subs) {
+final rawM = <String, double?>{};
+final pctM = <String, double?>{};
+var rawSum = 0.0, maxSum = 0.0, wSum = 0.0, pSum = 0.0;
+var used = 0;
+for (final e in exams) {
+final r = perExam[e]?[s.id];
+final mark = (r == null || r.cheated) ? null : r.marks[sub];
+final max = maxMarkOf(e, form);
+final v = (mark == null || max <= 0) ? null : mark / max * 100;
+final wt = weights[e] ?? 0;
+rawM[e] = mark;
+pctM[e] = v;
+final present = sumMode ? mark != null : v != null;
+if (present) {
+used++;
+if (sumMode) {
+rawSum += mark!;
+maxSum += max;
+} else {
+pSum += v! * wt;
+wSum += wt;
+}
+} else if (missingAsZero) {
+if (sumMode) {
+maxSum += max;
+} else {
+wSum += wt;
+}
+}
+}
+subjRaw[sub] = rawM;
+subjPct[sub] = pctM;
+if (used == 0 || (!sumMode && wSum == 0)) {
+subjComb[sub] = null;
+} else {
+subjComb[sub] = sumMode ? rawSum : pSum / wSum;
+subjMax[sub] = maxSum;
+seen.add(sub);
+if (used < exams.length) partial.add(sub);
+}
+}
+final vals = subjComb.values.whereType<double>().toList();
+double? combined;
+double totalMax = 100;
+double? percent;
+if (vals.isNotEmpty) {
+final sum = vals.fold(0.0, (a, b) => a + b);
+if (sumMode) {
+combined = sum;
+totalMax = [
+for (final e in subjComb.entries)
+if (e.value != null) subjMax[e.key] ?? 0
+].fold(0.0, (a, b) => a + b);
+percent = totalMax > 0 ? sum / totalMax * 100 : null;
+} else {
+combined = sum / vals.length;
+percent = combined;
+}
+}
+rows.add(CombinedRow(
+student: s,
+classLabel: g.sectionLabels[s.id] ?? '',
+subjectRaw: subjRaw,
+subjectPct: subjPct,
+subjectCombined: subjComb,
+partial: partial,
+combined: combined,
+totalMax: totalMax,
+percent: percent,
+));
+}
+final subjects = <String>[
+for (final sub in ExamService.subjects)
+if (seen.contains(sub)) sub,
+...(seen.where((x) => !ExamService.subjects.contains(x)).toList()..sort()),
+];
+int byName(CombinedRow a, CombinedRow b) =>
+a.student.name.toLowerCase().compareTo(b.student.name.toLowerCase());
+final scored = [for (final r in rows) if (r.combined != null) r]
+..sort((a, b) {
+final c = b.combined!.compareTo(a.combined!);
+return c != 0 ? c : byName(a, b);
+});
+for (var i = 0; i < scored.length; i++) {
+final same = i > 0 && scored[i].combined == scored[i - 1].combined;
+scored[i].rank = same ? scored[i - 1].rank : i + 1;
+}
+final unscored = [for (final r in rows) if (r.combined == null) r]
+..sort(byName);
+out.add(CombinedGroup(
+title: g.title,
+sumMode: sumMode,
+subjects: subjects,
+rows: [...scored, ...unscored]));
+}
+return out;
+}
+
+/// The combined report as CSV (opens in Excel). For every subject it lists
+/// the mark (or %) of each picked exam and then the combined value.
+/// UTF-8 with a BOM so Arabic and Somali names show correctly.
+Uint8List buildCombinedCsv({
+required List<String> exams,
+required Map<String, double> weights,
+required List<CombinedGroup> groups,
+required bool missingAsZero,
+bool detail = false, // also one column per exam
+bool extras = false, // Total mode: Out of, %, Grade, Rank
+}) {
+String q(String s) => '"${s.replaceAll('"', '""')}"';
+final sum = groups.isNotEmpty && groups.first.sumMode;
+final total = exams.fold(0.0, (a, e) => a + (weights[e] ?? 0));
+final sb = StringBuffer();
+sb.writeln(q(sum
+? 'Combined result report - total marks per subject'
+    : 'Combined result report - weighted % per subject'));
+sb.writeln(q(sum
+? 'Total of: ${exams.join(' + ')}'
+    : 'Weights: ${[
+for (final e in exams) '$e ${_pct1((weights[e] ?? 0) / total * 100)}%'
+].join(' | ')}'));
+sb.writeln(q(missingAsZero
+? 'A missing exam counts as 0'
+    : 'A missing exam is left out'));
+for (final g in groups) {
+sb.writeln();
+sb.writeln(q(g.title));
+sb.writeln([
+q('No.'),
+q('Student name'),
+q('ID'),
+q('Class'),
+for (final sub in g.subjects) ...[
+if (detail)
+for (final e in exams) q(sum ? '$sub - $e' : '$sub - $e (%)'),
+q(detail ? (sum ? '$sub - TOTAL' : '$sub - COMBINED (%)') : sub),
+],
+if (sum) q('Total') else q('Average (%)'),
+if (!sum || extras) ...[
+if (sum) ...[q('Out of'), q('Percent (%)')],
+q('Grade'),
+q('Rank'),
+],
+].join(','));
+for (var i = 0; i < g.rows.length; i++) {
+final r = g.rows[i];
+final c = r.combined;
+final p = r.percent;
+sb.writeln([
+'${i + 1}',
+q(r.student.name),
+q(r.student.studentNo),
+q(r.classLabel),
+for (final sub in g.subjects) ...[
+if (detail)
+for (final e in exams)
+sum
+? (r.subjectRaw[sub]?[e] == null ? '' : _n1(r.subjectRaw[sub]![e]!))
+    : (r.subjectPct[sub]?[e] == null ? '' : _pct1(r.subjectPct[sub]![e]!)),
+r.subjectCombined[sub] == null
+? ''
+    : (sum ? _n1(r.subjectCombined[sub]!) : _pct1(r.subjectCombined[sub]!)),
+],
+if (sum)
+(c == null ? '' : _n1(c))
+else
+(c == null ? '' : _pct1(c)),
+if (!sum || extras) ...[
+if (sum) ...[
+c == null ? '' : _n1(r.totalMax),
+p == null ? '' : _pct1(p),
+],
+p == null ? '' : _gradeOf(p),
+c == null ? '' : '${r.rank}',
+],
+].join(','));
+}
+}
+return Uint8List.fromList([0xEF, 0xBB, 0xBF, ...utf8.encode(sb.toString())]);
+}
+
+/// Pick the exams to combine and how, then get the report.
+class _CombinedReportDialog extends StatefulWidget {
+final String title;
+final Future<List<ResultReportGroup>> Function() loadGroups;
+const _CombinedReportDialog(
+{required this.title, required this.loadGroups});
+
+@override
+State<_CombinedReportDialog> createState() => _CombinedReportDialogState();
+}
+
+class _CombinedReportDialogState extends State<_CombinedReportDialog> {
+late final List<String> _exams = List<String>.of(appSettings.value.examOptions);
+final Set<String> _picked = {};
+final Map<String, TextEditingController> _w = {};
+bool _sum = true; // true: add the marks, false: weighted %
+bool _zero = false;
+bool _detail = false;
+bool _extras = false;
+bool _busy = false;
+
+@override
+void initState() {
+super.initState();
+for (final e in _exams) {
+_w[e] = TextEditingController(text: '1');
+}
+}
+
+@override
+void dispose() {
+for (final c in _w.values) {
+c.dispose();
+}
+super.dispose();
+}
+
+double? _weight(String e) {
+final v = double.tryParse(_w[e]!.text.trim().replaceAll(',', '.'));
+return v == null || v <= 0 ? null : v;
+}
+
+double get _total => [
+for (final e in _picked) _weight(e) ?? 0,
+].fold(0.0, (a, b) => a + b);
+
+void _say(String t) =>
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+
+Future<void> _run(String kind) async {
+final exams = [for (final e in _exams) if (_picked.contains(e)) e];
+if (exams.length < 2) {
+_say('Tick at least two exams to combine.');
+return;
+}
+final weights = <String, double>{};
+for (final e in exams) {
+if (_sum) {
+weights[e] = 1;
+continue;
+}
+final v = _weight(e);
+if (v == null) {
+_say('Enter a weight above 0 for "$e".');
+return;
+}
+weights[e] = v;
+}
+setState(() => _busy = true);
+final messenger = ScaffoldMessenger.of(context);
+final nav = Navigator.of(context);
+try {
+final groups = await buildCombinedGroups(
+exams: exams,
+weights: weights,
+groups: await widget.loadGroups(),
+missingAsZero: _zero,
+sumMode: _sum,
+);
+final name = _safeFile('Combined-${widget.title}');
+if (kind == 'csv') {
+final bytes = buildCombinedCsv(
+exams: exams,
+weights: weights,
+groups: groups,
+missingAsZero: _zero,
+detail: _detail,
+extras: _extras);
+final path = await _downloadInBrowser(bytes, '$name.csv', 'text/csv');
+if (mounted) nav.pop();
+if (path != null) {
+messenger.showSnackBar(
+SnackBar(content: Text('Saved $name.csv (open it with Excel)')));
+}
+} else {
+final bytes = await ExamService().buildCombinedPdf(
+exams: exams,
+weights: weights,
+groups: groups,
+missingAsZero: _zero,
+detail: _detail,
+extras: _extras);
+if (kind == 'print') {
+if (mounted) setState(() => _busy = false);
+await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+} else {
+final path =
+await _downloadInBrowser(bytes, '$name.pdf', 'application/pdf');
+if (mounted) nav.pop();
+if (path != null) {
+messenger.showSnackBar(SnackBar(content: Text('Saved $name.pdf')));
+}
+}
+}
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text('$e'.replaceFirst('Exception: ', '')),
+duration: const Duration(seconds: 6)));
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
+@override
+Widget build(BuildContext context) {
+final total = _total;
+return AlertDialog(
+title: const Text('Combined report'),
+content: SizedBox(
+width: 500,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text('Scope: ${widget.title}',
+style: const TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+SegmentedButton<bool>(
+segments: const [
+ButtonSegment<bool>(
+value: true,
+label: Text('Total marks'),
+icon: Icon(Icons.add)),
+ButtonSegment<bool>(
+value: false,
+label: Text('Weighted %'),
+icon: Icon(Icons.percent)),
+],
+selected: {_sum},
+onSelectionChanged:
+_busy ? null : (s) => setState(() => _sum = s.first),
+),
+const SizedBox(height: 8),
+Text(
+_sum
+? 'The marks of the ticked exams are ADDED, subject by '
+'subject (e.g. Mid-term 30 + Monthly1 12 = 42), and the '
+'subject totals are added to a grand total. The grade '
+'uses the total as a % of what it is out of.'
+    : 'Each mark becomes a % of that exam\'s highest mark, '
+'then the exams are averaged with the weights below '
+'(1,1,1 = equal; 10,10,30,50 = percentages).',
+style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 10),
+for (final e in _exams)
+Row(children: [
+Checkbox(
+value: _picked.contains(e),
+onChanged: _busy
+? null
+    : (v) => setState(() {
+if (v == true) {
+_picked.add(e);
+} else {
+_picked.remove(e);
+}
+}),
+),
+Expanded(child: Text(e)),
+if (!_sum) ...[
+SizedBox(
+width: 64,
+child: TextField(
+controller: _w[e],
+enabled: _picked.contains(e) && !_busy,
+onChanged: (_) => setState(() {}),
+keyboardType: const TextInputType.numberWithOptions(
+decimal: true),
+decoration: const InputDecoration(
+isDense: true,
+labelText: 'Weight',
+border: OutlineInputBorder()),
+),
+),
+SizedBox(
+width: 52,
+child: Text(
+_picked.contains(e) && total > 0 && _weight(e) != null
+? '${_pct1(_weight(e)! / total * 100)}%'
+    : '',
+textAlign: TextAlign.right,
+style: const TextStyle(fontWeight: FontWeight.w600)),
+),
+],
+]),
+const SizedBox(height: 6),
+SwitchListTile(
+contentPadding: EdgeInsets.zero,
+dense: true,
+title: const Text('Count a missing exam as 0'),
+subtitle: Text(_sum
+? (_zero
+? 'A subject without a mark in a ticked exam adds 0 and '
+'that exam stays in "Out of".'
+    : 'A subject without a mark in a ticked exam is left out '
+'of its total and of "Out of" (shown with *).')
+    : (_zero
+? 'A student without a result in a ticked exam gets 0 there.'
+    : 'A missing exam is left out and the other weights are '
+'re-scaled (shown with *).')),
+value: _zero,
+onChanged: _busy ? null : (v) => setState(() => _zero = v),
+),
+if (_sum)
+SwitchListTile(
+contentPadding: EdgeInsets.zero,
+dense: true,
+title: const Text('Also show Out of, %, Grade and Rank'),
+subtitle: const Text(
+'Off = only the subject totals and the Total.'),
+value: _extras,
+onChanged: _busy ? null : (v) => setState(() => _extras = v),
+),
+SwitchListTile(
+contentPadding: EdgeInsets.zero,
+dense: true,
+title: const Text('Show the mark of each exam'),
+subtitle: Text(_sum
+? 'PDF: small numbers under every subject total. Excel: one '
+'column per exam, in the order above.'
+    : 'PDF: small numbers under the combined % of every subject. '
+'Excel: one column per exam, in the order above.'),
+value: _detail,
+onChanged: _busy ? null : (v) => setState(() => _detail = v),
+),
+if (_busy)
+const Padding(
+padding: EdgeInsets.only(top: 8),
+child: LinearProgressIndicator(),
+),
+],
+),
+),
+),
+actions: [
+TextButton(
+onPressed: _busy ? null : () => Navigator.pop(context),
+child: const Text('Cancel')),
+TextButton.icon(
+onPressed: _busy ? null : () => _run('print'),
+icon: const Icon(Icons.print),
+label: const Text('Print')),
+TextButton.icon(
+onPressed: _busy ? null : () => _run('csv'),
+icon: const Icon(Icons.table_chart),
+label: const Text('Excel')),
+FilledButton.icon(
+onPressed: _busy ? null : () => _run('pdf'),
+icon: const Icon(Icons.picture_as_pdf),
+label: const Text('PDF')),
+],
+);
+}
+}
+
+/// A clear toolbar button: a coloured rounded tile with the icon on top and a
+/// short text under it. Used for every report / print / download / upload
+/// action so each one says what it does. Pass [onTap] for a normal button;
+/// leave it null when the tile is the child of a PopupMenuButton.
+class _BarAction extends StatelessWidget {
+final IconData icon;
+final String label;
+final String? tooltip;
+final Color color;
+final VoidCallback? onTap;
+final bool enabled;
+const _BarAction({
+required this.icon,
+required this.label,
+this.tooltip,
+this.color = const Color(0xFF1565C0),
+this.onTap,
+this.enabled = true,
+});
+
+@override
+Widget build(BuildContext context) {
+final on = enabled;
+final c = on ? color : Theme.of(context).colorScheme.outline;
+Widget tile = Container(
+constraints: const BoxConstraints(minWidth: 52),
+padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+decoration: BoxDecoration(
+color: c.withAlpha(on ? 28 : 18),
+borderRadius: BorderRadius.circular(14),
+border: Border.all(color: c.withAlpha(on ? 80 : 40)),
+),
+child: Column(
+mainAxisSize: MainAxisSize.min,
+mainAxisAlignment: MainAxisAlignment.center,
+children: [
+Icon(icon, size: 20, color: c),
+const SizedBox(height: 1),
+Text(label,
+maxLines: 1,
+overflow: TextOverflow.fade,
+softWrap: false,
+style: TextStyle(
+fontSize: 10.5,
+height: 1.1,
+fontWeight: FontWeight.w700,
+color: c)),
+],
+),
+);
+if (onTap != null) {
+tile = InkWell(
+borderRadius: BorderRadius.circular(14),
+onTap: enabled ? onTap : null,
+child: tile,
+);
+}
+if (tooltip != null) tile = Tooltip(message: tooltip!, child: tile);
+return Padding(
+padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 5),
+child: Material(type: MaterialType.transparency, child: tile),
+);
+}
+}
+
 String _safeFile(String s) => s.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-');
 
 /// "Report" menu: download the report as Excel or Word (or PDF), or print it.
@@ -21018,35 +22006,43 @@ const PopupMenuItem(
 value: 'xlsx',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.table_chart),
+leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
 title: Text('Download Excel'))),
 if (widget.buildDocx != null)
 const PopupMenuItem(
 value: 'docx',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.description),
+leading: Icon(Icons.description, color: Color(0xFF1565C0)),
 title: Text('Download Word'))),
 const PopupMenuItem(
 value: 'pdf',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.picture_as_pdf),
+leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
 title: Text('Download PDF'))),
 const PopupMenuItem(
 value: 'print',
 child: ListTile(
 dense: true,
-leading: Icon(Icons.print),
+leading: Icon(Icons.print, color: Color(0xFF546E7A)),
 title: Text('Print'))),
 ];
 if (widget.iconOnly) {
-return PopupMenuButton<String>(
-tooltip: 'Report',
-icon: const Icon(Icons.summarize),
+return Padding(
+padding: const EdgeInsets.only(right: 6),
+child: PopupMenuButton<String>(
+tooltip: 'Download or print the report',
 enabled: widget.enabled,
 onSelected: _run,
 itemBuilder: (_) => items,
+shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+child: _BarAction(
+icon: Icons.summarize,
+label: 'Report',
+enabled: widget.enabled,
+),
+),
 );
 }
 return PopupMenuButton<String>(
@@ -23368,6 +24364,18 @@ s.form == widget.form && s.classKey == widget.classKey)
 return groups;
 }
 
+/// Opens the "Combined report" dialog for what this screen shows
+/// (the whole school by form, one form, or one class).
+void _openCombined() {
+showDialog<void>(
+context: context,
+builder: (_) => _CombinedReportDialog(
+title: _title == 'Result' ? 'School' : _title,
+loadGroups: () => _reportGroups(),
+),
+);
+}
+
 Widget _tile(IconData icon, Color color, String title, String subtitle,
 VoidCallback? onTap,
 {Widget? extra}) =>
@@ -23615,6 +24623,14 @@ return Scaffold(
 appBar: AppBar(
 title: Text(_title),
 actions: [
+if (!teacherScope.value.scoped)
+_BarAction(
+icon: Icons.functions,
+label: 'Combined',
+tooltip: 'Combine several exams in one report',
+color: const Color(0xFF6A1B9A),
+onTap: _openCombined,
+),
 if (!teacherScope.value.scoped)
 _ReportMenuButton(
 iconOnly: true,
