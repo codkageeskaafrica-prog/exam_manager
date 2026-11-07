@@ -6951,13 +6951,10 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     start: DateUtils.dateOnly(DateTime.now()),
     end: DateUtils.dateOnly(DateTime.now()),
   );
-  String _filter = 'all'; // all | login | logout
-  late Stream<QuerySnapshot<Map<String, dynamic>>> _events = _query();
-  late final Stream<QuerySnapshot<Map<String, dynamic>>> _presence =
-  FirebaseFirestore.instance
-      .collection('presence')
-      .where('online', isEqualTo: true)
-      .snapshots();
+  String _filter = 'in'; // in = online now | out = last logged out
+  // one document per user: their current state (see logActivity)
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _people =
+  FirebaseFirestore.instance.collection('presence').snapshots();
   Timer? _tick;
 
   @override
@@ -6975,17 +6972,6 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     super.dispose();
   }
 
-  Stream<QuerySnapshot<Map<String, dynamic>>> _query() => FirebaseFirestore
-      .instance
-      .collection('activityLog')
-      .where('time', isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
-      .where('time',
-      isLessThan:
-      Timestamp.fromDate(_range.end.add(const Duration(days: 1))))
-      .orderBy('time', descending: true)
-      .limit(500)
-      .snapshots();
-
   Future<void> _pickRange() async {
     final picked = await showDateRangePicker(
       context: context,
@@ -6993,12 +6979,7 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
       lastDate: DateTime.now(),
       initialDateRange: _range,
     );
-    if (picked != null) {
-      setState(() {
-        _range = picked;
-        _events = _query();
-      });
-    }
+    if (picked != null) setState(() => _range = picked);
   }
 
   String _rangeLabel() {
@@ -7012,53 +6993,27 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
 
   DateTime? _time(Object? v) => v is Timestamp ? v.toDate() : null;
 
-  Widget _onlineNow() {
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: _presence,
-      builder: (context, snap) {
-        final cutoff = DateTime.now().subtract(_onlineFor);
-        final people = <Map<String, dynamic>>[
-          for (final d in snap.data?.docs ?? const [])
-            if ((_time(d.data()['lastSeen']) ?? DateTime(2000))
-                .isAfter(cutoff))
-              d.data(),
-        ]..sort((a, b) => '${a['name']}'.compareTo('${b['name']}'));
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(
-                width: 10,
-                height: 10,
-                decoration: const BoxDecoration(
-                    color: Colors.green, shape: BoxShape.circle),
-              ),
-              const SizedBox(width: 8),
-              Text('Online now (${people.length})',
-                  style: const TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w700)),
-            ]),
-            const SizedBox(height: 6),
-            if (snap.hasError)
-              const Text('Could not load who is online.', style: _hint)
-            else if (people.isEmpty)
-              const Text('Nobody is online right now.', style: _hint)
-            else
-              Wrap(spacing: 8, runSpacing: 6, children: [
-                for (final p in people)
-                  Chip(
-                    avatar: const Icon(Icons.circle,
-                        size: 10, color: Colors.green),
-                    label: Text(
-                        '${p['name']}'
-                            '${_role('${p['role'] ?? ''}').isEmpty ? '' : ' (${_role('${p['role']}')})'}',
-                        style: const TextStyle(fontSize: 12.5)),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ]),
-          ],
-        );
-      },
+  Widget _row(Map<String, dynamic> m, bool online, DateTime? seen) {
+    final tf = DateFormat('d MMM yyyy, HH:mm');
+    final role = _role('${m['role'] ?? ''}');
+    final signedOut = m['online'] != true;
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 18,
+        backgroundColor: online ? Colors.green.shade50 : Colors.grey.shade200,
+        child: Icon(online ? Icons.circle : Icons.logout,
+            size: online ? 12 : 18,
+            color: online ? Colors.green.shade700 : Colors.black54),
+      ),
+      title: Text('${m['name'] ?? ''}',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: Text(online
+          ? 'Online${role.isEmpty ? '' : ' - $role'}'
+          : '${signedOut ? 'Logged out' : 'Last seen'}'
+          '${role.isEmpty ? '' : ' - $role'}'),
+      trailing: Text(seen == null ? '...' : tf.format(seen), style: _hint),
     );
   }
 
@@ -7070,106 +7025,91 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
       shape: _kSettingsCardShape,
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _onlineNow(),
-            const Divider(height: 28),
-            const Text('Logins and logouts',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: _pickRange,
-              icon: const Icon(Icons.calendar_today, size: 18),
-              label: Text(_rangeLabel()),
-            ),
-            const SizedBox(height: 8),
-            Wrap(spacing: 8, children: [
-              for (final f in const [
-                ('all', 'All'),
-                ('login', 'Logged in'),
-                ('logout', 'Logged out'),
-              ])
-                ChoiceChip(
-                  label: Text(f.$2),
-                  selected: _filter == f.$1,
-                  onSelected: (_) => setState(() => _filter = f.$1),
-                ),
-            ]),
-            const SizedBox(height: 8),
-            StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              stream: _events,
-              builder: (context, snap) {
-                if (snap.hasError) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Text(
-                        'Could not load the activity log. Check that the '
-                            'Firestore rules allow the administrator to read '
-                            'activityLog.\n${snap.error}',
-                        style: const TextStyle(color: Colors.red)),
-                  );
-                }
-                if (!snap.hasData) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Center(child: CircularProgressIndicator()),
-                  );
-                }
-                final rows = [
-                  for (final d in snap.data!.docs)
-                    if (_filter == 'all' || d.data()['type'] == _filter)
-                      d.data(),
-                ];
-                if (rows.isEmpty) {
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16),
-                    child: Text('No activity for this date.', style: _hint),
-                  );
-                }
-                final tf = DateFormat('d MMM yyyy, HH:mm');
-                return Column(children: [
-                  for (final m in rows)
-                    ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: CircleAvatar(
-                        radius: 18,
-                        backgroundColor: m['type'] == 'login'
-                            ? Colors.green.shade50
-                            : Colors.grey.shade200,
-                        child: Icon(
-                          m['type'] == 'login' ? Icons.login : Icons.logout,
-                          size: 18,
-                          color: m['type'] == 'login'
-                              ? Colors.green.shade700
-                              : Colors.black54,
-                        ),
-                      ),
-                      title: Text('${m['name'] ?? m['email'] ?? ''}',
-                          style:
-                          const TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text(
-                          '${m['type'] == 'login' ? 'Logged in' : 'Logged out'}'
-                              '${_role('${m['role'] ?? ''}').isEmpty ? '' : ' - ${_role('${m['role']}')}'}'),
-                      trailing: Text(
-                          _time(m['time']) == null
-                              ? '...'
-                              : tf.format(_time(m['time'])!),
-                          style: _hint),
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _people,
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return Text(
+                  'Could not load the activity log. Check that the '
+                      'Firestore rules allow the administrator to read '
+                      'presence.\n${snap.error}',
+                  style: const TextStyle(color: Colors.red));
+            }
+            if (!snap.hasData) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            final cutoff = DateTime.now().subtract(_onlineFor);
+            final end = _range.end.add(const Duration(days: 1));
+            final online = <(Map<String, dynamic>, DateTime?)>[];
+            final out = <(Map<String, dynamic>, DateTime?)>[];
+            for (final d in snap.data!.docs) {
+              final m = d.data();
+              final seen = _time(m['lastSeen']);
+              if (m['online'] == true && seen != null && seen.isAfter(cutoff)) {
+                online.add((m, seen));
+              } else if (seen != null &&
+                  !seen.isBefore(_range.start) &&
+                  seen.isBefore(end)) {
+                out.add((m, seen));
+              }
+            }
+            online.sort((a, b) => '${a.$1['name']}'.compareTo('${b.$1['name']}'));
+            out.sort((a, b) => b.$2!.compareTo(a.$2!));
+            final showOnline = _filter == 'in';
+            final showOut = _filter == 'out';
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(spacing: 8, children: [
+                  for (final f in [
+                    ('in', 'Logged in'),
+                    ('out', 'Logged out'),
+                  ])
+                    ChoiceChip(
+                      label: Text(f.$2),
+                      selected: _filter == f.$1,
+                      onSelected: (_) => setState(() => _filter = f.$1),
                     ),
-                  if (snap.data!.docs.length >= 500)
+                ]),
+                if (showOnline) ...[
+                  const SizedBox(height: 12),
+                  Text('Online now (${online.length})',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w700)),
+                  if (online.isEmpty)
                     const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: Text(
-                          'Showing the latest 500 events. Choose a shorter '
-                              'date range to see the rest.',
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text('Nobody is online right now.', style: _hint),
+                    )
+                  else
+                    for (final p in online) _row(p.$1, true, p.$2),
+                ],
+                if (showOut) ...[
+                  const Divider(height: 28),
+                  const Text('Last logged out',
+                      style:
+                      TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _pickRange,
+                    icon: const Icon(Icons.calendar_today, size: 18),
+                    label: Text(_rangeLabel()),
+                  ),
+                  if (out.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text('Nobody logged out on this date.',
                           style: _hint),
-                    ),
-                ]);
-              },
-            ),
-          ],
+                    )
+                  else
+                    for (final p in out) _row(p.$1, false, p.$2),
+                ],
+              ],
+            );
+          },
         ),
       ),
     );
