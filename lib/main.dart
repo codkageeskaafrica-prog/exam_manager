@@ -6865,8 +6865,317 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
 /// login page) and then signs out.
 Future<void> _signOut(BuildContext context) async {
   Navigator.of(context).popUntil((r) => r.isFirst);
+  try {
+    // must be written while still signed in; never block the sign out
+    await logActivity('logout').timeout(const Duration(seconds: 4));
+  } catch (_) {}
+  stopPresence();
   await FirebaseAuth.instance.signOut();
 }
+
+// ======================= ACTIVITY LOG (Settings > Activity log) =======================
+//
+// Firestore:
+//   activityLog/{auto}  uid, name, email, role, type ('login'|'logout'), time
+//   presence/{uid}      name, role, online (bool), lastSeen
+// A person counts as online while presence.online is true and lastSeen is
+// less than 5 minutes old (the app refreshes it every 2 minutes), so someone
+// who closes the app without signing out drops off the list by itself.
+
+Timer? _presenceTimer;
+
+/// Writes one login / logout event and updates the online marker.
+/// Never throws: the activity log must not stop anybody from signing in.
+Future<void> logActivity(String type, {User? user}) async {
+  final u = user ?? FirebaseAuth.instance.currentUser;
+  if (u == null) return;
+  try {
+    final db = FirebaseFirestore.instance;
+    var name = u.displayName ?? '';
+    var role = '';
+    try {
+      final m = (await db.collection('users').doc(u.uid).get()).data();
+      if (m != null) {
+        if ('${m['name'] ?? ''}'.trim().isNotEmpty) name = '${m['name']}';
+        role = '${m['role'] ?? ''}';
+      }
+    } catch (_) {}
+    if (name.trim().isEmpty) name = u.email ?? u.uid;
+    await db.collection('activityLog').add({
+      'uid': u.uid,
+      'name': name,
+      'email': u.email ?? '',
+      'role': role,
+      'type': type,
+      'time': FieldValue.serverTimestamp(),
+    });
+    await db.collection('presence').doc(u.uid).set({
+      'name': name,
+      'role': role,
+      'online': type == 'login',
+      'lastSeen': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  } catch (_) {}
+}
+
+/// Refreshes "lastSeen" every 2 minutes while somebody is signed in.
+void startPresence() {
+  _presenceTimer?.cancel();
+  _presenceTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+    final u = FirebaseAuth.instance.currentUser;
+    if (u == null) return;
+    FirebaseFirestore.instance.collection('presence').doc(u.uid).set({
+      'online': true,
+      'lastSeen': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError((_) {});
+  });
+}
+
+void stopPresence() {
+  _presenceTimer?.cancel();
+  _presenceTimer = null;
+}
+
+class _ActivityLogCard extends StatefulWidget {
+  const _ActivityLogCard();
+
+  @override
+  State<_ActivityLogCard> createState() => _ActivityLogCardState();
+}
+
+class _ActivityLogCardState extends State<_ActivityLogCard> {
+  static const _hint = TextStyle(fontSize: 12, color: Colors.black54);
+  static const _onlineFor = Duration(minutes: 5);
+
+  DateTimeRange _range = DateTimeRange(
+    start: DateUtils.dateOnly(DateTime.now()),
+    end: DateUtils.dateOnly(DateTime.now()),
+  );
+  String _filter = 'all'; // all | login | logout
+  late Stream<QuerySnapshot<Map<String, dynamic>>> _events = _query();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _presence =
+  FirebaseFirestore.instance
+      .collection('presence')
+      .where('online', isEqualTo: true)
+      .snapshots();
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    // re-check who is still online once a minute
+    _tick = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> _query() => FirebaseFirestore
+      .instance
+      .collection('activityLog')
+      .where('time', isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
+      .where('time',
+      isLessThan:
+      Timestamp.fromDate(_range.end.add(const Duration(days: 1))))
+      .orderBy('time', descending: true)
+      .limit(500)
+      .snapshots();
+
+  Future<void> _pickRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDateRange: _range,
+    );
+    if (picked != null) {
+      setState(() {
+        _range = picked;
+        _events = _query();
+      });
+    }
+  }
+
+  String _rangeLabel() {
+    final f = DateFormat('d MMM yyyy');
+    return DateUtils.isSameDay(_range.start, _range.end)
+        ? f.format(_range.start)
+        : '${f.format(_range.start)} - ${f.format(_range.end)}';
+  }
+
+  String _role(String r) => r.isEmpty ? '' : UserProfile.roleLabel(r);
+
+  DateTime? _time(Object? v) => v is Timestamp ? v.toDate() : null;
+
+  Widget _onlineNow() {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _presence,
+      builder: (context, snap) {
+        final cutoff = DateTime.now().subtract(_onlineFor);
+        final people = <Map<String, dynamic>>[
+          for (final d in snap.data?.docs ?? const [])
+            if ((_time(d.data()['lastSeen']) ?? DateTime(2000))
+                .isAfter(cutoff))
+              d.data(),
+        ]..sort((a, b) => '${a['name']}'.compareTo('${b['name']}'));
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: const BoxDecoration(
+                    color: Colors.green, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Text('Online now (${people.length})',
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w700)),
+            ]),
+            const SizedBox(height: 6),
+            if (snap.hasError)
+              const Text('Could not load who is online.', style: _hint)
+            else if (people.isEmpty)
+              const Text('Nobody is online right now.', style: _hint)
+            else
+              Wrap(spacing: 8, runSpacing: 6, children: [
+                for (final p in people)
+                  Chip(
+                    avatar: const Icon(Icons.circle,
+                        size: 10, color: Colors.green),
+                    label: Text(
+                        '${p['name']}'
+                            '${_role('${p['role'] ?? ''}').isEmpty ? '' : ' (${_role('${p['role']}')})'}',
+                        style: const TextStyle(fontSize: 12.5)),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ]),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _onlineNow(),
+            const Divider(height: 28),
+            const Text('Logins and logouts',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _pickRange,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(_rangeLabel()),
+            ),
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, children: [
+              for (final f in const [
+                ('all', 'All'),
+                ('login', 'Logged in'),
+                ('logout', 'Logged out'),
+              ])
+                ChoiceChip(
+                  label: Text(f.$2),
+                  selected: _filter == f.$1,
+                  onSelected: (_) => setState(() => _filter = f.$1),
+                ),
+            ]),
+            const SizedBox(height: 8),
+            StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: _events,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Text(
+                        'Could not load the activity log. Check that the '
+                            'Firestore rules allow the administrator to read '
+                            'activityLog.\n${snap.error}',
+                        style: const TextStyle(color: Colors.red)),
+                  );
+                }
+                if (!snap.hasData) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                final rows = [
+                  for (final d in snap.data!.docs)
+                    if (_filter == 'all' || d.data()['type'] == _filter)
+                      d.data(),
+                ];
+                if (rows.isEmpty) {
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Text('No activity for this date.', style: _hint),
+                  );
+                }
+                final tf = DateFormat('d MMM yyyy, HH:mm');
+                return Column(children: [
+                  for (final m in rows)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: CircleAvatar(
+                        radius: 18,
+                        backgroundColor: m['type'] == 'login'
+                            ? Colors.green.shade50
+                            : Colors.grey.shade200,
+                        child: Icon(
+                          m['type'] == 'login' ? Icons.login : Icons.logout,
+                          size: 18,
+                          color: m['type'] == 'login'
+                              ? Colors.green.shade700
+                              : Colors.black54,
+                        ),
+                      ),
+                      title: Text('${m['name'] ?? m['email'] ?? ''}',
+                          style:
+                          const TextStyle(fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                          '${m['type'] == 'login' ? 'Logged in' : 'Logged out'}'
+                              '${_role('${m['role'] ?? ''}').isEmpty ? '' : ' - ${_role('${m['role']}')}'}'),
+                      trailing: Text(
+                          _time(m['time']) == null
+                              ? '...'
+                              : tf.format(_time(m['time'])!),
+                          style: _hint),
+                    ),
+                  if (snap.data!.docs.length >= 500)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                          'Showing the latest 500 events. Choose a shorter '
+                              'date range to see the rest.',
+                          style: _hint),
+                    ),
+                ]);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 
 /// Lets the signed-in person (teacher, student, administrator) change their
 /// own password: the current password is asked first.
@@ -7596,7 +7905,7 @@ class _WaitingApprovalScreen extends StatelessWidget {
                   ],
                   const SizedBox(height: 16),
                   OutlinedButton.icon(
-                    onPressed: () => FirebaseAuth.instance.signOut(),
+                    onPressed: () => _signOut(context),
                     icon: const Icon(Icons.logout, size: 18),
                     label: const Text('Sign out'),
                   ),
@@ -8812,6 +9121,8 @@ const _kSetCats = <_SetCat>[
   _SetCat(3, 'Users', 'Accounts, approval and page access',
       Icons.manage_accounts),
   _SetCat(4, 'Account', 'Your password and sign out', Icons.person),
+  _SetCat(6, 'Activity log', 'Who logged in or out, and who is online',
+      Icons.history),
 ];
 
 class SettingsScreen extends StatefulWidget {
@@ -9625,6 +9936,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ('Default access', <Widget>[const _PermissionsCard(part: 2)]),
       ];
     }
+    if (id == 6) {
+      return <(String, List<Widget>)>[
+        ('Activity log', <Widget>[const _ActivityLogCard()]),
+      ];
+    }
     return <(String, List<Widget>)>[
       ('Account', <Widget>[_accountCard()]),
     ];
@@ -9772,7 +10088,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
-            if (c.id != 3 || admin) c
+            if ((c.id != 3 || admin) &&
+                (c.id != 6 || me.data?.isAdmin == true))
+              c
         ];
         if (!cats.any((c) => c.id == _cat)) _cat = cats.first.id;
         final cur = cats.firstWhere((c) => c.id == _cat);
@@ -26254,6 +26572,8 @@ Text(label, style: TextStyle(fontSize: 11.5, color: Colors.grey.shade700)),
 ]);
 }
 
+String? _activityUid; // last account whose login was written to the log
+
 Future<void> main() async {
 WidgetsFlutterBinding.ensureInitialized();
 try {
@@ -26263,9 +26583,16 @@ schoolLogo.start(); // so the login screen can show the logo
 FirebaseAuth.instance.authStateChanges().listen((user) {
 if (user == null) {
 appSettings.stop();
+stopPresence();
+_activityUid = null;
 } else {
 appSettings.start();
 schoolLogo.start(); // retry if it needed a signed-in user
+if (_activityUid != user.uid) {
+_activityUid = user.uid;
+logActivity('login', user: user); // activity log + online marker
+startPresence();
+}
 }
 });
 runApp(const ExamManagerApp());
