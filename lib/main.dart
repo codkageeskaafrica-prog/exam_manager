@@ -390,6 +390,17 @@ class ExamService {
     return b64 == null ? null : base64Decode(b64);
   }
 
+  /// The school letterhead as a PDF image (null = none saved or unreadable).
+  Future<pw.MemoryImage?> letterheadPdfImage() async {
+    final b = await getLetterhead();
+    if (b == null) return null;
+    try {
+      return pw.MemoryImage(_sniff(b) != null ? b : await _toPng(b));
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ---------------- General exam heading ----------------
   Future<ExamHeading> getHeading() async =>
       ExamHeading.fromMap((await _settings.get()).data() ?? {});
@@ -15305,6 +15316,401 @@ double get total => counted.values.fold(0.0, (a, b) => a + b);
 double? get average => counted.isEmpty ? null : total / counted.length;
 }
 
+// ======================= REPORT CARD (student Results tab + print) =======================
+
+class _RcRow {
+final String subject, grade;
+final double? mark;
+final double max;
+final bool cheated;
+const _RcRow(this.subject, this.mark, this.max, this.grade, this.cheated);
+}
+
+class _RcData {
+final String name, studentNo, className, form, exam, year, issued;
+final List<_RcRow> rows;
+final double total, totalMax;
+final double? average, percent;
+final String? grade;
+final bool cheatedAll, belowMin;
+final List<String> scale;
+final int attTotal, attPresent, attAbsent;
+const _RcData({
+required this.name,
+required this.studentNo,
+required this.className,
+required this.form,
+required this.exam,
+required this.year,
+required this.issued,
+required this.rows,
+required this.total,
+required this.totalMax,
+required this.average,
+required this.percent,
+required this.grade,
+required this.cheatedAll,
+required this.belowMin,
+required this.scale,
+required this.attTotal,
+required this.attPresent,
+required this.attAbsent,
+});
+
+bool get passed => !cheatedAll && average != null && grade != 'F' && !belowMin;
+}
+
+/// The printable report card (A4): school letterhead, student details, the
+/// statement of marks, the summary, attendance, grade scale and signatures.
+Future<Uint8List> _buildReportCardPdf(_RcData d) async {
+// The built-in PDF font is Latin-1 only.
+String safe(String t) => String.fromCharCodes([
+for (final r in t.runes)
+r == 0x2018 || r == 0x2019
+? 0x27
+    : r == 0x2013 || r == 0x2014
+? 0x2D
+    : r > 255
+? 0x3F
+    : r
+]);
+String m(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+const navy = PdfColor.fromInt(0xFF1F4E79);
+const zebra = PdfColor.fromInt(0xFFEEF3F9);
+const line = PdfColor.fromInt(0xFFB8C4D4);
+final red = PdfColors.red700;
+PdfColor gradeColor(String g) => g == 'A' || g == 'B'
+? PdfColors.green800
+    : g == 'C' || g == 'D'
+? PdfColors.orange800
+    : PdfColors.red800;
+
+final head = await ExamService().letterheadPdfImage();
+final logoImg = pdfLogoImage(LogoPlace.result);
+final wmBg = pdfWatermark(LogoPlace.result);
+
+pw.Widget info(String label, String value) => pw.Container(
+padding: const pw.EdgeInsets.symmetric(vertical: 4),
+decoration: const pw.BoxDecoration(
+border: pw.Border(bottom: pw.BorderSide(color: line, width: 0.6))),
+child: pw.Row(children: [
+pw.SizedBox(
+width: 84,
+child: pw.Text(safe(label),
+style: const pw.TextStyle(
+fontSize: 9.5, color: PdfColors.grey700))),
+pw.Expanded(
+child: pw.Text(safe(value),
+style: pw.TextStyle(
+fontSize: 11,
+fontWeight: pw.FontWeight.bold,
+color: navy))),
+]),
+);
+
+pw.Widget cell(String t,
+{bool bold = false,
+bool left = false,
+PdfColor? color,
+double size = 10.5}) =>
+pw.Padding(
+padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 6),
+child: pw.Align(
+alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
+child: pw.Text(safe(t),
+style: pw.TextStyle(
+fontSize: size,
+color: color,
+fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+),
+);
+
+pw.Widget box(String value, String label,
+{PdfColor? fill, PdfColor? color}) =>
+pw.Expanded(
+child: pw.Container(
+margin: const pw.EdgeInsets.symmetric(horizontal: 3),
+padding: const pw.EdgeInsets.symmetric(vertical: 8),
+alignment: pw.Alignment.center,
+decoration: pw.BoxDecoration(
+color: fill,
+borderRadius: pw.BorderRadius.circular(5),
+border: pw.Border.all(color: navy, width: 1.4)),
+child: pw.Column(children: [
+pw.Text(safe(value),
+style: pw.TextStyle(
+fontSize: 15,
+fontWeight: pw.FontWeight.bold,
+color: color ?? navy)),
+pw.SizedBox(height: 2),
+pw.Text(safe(label),
+style: pw.TextStyle(
+fontSize: 8, color: fill == null ? PdfColors.grey700 : color)),
+]),
+),
+);
+
+pw.Widget panel(String title, pw.Widget child) => pw.Expanded(
+child: pw.Container(
+margin: const pw.EdgeInsets.symmetric(horizontal: 3),
+padding: const pw.EdgeInsets.all(8),
+decoration: pw.BoxDecoration(
+borderRadius: pw.BorderRadius.circular(5),
+border: pw.Border.all(color: line, width: 0.8)),
+child: pw.Column(
+crossAxisAlignment: pw.CrossAxisAlignment.start,
+children: [
+pw.Text(title,
+style: pw.TextStyle(
+fontSize: 9.5,
+fontWeight: pw.FontWeight.bold,
+color: navy)),
+pw.SizedBox(height: 5),
+child,
+]),
+),
+);
+
+final attPct =
+d.attTotal == 0 ? 0 : (d.attPresent / d.attTotal * 100).round();
+
+final doc = pw.Document();
+doc.addPage(pw.MultiPage(
+pageTheme: pw.PageTheme(
+pageFormat: PdfPageFormat.a4,
+margin: const pw.EdgeInsets.fromLTRB(36, 34, 36, 34),
+// watermark (if any) + a thin frame around the page
+buildBackground: (ctx) => pw.FullPage(
+ignoreMargins: true,
+child: pw.Stack(children: [
+if (wmBg != null) wmBg(ctx),
+pw.Padding(
+padding: const pw.EdgeInsets.all(16),
+child: pw.Container(
+decoration: pw.BoxDecoration(
+border: pw.Border.all(color: navy, width: 1.6))),
+),
+]),
+),
+),
+build: (ctx) => [
+if (logoImg != null) pdfLogoBlock(logoImg),
+if (head != null)
+pw.Image(head,
+width: double.infinity, height: 80, fit: pw.BoxFit.contain),
+pw.SizedBox(height: 8),
+pw.Container(
+width: double.infinity,
+padding: const pw.EdgeInsets.symmetric(vertical: 9),
+color: navy,
+child: pw.Column(children: [
+pw.Text('REPORT CARD',
+style: pw.TextStyle(
+fontSize: 19,
+letterSpacing: 4,
+fontWeight: pw.FontWeight.bold,
+color: PdfColors.white)),
+pw.SizedBox(height: 2),
+pw.Text(
+safe(d.year.isEmpty ? d.exam : '${d.exam}  |  ${d.year}'),
+style: const pw.TextStyle(
+fontSize: 10.5, color: PdfColors.white)),
+]),
+),
+pw.SizedBox(height: 12),
+pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+pw.Expanded(
+child: pw.Column(children: [
+info('Student name', d.name),
+info('Student ID', d.studentNo.isEmpty ? '-' : d.studentNo),
+])),
+pw.SizedBox(width: 14),
+pw.Expanded(
+child: pw.Column(children: [
+info('Class', d.className),
+info('Form', d.form),
+])),
+]),
+pw.SizedBox(height: 14),
+pw.Row(children: [
+pw.Text('STATEMENT OF MARKS',
+style: pw.TextStyle(
+fontSize: 10.5,
+fontWeight: pw.FontWeight.bold,
+color: navy)),
+pw.SizedBox(width: 8),
+pw.Expanded(child: pw.Container(height: 1, color: line)),
+]),
+pw.SizedBox(height: 5),
+pw.Table(
+border: pw.TableBorder.all(color: line, width: 0.6),
+columnWidths: const {
+0: pw.FixedColumnWidth(28),
+1: pw.FlexColumnWidth(),
+2: pw.FixedColumnWidth(70),
+3: pw.FixedColumnWidth(60),
+4: pw.FixedColumnWidth(56),
+},
+children: [
+pw.TableRow(
+decoration: const pw.BoxDecoration(color: navy),
+children: [
+cell('#', bold: true, color: PdfColors.white, size: 9.5),
+cell('SUBJECT',
+bold: true, left: true, color: PdfColors.white, size: 9.5),
+cell('MARKS',
+bold: true, color: PdfColors.white, size: 9.5),
+cell('MAX', bold: true, color: PdfColors.white, size: 9.5),
+cell('GRADE',
+bold: true, color: PdfColors.white, size: 9.5),
+],
+),
+for (var i = 0; i < d.rows.length; i++)
+pw.TableRow(
+decoration:
+pw.BoxDecoration(color: i.isOdd ? zebra : PdfColors.white),
+children: [
+cell('${i + 1}'),
+cell(d.rows[i].subject, left: true, bold: true),
+d.rows[i].cheated
+? cell('Cheated', bold: true, color: red, size: 9.5)
+    : cell(d.rows[i].mark == null ? '-' : m(d.rows[i].mark!),
+bold: true,
+color: d.rows[i].mark == null
+? null
+    : gradeColor(d.rows[i].grade)),
+cell(d.rows[i].cheated ? '-' : m(d.rows[i].max)),
+cell(d.rows[i].cheated || d.rows[i].mark == null
+? '-'
+    : d.rows[i].grade,
+bold: true,
+color: d.rows[i].cheated || d.rows[i].mark == null
+? null
+    : gradeColor(d.rows[i].grade)),
+],
+),
+pw.TableRow(
+decoration: const pw.BoxDecoration(color: zebra),
+children: [
+cell(''),
+cell('Grand Total', left: true, bold: true, color: navy),
+cell(m(d.total), bold: true, color: navy),
+cell(m(d.totalMax), bold: true, color: navy),
+cell(d.grade ?? '-',
+bold: true,
+color: d.grade == null ? null : gradeColor(d.grade!)),
+],
+),
+],
+),
+pw.SizedBox(height: 12),
+pw.Row(children: [
+box('${m(d.total)} / ${m(d.totalMax)}', 'TOTAL MARKS'),
+box(d.average == null ? '-' : m(d.average!), 'AVERAGE'),
+box(d.percent == null ? '-' : '${d.percent!.toStringAsFixed(1)}%',
+'PERCENTAGE'),
+box(d.grade ?? '-', 'OVERALL GRADE',
+color: d.grade == null ? null : gradeColor(d.grade!)),
+box(
+d.cheatedAll
+? 'CHEATED'
+    : d.average == null
+? '-'
+    : d.passed
+? 'PASS'
+    : 'FAIL',
+'RESULT',
+fill: d.cheatedAll || (d.average != null && !d.passed)
+? PdfColors.red700
+    : navy,
+color: PdfColors.white),
+]),
+pw.SizedBox(height: 12),
+pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+panel(
+'ATTENDANCE',
+pw.Column(
+crossAxisAlignment: pw.CrossAxisAlignment.start,
+children: [
+pw.Text('Total lessons: ${d.attTotal}',
+style: const pw.TextStyle(fontSize: 9.5)),
+pw.Text('Present: ${d.attPresent}',
+style: const pw.TextStyle(fontSize: 9.5)),
+pw.Text('Absent: ${d.attAbsent}',
+style: const pw.TextStyle(fontSize: 9.5)),
+pw.Text('Attendance: $attPct%',
+style: pw.TextStyle(
+fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+])),
+panel(
+'GRADE SCALE (average mark)',
+pw.Wrap(spacing: 4, runSpacing: 4, children: [
+for (final s in d.scale)
+pw.Container(
+padding: const pw.EdgeInsets.symmetric(
+horizontal: 5, vertical: 2),
+decoration: pw.BoxDecoration(
+color: s.startsWith('F') ? PdfColors.red50 : zebra,
+borderRadius: pw.BorderRadius.circular(8)),
+child: pw.Text(safe(s),
+style: const pw.TextStyle(fontSize: 8.5)),
+),
+])),
+]),
+if (d.cheatedAll || d.belowMin) ...[
+pw.SizedBox(height: 8),
+pw.Text(
+d.cheatedAll
+? 'Marked as cheated in all subjects. No mark counts.'
+    : 'Below the minimum total for this exam.',
+style: pw.TextStyle(
+fontSize: 9.5,
+fontWeight: pw.FontWeight.bold,
+color: red)),
+],
+pw.SizedBox(height: 14),
+pw.Row(children: [
+pw.Text("CLASS TEACHER'S REMARKS",
+style: pw.TextStyle(
+fontSize: 10, fontWeight: pw.FontWeight.bold, color: navy)),
+pw.SizedBox(width: 8),
+pw.Expanded(child: pw.Container(height: 1, color: line)),
+]),
+pw.SizedBox(height: 22),
+pw.Container(height: 0.6, color: line),
+pw.SizedBox(height: 22),
+pw.Container(height: 0.6, color: line),
+pw.SizedBox(height: 26),
+pw.Row(children: [
+for (final s in const ['CLASS TEACHER', 'EXAM CONTROLLER', 'PRINCIPAL'])
+pw.Expanded(
+child: pw.Container(
+margin: const pw.EdgeInsets.symmetric(horizontal: 12),
+padding: const pw.EdgeInsets.only(top: 4),
+decoration: const pw.BoxDecoration(
+border: pw.Border(top: pw.BorderSide(color: navy, width: 1))),
+child: pw.Center(
+child: pw.Text(s,
+style: pw.TextStyle(
+fontSize: 9,
+fontWeight: pw.FontWeight.bold,
+color: navy))),
+),
+),
+]),
+pw.SizedBox(height: 10),
+pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+pw.Text('This is a computer generated report card',
+style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+pw.Text('Date of issue: ${d.issued}',
+style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+]),
+],
+));
+return doc.save();
+}
+
 class StudentDetailScreen extends StatefulWidget {
 final StudentInfo student;
 final SectionInfo section;
@@ -15380,6 +15786,8 @@ FirebaseFirestore.instance
     .snapshots();
 late Future<List<_AttEntry>> _attFuture = _loadAttendance();
 late Future<Map<String, ResultMarks>> _resFuture = _loadResults();
+final Map<String, bool> _exp = {}; // exam card open / closed
+bool _printing = false;
 late Future<_RealSection> _secFuture = _loadRealSection();
 /// True for an administrator / Student affairs: may edit everything here.
 bool _admin = false;
@@ -16025,7 +16433,7 @@ fontWeight: FontWeight.w900,
 color: _gradeColor(g))),
 );
 
-Widget _examCard(_ExamView v, bool expanded) {
+Future<_RcData> _cardData(_ExamView v) async {
 final avg = v.average;
 final g = avg == null ? null : _gradeOf(avg);
 final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
@@ -16036,205 +16444,471 @@ if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
 for (final s in {...v.marks.keys, ...v.cheatedSubs})
 if (!ExamService.subjects.contains(s)) s,
 ];
+var attTotal = 0, attPresent = 0;
+try {
+final att = await _attFuture;
+attTotal = att.length;
+attPresent = att.where((e) => e.present).length;
+} catch (_) {}
+var year = '';
+try {
+year = (await ExamService().getHeading()).academicYear;
+} catch (_) {}
+final st = appSettings.value;
+final totalMax =
+limits.totalMax > 0 ? limits.totalMax : maxMark * v.counted.length;
+return _RcData(
+name: widget.student.name,
+studentNo: widget.student.studentNo,
+className: widget.section.fullName,
+form: widget.section.form,
+exam: v.exam,
+year: year,
+issued: DateFormat('dd-MM-yyyy').format(DateTime.now()),
+rows: [
+for (final s in subs)
+_RcRow(
+s,
+v.marks[s],
+maxMark,
+v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!),
+v.cheatedAll || v.cheatedSubs.contains(s),
+),
+],
+total: v.total,
+totalMax: totalMax,
+average: avg,
+percent: avg == null || maxMark <= 0 ? null : avg / maxMark * 100,
+grade: g,
+cheatedAll: v.cheatedAll,
+belowMin: limits.totalMin > 0 && avg != null && v.total < limits.totalMin,
+scale: [
+for (var i = 0; i < st.grades.length; i++)
+'${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
+'F below ${_fmtMark(st.grades.last)}',
+],
+attTotal: attTotal,
+attPresent: attPresent,
+attAbsent: attTotal - attPresent,
+);
+}
+
+/// Opens the print dialog with this student's report card for one exam.
+Future<void> _printCard(_ExamView v) async {
+final messenger = ScaffoldMessenger.of(context);
+setState(() => _printing = true);
+try {
+final bytes = await _buildReportCardPdf(await _cardData(v));
+if (mounted) setState(() => _printing = false);
+await Printing.layoutPdf(
+name: 'Report card - ${widget.student.name} - ${v.exam}',
+onLayout: (_) async => bytes,
+);
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text(
+'Could not create the report card: ${'$e'.replaceFirst('Exception: ', '')}')));
+} finally {
+if (mounted) setState(() => _printing = false);
+}
+}
+
+static const _rcNavy = Color(0xFF1F4E79);
+static const _rcZebra = Color(0xFFF1F5FA);
+
+Widget _rcInfo(String label, String value) => Container(
+padding: const EdgeInsets.symmetric(vertical: 6),
+decoration: const BoxDecoration(
+border: Border(bottom: BorderSide(color: _line))),
+child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+SizedBox(
+width: 78,
+child: Text(label,
+style: const TextStyle(fontSize: 12, color: Colors.black54))),
+Expanded(
+child: Text(value,
+style: const TextStyle(
+fontSize: 13.5,
+fontWeight: FontWeight.w700,
+color: _rcNavy))),
+]),
+);
+
+Widget _rcBox(String value, String label,
+{Color? fill, Color? color, double size = 16}) =>
+Expanded(
+child: Container(
+padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+decoration: BoxDecoration(
+color: fill,
+borderRadius: BorderRadius.circular(10),
+border: Border.all(color: _rcNavy, width: 1.5)),
+child: Column(children: [
+FittedBox(
+fit: BoxFit.scaleDown,
+child: Text(value,
+style: TextStyle(
+fontSize: size,
+fontWeight: FontWeight.w800,
+color: color ?? _rcNavy)),
+),
+const SizedBox(height: 2),
+Text(label,
+style: TextStyle(
+fontSize: 9.5,
+letterSpacing: 0.4,
+color: fill == null ? Colors.black54 : color)),
+]),
+),
+);
+
+Widget _examCard(_ExamView v, bool expanded) {
+final avg = v.average;
+final g = avg == null ? null : _gradeOf(avg);
+final gs = g ?? 'F'; // grade used where an average exists
+final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
+final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+final subs = <String>[
+for (final s in ExamService.subjects)
+if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
+for (final s in {...v.marks.keys, ...v.cheatedSubs})
+if (!ExamService.subjects.contains(s)) s,
+];
 final belowMin =
 limits.totalMin > 0 && avg != null && v.total < limits.totalMin;
+final passed = !v.cheatedAll && avg != null && g != 'F' && !belowMin;
+final totalMax =
+limits.totalMax > 0 ? limits.totalMax : maxMark * v.counted.length;
+final pct = avg == null || maxMark <= 0 ? null : avg / maxMark * 100;
+final open = _exp[v.exam] ?? expanded;
+final st = appSettings.value;
+final logo = schoolLogo.value;
 
-Widget subjectTile(String sub, double w) {
+Widget th(String t, {double? w, bool left = false}) {
+final x = Text(t,
+textAlign: left ? TextAlign.left : TextAlign.center,
+style: const TextStyle(
+fontSize: 11,
+letterSpacing: 0.5,
+fontWeight: FontWeight.w800,
+color: Colors.white));
+return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
+}
+
+Widget td(String t,
+{double? w,
+bool left = false,
+Color? color,
+bool bold = false,
+double size = 13.5}) {
+final x = Text(t,
+textAlign: left ? TextAlign.left : TextAlign.center,
+style: TextStyle(
+fontSize: size,
+fontWeight: bold ? FontWeight.w800 : FontWeight.w500,
+color: color ?? Colors.black87));
+return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
+}
+
+Widget subjectRow(int i, String sub) {
 final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
 final mark = v.marks[sub];
+final gr = mark == null ? null : _gradeOf(mark);
 final c = cheated
 ? kCheatColor
-    : mark == null
-? Colors.grey
-    : _gradeColor(_gradeOf(mark));
+    : gr == null
+? Colors.black38
+    : _gradeColor(gr);
 return Container(
-width: w,
-padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-decoration: BoxDecoration(
-color: c.withAlpha(16),
-borderRadius: BorderRadius.circular(12),
-border: Border.all(color: c.withAlpha(56))),
-child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-Text(sub,
-maxLines: 1,
-overflow: TextOverflow.ellipsis,
-style: const TextStyle(
-fontSize: 12.5,
-fontWeight: FontWeight.w600,
-color: Colors.black54)),
-const SizedBox(height: 4),
+color: i.isOdd ? _rcZebra : Colors.white,
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+child: Row(children: [
+td('${i + 1}', w: 24, color: Colors.black45, size: 12),
+td(sub, left: true, bold: true),
 if (cheated)
-Row(children: [
-const Icon(Icons.gavel, size: 16, color: kCheatColor),
-const SizedBox(width: 4),
-const Text('Cheated',
-style: TextStyle(
-fontSize: 14,
-fontWeight: FontWeight.w800,
-color: kCheatColor)),
-])
-else
-Row(
-crossAxisAlignment: CrossAxisAlignment.baseline,
-textBaseline: TextBaseline.alphabetic,
-children: [
-Text(mark == null ? '–' : _fmtMark(mark),
-style: TextStyle(
-fontSize: 24,
-height: 1.1,
-fontWeight: FontWeight.w800,
-color: c)),
-if (mark != null)
-Text(' / ${_fmtMark(maxMark)}',
-style: const TextStyle(
-fontSize: 12, color: Colors.black45)),
-]),
-const SizedBox(height: 8),
-ClipRRect(
-borderRadius: BorderRadius.circular(4),
-child: LinearProgressIndicator(
-value: cheated || mark == null
-? 0
-    : (mark / maxMark).clamp(0.0, 1.0),
-minHeight: 5,
-backgroundColor: c.withAlpha(32),
-color: c,
-),
-),
+td('Cheated', w: 100, color: kCheatColor, bold: true, size: 12.5)
+else ...[
+td(mark == null ? '–' : _fmtMark(mark), w: 54, color: c, bold: true),
+td(_fmtMark(maxMark), w: 44, color: Colors.black54, size: 12.5),
+td(gr ?? '–', w: 40, color: c, bold: true),
+],
 ]),
 );
 }
 
-return Card(
-margin: const EdgeInsets.only(bottom: 12),
-elevation: 0,
-color: Colors.white,
-clipBehavior: Clip.antiAlias,
-shape: _kSettingsCardShape,
-child: Theme(
-data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-child: ExpansionTile(
-initiallyExpanded: expanded,
-tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-expandedCrossAxisAlignment: CrossAxisAlignment.start,
-leading: v.cheatedAll
-? Container(
-width: 42,
-height: 42,
-decoration: BoxDecoration(
-shape: BoxShape.circle,
-color: kCheatColor.withAlpha(30),
-border: Border.all(color: kCheatColor, width: 2)),
-child: const Icon(Icons.gavel, size: 20, color: kCheatColor),
-)
-    : g == null
-? const Icon(Icons.hourglass_empty, color: Colors.black38)
-    : _gradeBadge(g, 42),
-title: Row(children: [
+final banner = InkWell(
+onTap: () => setState(() => _exp[v.exam] = !open),
+child: Container(
+padding: const EdgeInsets.fromLTRB(14, 14, 10, 14),
+decoration: const BoxDecoration(
+gradient: LinearGradient(
+colors: [Color(0xFF2C6A96), Color(0xFF173B5A)],
+begin: Alignment.topLeft,
+end: Alignment.bottomRight),
+),
+child: Row(children: [
+Container(
+width: 44,
+height: 44,
+padding: EdgeInsets.all(logo.bytes != null ? 4 : 0),
+decoration:
+const BoxDecoration(shape: BoxShape.circle, color: Colors.white),
+child: logo.bytes != null
+? ClipOval(child: Image.memory(logo.bytes!, fit: BoxFit.contain))
+    : const Icon(Icons.school, color: _rcNavy, size: 24),
+),
+const SizedBox(width: 12),
+Expanded(
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+const Text('REPORT CARD',
+style: TextStyle(
+fontSize: 10.5,
+letterSpacing: 3,
+fontWeight: FontWeight.w700,
+color: Colors.white70)),
+const SizedBox(height: 2),
+Row(children: [
 Flexible(
 child: Text(v.exam,
 overflow: TextOverflow.ellipsis,
 style: const TextStyle(
-fontSize: 15.5, fontWeight: FontWeight.w700))),
+fontSize: 17,
+fontWeight: FontWeight.w800,
+color: Colors.white)),
+),
 if (!v.open) ...[
 const SizedBox(width: 8),
-_tag('Closed', Colors.blueGrey),
+_tag('Closed', Colors.white),
 ],
 ]),
-subtitle: Text(
+Text(
 v.cheatedAll
 ? 'Marked as cheated'
     : avg == null
 ? 'No marks counted'
-    : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}'
-'${belowMin ? ' · below min' : ''}',
-style: TextStyle(
-fontSize: 12.5,
-color: belowMin || v.cheatedAll ? kRed : Colors.black54,
-fontWeight:
-belowMin || v.cheatedAll ? FontWeight.w700 : FontWeight.w400)),
-children: [
-if (_admin)
-Align(
-alignment: Alignment.centerRight,
-child: _smallBtn(Icons.edit_outlined, 'Edit marks',
-() => _editMarks(v.exam, v.marks)),
+    : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}',
+style: const TextStyle(fontSize: 12, color: Colors.white70)),
+]),
 ),
-if (_admin) const SizedBox(height: 6),
+if (g != null && !v.cheatedAll)
+Container(
+width: 38,
+height: 38,
+alignment: Alignment.center,
+decoration:
+const BoxDecoration(shape: BoxShape.circle, color: Colors.white),
+child: Text(g,
+style: TextStyle(
+fontSize: 18,
+fontWeight: FontWeight.w900,
+color: _gradeColor(g))),
+),
+Icon(open ? Icons.expand_less : Icons.expand_more, color: Colors.white),
+]),
+),
+);
+
+final body = Padding(
+padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+LayoutBuilder(builder: (context, box) {
+final a = Column(children: [
+_rcInfo('Student', widget.student.name),
+_rcInfo('Student ID',
+widget.student.studentNo.isEmpty ? '–' : widget.student.studentNo),
+]);
+final b = Column(children: [
+_rcInfo('Class', widget.section.fullName),
+_rcInfo('Form', widget.section.form),
+]);
+return box.maxWidth >= 520
+? Row(children: [
+Expanded(child: a),
+const SizedBox(width: 16),
+Expanded(child: b),
+])
+    : Column(children: [a, b]);
+}),
+const SizedBox(height: 16),
+Row(children: [
+const Text('STATEMENT OF MARKS',
+style: TextStyle(
+fontSize: 12,
+letterSpacing: 0.6,
+fontWeight: FontWeight.w800,
+color: _rcNavy)),
+const SizedBox(width: 8),
+const Expanded(child: Divider(color: Color(0xFFE0A526), thickness: 1.2)),
+]),
+const SizedBox(height: 6),
 if (v.cheatedAll)
 _note('Marked as cheated in all subjects. No mark counts.')
 else if (v.cheatedSubs.isNotEmpty)
 _note('Cheated in ${v.cheatedSubs.join(', ')}. '
 'Those marks are not counted.'),
-LayoutBuilder(builder: (context, box) {
-final cols = box.maxWidth >= 560 ? 4 : (box.maxWidth >= 330 ? 3 : 2);
-final w = (box.maxWidth - (cols - 1) * 8) / cols;
-return Wrap(spacing: 8, runSpacing: 8, children: [
-for (final sub in subs) subjectTile(sub, w),
-]);
-}),
-if (!v.cheatedAll && avg != null) ...[
-const SizedBox(height: 12),
+ClipRRect(
+borderRadius: BorderRadius.circular(10),
+child: Container(
+decoration:
+BoxDecoration(border: Border.all(color: _line), borderRadius: BorderRadius.circular(10)),
+child: Column(children: [
 Container(
-padding: const EdgeInsets.symmetric(vertical: 10),
-decoration: BoxDecoration(
-color: const Color(0xFFF6F8FB),
-borderRadius: BorderRadius.circular(12)),
+color: _rcNavy,
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
 child: Row(children: [
-Expanded(
-child: Column(children: [
-const Text('Total',
-style: TextStyle(fontSize: 11.5, color: Colors.black54)),
-const SizedBox(height: 2),
-Text(
-'${_fmtMark(v.total)}'
-'${limits.totalMax > 0 ? ' / ${_fmtMark(limits.totalMax)}' : ''}',
-style: TextStyle(
-fontSize: 17,
-fontWeight: FontWeight.w800,
-color: belowMin ? kRed : Colors.black87)),
+th('#', w: 24),
+th('SUBJECT', left: true),
+th('MARKS', w: 54),
+th('MAX', w: 44),
+th('GRADE', w: 40),
 ]),
 ),
-Container(width: 1, height: 30, color: _line),
-Expanded(
-child: Column(children: [
-const Text('Average',
-style: TextStyle(fontSize: 11.5, color: Colors.black54)),
-const SizedBox(height: 2),
-Text(_f1(avg),
-style: TextStyle(
-fontSize: 17,
-fontWeight: FontWeight.w800,
-color: _gradeColor(g!))),
-]),
-),
-Container(width: 1, height: 30, color: _line),
-Expanded(
-child: Column(children: [
-const Text('Grade',
-style: TextStyle(fontSize: 11.5, color: Colors.black54)),
-const SizedBox(height: 2),
-Text(g!,
-style: TextStyle(
-fontSize: 17,
-fontWeight: FontWeight.w800,
-color: _gradeColor(g))),
+for (var i = 0; i < subs.length; i++) subjectRow(i, subs[i]),
+if (!v.cheatedAll && avg != null)
+Container(
+decoration: const BoxDecoration(
+color: _rcZebra,
+border: Border(top: BorderSide(color: _rcNavy, width: 1.5))),
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+child: Row(children: [
+td('', w: 24),
+td('Grand Total', left: true, bold: true, color: _rcNavy),
+td(_fmtMark(v.total), w: 54, bold: true, color: _rcNavy),
+td(_fmtMark(totalMax), w: 44, bold: true, color: _rcNavy, size: 12.5),
+td(gs, w: 40, bold: true, color: _gradeColor(gs)),
 ]),
 ),
 ]),
 ),
+),
+if (!v.cheatedAll && avg != null) ...[
+const SizedBox(height: 14),
+Row(children: [
+_rcBox('${_fmtMark(v.total)} / ${_fmtMark(totalMax)}', 'TOTAL', size: 14),
+const SizedBox(width: 6),
+_rcBox(_f1(avg), 'AVERAGE', color: _gradeColor(gs)),
+const SizedBox(width: 6),
+_rcBox(gs, 'GRADE', color: _gradeColor(gs), size: 20),
+const SizedBox(width: 6),
+_rcBox(passed ? 'PASS' : 'FAIL', 'RESULT',
+fill: passed ? _rcNavy : kRed, color: Colors.white, size: 15),
+]),
+if (pct != null) ...[
+const SizedBox(height: 10),
+ClipRRect(
+borderRadius: BorderRadius.circular(5),
+child: LinearProgressIndicator(
+value: (pct / 100).clamp(0.0, 1.0),
+minHeight: 7,
+backgroundColor: _gradeColor(gs).withAlpha(36),
+color: _gradeColor(gs),
+),
+),
+const SizedBox(height: 4),
+Text('${pct.toStringAsFixed(1)}% of the maximum mark',
+style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+],
 if (belowMin) ...[
 const SizedBox(height: 8),
 _tag('Below the minimum total (${_fmtMark(limits.totalMin)})', kRed,
 icon: Icons.warning_amber_rounded),
 ],
 ],
-],
+const SizedBox(height: 14),
+LayoutBuilder(builder: (context, box) {
+final attendance = FutureBuilder<List<_AttEntry>>(
+future: _attFuture,
+builder: (context, snap) {
+final l = snap.data ?? const <_AttEntry>[];
+final p = l.where((e) => e.present).length;
+final pc = l.isEmpty ? 0 : (p / l.length * 100).round();
+return _rcPanel(
+'ATTENDANCE',
+Text(
+'Total lessons: ${l.length}\nPresent: $p\n'
+'Absent: ${l.length - p}\nAttendance: $pc%',
+style: const TextStyle(fontSize: 12.5, height: 1.45)));
+},
+);
+final scale = _rcPanel(
+'GRADE SCALE',
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (var i = 0; i < st.grades.length; i++)
+_rcChip(
+'${AppSettings.gradeLetters[i]} ≥ ${_fmtMark(st.grades[i])}',
+_rcZebra),
+_rcChip('F below ${_fmtMark(st.grades.last)}',
+kRed.withAlpha(30)),
+]),
+);
+return box.maxWidth >= 520
+? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Expanded(child: attendance),
+const SizedBox(width: 10),
+Expanded(child: scale),
+])
+    : Column(children: [attendance, const SizedBox(height: 10), scale]);
+}),
+const SizedBox(height: 14),
+Row(children: [
+FilledButton.icon(
+style: FilledButton.styleFrom(backgroundColor: _rcNavy),
+onPressed: _printing ? null : () => _printCard(v),
+icon: _printing
+? const SizedBox(
+width: 16,
+height: 16,
+child: CircularProgressIndicator(
+strokeWidth: 2, color: Colors.white))
+    : const Icon(Icons.print, size: 18),
+label: const Text('Print report card'),
 ),
-),
+const SizedBox(width: 8),
+if (_admin)
+_smallBtn(Icons.edit_outlined, 'Edit marks',
+() => _editMarks(v.exam, v.marks)),
+]),
+]),
+);
+
+return Card(
+margin: const EdgeInsets.only(bottom: 14),
+elevation: 0,
+color: Colors.white,
+clipBehavior: Clip.antiAlias,
+shape: _kSettingsCardShape,
+child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+banner,
+if (open) body,
+]),
 );
 }
+
+Widget _rcPanel(String title, Widget child) => Container(
+width: double.infinity,
+padding: const EdgeInsets.all(12),
+decoration: BoxDecoration(
+color: const Color(0xFFF8FAFC),
+borderRadius: BorderRadius.circular(10),
+border: Border.all(color: _line)),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Text(title,
+style: const TextStyle(
+fontSize: 11.5,
+letterSpacing: 0.5,
+fontWeight: FontWeight.w800,
+color: _rcNavy)),
+const SizedBox(height: 6),
+child,
+]),
+);
+
+Widget _rcChip(String t, Color c) => Container(
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+decoration:
+BoxDecoration(color: c, borderRadius: BorderRadius.circular(10)),
+child: Text(t, style: const TextStyle(fontSize: 11.5)),
+);
 
 Widget _note(String t) => Container(
 width: double.infinity,
