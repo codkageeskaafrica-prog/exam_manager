@@ -7306,6 +7306,7 @@ class AppPages {
   static const schedule = 'schedule';
   static const teachers = 'teachers';
   static const finance = 'finance';
+  static const discipline = 'discipline';
   static const settings = 'settings';
 
   static const all = [
@@ -7318,6 +7319,7 @@ class AppPages {
     schedule,
     teachers,
     finance,
+    discipline,
     settings,
   ];
   static const labels = {
@@ -7330,6 +7332,7 @@ class AppPages {
     schedule: 'Schedule',
     teachers: 'Teachers',
     finance: 'Finance',
+    discipline: 'Discipline',
     settings: 'Settings',
   };
 }
@@ -8178,6 +8181,14 @@ class HomeScreen extends StatelessWidget {
       builder: (_) => const FinanceScreen(),
     ),
     _HomeItem(
+      page: AppPages.discipline,
+      title: 'Discipline',
+      subtitle: 'Record and review student incidents school-wide',
+      icon: Icons.gavel,
+      color: const Color(0xFFC0392B),
+      builder: (_) => const DisciplineScreen(),
+    ),
+    _HomeItem(
       page: AppPages.settings,
       title: 'Settings',
       subtitle: 'Letterhead, grades, attendance and other general settings',
@@ -8322,6 +8333,729 @@ class _HomeCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ======================= DISCIPLINE =======================
+//
+// Firestore: discipline/{auto}
+//   date (Timestamp, midnight), type, severity, action, note,
+//   studentId, studentName, sectionId, classLabel,
+//   createdBy, createdByName, createdByRole, createdAt,
+//   updatedBy, updatedByName, updatedAt
+//
+// Who may do what (also enforce this in firestore.rules):
+//   create : admin, affairs (Student affairs), teacher
+//   edit   : admin, affairs
+//   delete : admin
+
+class DisciplineRules {
+  static const types = [
+    'Late arrival',
+    'Skipping class',
+    'Disrespect',
+    'Disrupting class',
+    'Fighting',
+    'Bullying',
+    'Cheating',
+    'Uniform violation',
+    'Phone misuse',
+    'Damage to property',
+    'Other',
+  ];
+  static const severities = ['Minor', 'Moderate', 'Severe'];
+  static const actions = [
+    'Verbal warning',
+    'Written warning',
+    'Parent contacted',
+    'Detention',
+    'Referred to counselor',
+    'Suspension',
+    'No action',
+    'Other',
+  ];
+
+  static Color severityColor(String s) {
+    switch (s) {
+      case 'Severe':
+        return kRed;
+      case 'Moderate':
+        return const Color(0xFFE67E22);
+      default:
+        return const Color(0xFFF1C40F);
+    }
+  }
+
+  static bool canCreate(UserProfile? p) =>
+      p != null && (p.role == 'admin' || p.role == 'affairs' || p.role == 'teacher');
+  static bool canEdit(UserProfile? p) =>
+      p != null && (p.role == 'admin' || p.role == 'affairs');
+  static bool canDelete(UserProfile? p) => p != null && p.role == 'admin';
+}
+
+class DisciplineRecord {
+  final String id, studentId, studentName, sectionId, classLabel;
+  final String type, severity, action, note;
+  final String createdByName, updatedByName;
+  final DateTime date;
+  const DisciplineRecord({
+    required this.id,
+    required this.date,
+    required this.studentId,
+    required this.studentName,
+    required this.sectionId,
+    required this.classLabel,
+    required this.type,
+    required this.severity,
+    required this.action,
+    required this.note,
+    this.createdByName = '',
+    this.updatedByName = '',
+  });
+
+  factory DisciplineRecord.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data();
+    String s(String k) => '${m[k] ?? ''}';
+    return DisciplineRecord(
+      id: d.id,
+      date: (m['date'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      studentId: s('studentId'),
+      studentName: s('studentName'),
+      sectionId: s('sectionId'),
+      classLabel: s('classLabel'),
+      type: s('type'),
+      severity: s('severity'),
+      action: s('action'),
+      note: s('note'),
+      createdByName: s('createdByName'),
+      updatedByName: s('updatedByName'),
+    );
+  }
+}
+
+/// School-wide discipline page (main menu > Discipline).
+class DisciplineScreen extends StatefulWidget {
+  const DisciplineScreen({super.key});
+
+  @override
+  State<DisciplineScreen> createState() => _DisciplineScreenState();
+}
+
+class _DisciplineScreenState extends State<DisciplineScreen> {
+  final _db = FirebaseFirestore.instance;
+  final _me = UserProfile.watchMine();
+  final _fmt = DateFormat('d MMM y');
+
+  DateTimeRange? _range; // null = all time
+  String _sectionId = ''; // '' = all classes
+  String _severity = ''; // '' = all severities
+
+  List<SectionInfo> _sections = [];
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _secSub;
+  late Stream<List<DisciplineRecord>> _records;
+
+  @override
+  void initState() {
+    super.initState();
+    final t = DateTime.now();
+    final today = DateTime(t.year, t.month, t.day);
+    _range = DateTimeRange(
+        start: today.subtract(const Duration(days: 29)), end: today);
+    _records = _buildStream();
+    // every section of the school (the page is school-wide, so a teacher's
+    // form restriction is not applied here)
+    _secSub = _db.collection('sections').snapshots().listen((s) {
+      final l = s.docs.map(SectionInfo.fromDoc).toList()
+        ..sort((a, b) =>
+            a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+      if (mounted) setState(() => _sections = l);
+    }, onError: (_) {});
+  }
+
+  @override
+  void dispose() {
+    _secSub?.cancel();
+    super.dispose();
+  }
+
+  /// The date range is filtered by Firestore; class and severity are filtered
+  /// on the device (no composite indexes needed).
+  Stream<List<DisciplineRecord>> _buildStream() {
+    Query<Map<String, dynamic>> q = _db.collection('discipline');
+    final r = _range;
+    if (r != null) {
+      q = q
+          .where('date',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(r.start))
+          .where('date',
+          isLessThan:
+          Timestamp.fromDate(r.end.add(const Duration(days: 1))));
+    }
+    q = q.orderBy('date', descending: true).limit(1000);
+    return q
+        .snapshots()
+        .map((s) => s.docs.map(DisciplineRecord.fromDoc).toList());
+  }
+
+  void _snack(String t) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+  }
+
+  Future<void> _pickRange() async {
+    final now = DateTime.now();
+    final r = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year, now.month, now.day),
+      initialDateRange: _range,
+    );
+    if (r == null) return;
+    setState(() {
+      _range = r;
+      _records = _buildStream();
+    });
+  }
+
+  void _allTime() => setState(() {
+    _range = null;
+    _records = _buildStream();
+  });
+
+  void _reset() {
+    final t = DateTime.now();
+    final today = DateTime(t.year, t.month, t.day);
+    setState(() {
+      _range = DateTimeRange(
+          start: today.subtract(const Duration(days: 29)), end: today);
+      _sectionId = '';
+      _severity = '';
+      _records = _buildStream();
+    });
+  }
+
+  Future<void> _openEditor(UserProfile me, {DisciplineRecord? rec}) async {
+    if (rec == null && !DisciplineRules.canCreate(me)) return;
+    if (rec != null && !DisciplineRules.canEdit(me)) return;
+    final data = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _IncidentDialog(sections: _sections, record: rec),
+    );
+    if (data == null) return;
+    final who = me.name.trim().isNotEmpty ? me.name.trim() : me.email;
+    try {
+      final col = _db.collection('discipline');
+      if (rec == null) {
+        await col.add({
+          ...data,
+          'createdBy': me.uid,
+          'createdByName': who,
+          'createdByRole': me.role,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+        _snack('Incident saved.');
+      } else {
+        await col.doc(rec.id).update({
+          ...data,
+          'updatedBy': me.uid,
+          'updatedByName': who,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        _snack('Incident updated.');
+      }
+    } catch (e) {
+      _snack('Could not save: $e');
+    }
+  }
+
+  Future<void> _delete(UserProfile me, DisciplineRecord r) async {
+    if (!DisciplineRules.canDelete(me)) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete incident?'),
+        content: Text(
+            '${r.studentName} - ${r.type} (${_fmt.format(r.date)}) will be '
+                'deleted permanently.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _db.collection('discipline').doc(r.id).delete();
+      _snack('Incident deleted.');
+    } catch (e) {
+      _snack('Could not delete: $e');
+    }
+  }
+
+  Widget _filters() {
+    final r = _range;
+    final sectionValue =
+    _sections.any((s) => s.id == _sectionId) ? _sectionId : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          OutlinedButton.icon(
+            icon: const Icon(Icons.date_range),
+            label: Text(r == null
+                ? 'All dates'
+                : '${_fmt.format(r.start)} - ${_fmt.format(r.end)}'),
+            onPressed: _pickRange,
+          ),
+          if (r != null)
+            TextButton(onPressed: _allTime, child: const Text('All dates')),
+          SizedBox(
+            width: 190,
+            child: DropdownButtonFormField<String>(
+              value: sectionValue,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                  labelText: 'Class',
+                  isDense: true,
+                  border: OutlineInputBorder()),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('All classes')),
+                for (final s in _sections)
+                  DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+              ],
+              onChanged: (v) => setState(() => _sectionId = v ?? ''),
+            ),
+          ),
+          Wrap(spacing: 6, children: [
+            ChoiceChip(
+              label: const Text('All severities'),
+              selected: _severity.isEmpty,
+              onSelected: (_) => setState(() => _severity = ''),
+            ),
+            for (final s in DisciplineRules.severities)
+              ChoiceChip(
+                label: Text(s),
+                selected: _severity == s,
+                selectedColor:
+                DisciplineRules.severityColor(s).withOpacity(0.35),
+                onSelected: (_) => setState(() => _severity = s),
+              ),
+          ]),
+          IconButton(
+              tooltip: 'Reset filters',
+              icon: const Icon(Icons.filter_alt_off),
+              onPressed: _reset),
+        ],
+      ),
+    );
+  }
+
+  Widget _card(UserProfile? me, DisciplineRecord r) {
+    final c = DisciplineRules.severityColor(r.severity);
+    final canEdit = DisciplineRules.canEdit(me);
+    final canDelete = DisciplineRules.canDelete(me);
+    final by = [
+      if (r.createdByName.isNotEmpty) 'Recorded by ${r.createdByName}',
+      if (r.updatedByName.isNotEmpty) 'edited by ${r.updatedByName}',
+    ].join(' · ');
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      clipBehavior: Clip.antiAlias,
+      child: IntrinsicHeight(
+        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Container(width: 6, color: c),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Expanded(
+                      child: Text(
+                          r.classLabel.isEmpty
+                              ? r.studentName
+                              : '${r.studentName}  (${r.classLabel})',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                    Chip(
+                      visualDensity: VisualDensity.compact,
+                      side: BorderSide(color: c),
+                      backgroundColor: c.withOpacity(0.15),
+                      label: Text(r.severity,
+                          style: TextStyle(
+                              fontWeight: FontWeight.w600, color: c)),
+                    ),
+                    if (canEdit || canDelete)
+                      PopupMenuButton<String>(
+                        tooltip: 'More',
+                        onSelected: (v) {
+                          if (v == 'edit' && me != null) {
+                            _openEditor(me, rec: r);
+                          }
+                          if (v == 'delete' && me != null) _delete(me, r);
+                        },
+                        itemBuilder: (_) => [
+                          if (canEdit)
+                            const PopupMenuItem(
+                                value: 'edit',
+                                child: ListTile(
+                                    leading: Icon(Icons.edit),
+                                    title: Text('Edit'))),
+                          if (canDelete)
+                            const PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                    leading:
+                                    Icon(Icons.delete, color: kRed),
+                                    title: Text('Delete'))),
+                        ],
+                      )
+                    else
+                      const SizedBox(width: 12),
+                  ]),
+                  const SizedBox(height: 2),
+                  Text('${r.type}  ·  ${_fmt.format(r.date)}',
+                      style: const TextStyle(color: Colors.black54)),
+                  const SizedBox(height: 6),
+                  Text.rich(TextSpan(children: [
+                    const TextSpan(
+                        text: 'Action taken: ',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    TextSpan(text: r.action),
+                  ])),
+                  if (r.note.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(r.note),
+                  ],
+                  if (by.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(by,
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.black45)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _me,
+      builder: (context, ps) {
+        final me = ps.data;
+        return Scaffold(
+          appBar: AppBar(title: const Text('Discipline')),
+          floatingActionButton: DisciplineRules.canCreate(me)
+              ? FloatingActionButton.extended(
+            onPressed: () => _openEditor(me!),
+            icon: const Icon(Icons.add),
+            label: const Text('New incident'),
+          )
+              : null,
+          body: Column(children: [
+            _filters(),
+            Expanded(
+              child: StreamBuilder<List<DisciplineRecord>>(
+                stream: _records,
+                builder: (context, s) {
+                  if (s.hasError) {
+                    return Center(
+                        child: Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Text(
+                                'Could not load the incidents.\n${s.error}',
+                                textAlign: TextAlign.center)));
+                  }
+                  if (!s.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final list = [
+                    for (final r in s.data!)
+                      if ((_sectionId.isEmpty || r.sectionId == _sectionId) &&
+                          (_severity.isEmpty || r.severity == _severity))
+                        r
+                  ];
+                  if (list.isEmpty) {
+                    return const Center(
+                        child: Text('No incidents match these filters.'));
+                  }
+                  return Column(children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                            '${list.length} incident${list.length == 1 ? '' : 's'}',
+                            style: const TextStyle(color: Colors.black54)),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 90),
+                        itemCount: list.length,
+                        itemBuilder: (_, i) => _card(me, list[i]),
+                      ),
+                    ),
+                  ]);
+                },
+              ),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+}
+
+/// Add / edit one incident. Returns the fields to save, or null.
+/// When editing, the student cannot be changed (delete and re-add instead).
+class _IncidentDialog extends StatefulWidget {
+  final List<SectionInfo> sections;
+  final DisciplineRecord? record;
+  const _IncidentDialog({required this.sections, this.record});
+
+  @override
+  State<_IncidentDialog> createState() => _IncidentDialogState();
+}
+
+class _IncidentDialogState extends State<_IncidentDialog> {
+  final _note = TextEditingController();
+  late DateTime _date;
+  String _sectionId = '', _studentId = '';
+  String _type = '', _severity = '', _action = '';
+  List<({String id, String name})> _students = [];
+  bool _loading = false;
+  String? _err;
+
+  bool get _editing => widget.record != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final r = widget.record;
+    final t = DateTime.now();
+    _date = r?.date ?? DateTime(t.year, t.month, t.day);
+    if (r != null) {
+      _sectionId = r.sectionId;
+      _studentId = r.studentId;
+      _students = [(id: r.studentId, name: r.studentName)];
+      _type = r.type;
+      _severity = r.severity;
+      _action = r.action;
+      _note.text = r.note;
+    }
+  }
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadStudents(String sectionId) async {
+    setState(() {
+      _sectionId = sectionId;
+      _studentId = '';
+      _students = [];
+      _loading = true;
+      _err = null;
+    });
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('students')
+          .where('sectionId', isEqualTo: sectionId)
+          .get();
+      final l = [
+        for (final d in snap.docs) (id: d.id, name: '${d.data()['name'] ?? ''}')
+      ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      if (!mounted || _sectionId != sectionId) return;
+      setState(() {
+        _students = l;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _err = 'Could not load the students: $e';
+      });
+    }
+  }
+
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year, now.month, now.day),
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  void _save() {
+    if (_sectionId.isEmpty || _studentId.isEmpty) {
+      setState(() => _err = 'Choose the class and the student.');
+      return;
+    }
+    if (_type.isEmpty || _severity.isEmpty || _action.isEmpty) {
+      setState(() => _err = 'Choose the incident type, severity and action.');
+      return;
+    }
+    if (_note.text.trim().isEmpty) {
+      setState(() => _err = 'Write a short note explaining what happened.');
+      return;
+    }
+    final stu = _students.firstWhere((s) => s.id == _studentId);
+    String classLabel = widget.record?.classLabel ?? '';
+    for (final s in widget.sections) {
+      if (s.id == _sectionId) classLabel = s.fullName;
+    }
+    Navigator.pop(context, {
+      'date': Timestamp.fromDate(DateTime(_date.year, _date.month, _date.day)),
+      'type': _type,
+      'severity': _severity,
+      'action': _action,
+      'note': _note.text.trim(),
+      'studentId': stu.id,
+      'studentName': stu.name,
+      'sectionId': _sectionId,
+      'classLabel': classLabel,
+    });
+  }
+
+  InputDecoration _dec(String label) => InputDecoration(
+      labelText: label, isDense: true, border: const OutlineInputBorder());
+
+  @override
+  Widget build(BuildContext context) {
+    final secValue =
+    widget.sections.any((s) => s.id == _sectionId) ? _sectionId : null;
+    final stuValue =
+    _students.any((s) => s.id == _studentId) ? _studentId : null;
+    return AlertDialog(
+      title: Text(_editing ? 'Edit incident' : 'New incident'),
+      content: SizedBox(
+        width: 440,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.event),
+                label: Text('Date: ${DateFormat('d MMM y').format(_date)}'),
+                onPressed: _pickDate,
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: secValue,
+                isExpanded: true,
+                decoration: _dec('Class'),
+                items: [
+                  for (final s in widget.sections)
+                    DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+                ],
+                onChanged: _editing
+                    ? null
+                    : (v) {
+                  if (v != null) _loadStudents(v);
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: stuValue,
+                isExpanded: true,
+                decoration: _dec(_loading ? 'Loading students...' : 'Student'),
+                items: [
+                  for (final s in _students)
+                    DropdownMenuItem(value: s.id, child: Text(s.name)),
+                ],
+                onChanged: _editing
+                    ? null
+                    : (v) => setState(() => _studentId = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: _type.isEmpty ? null : _type,
+                isExpanded: true,
+                decoration: _dec('Incident type'),
+                items: [
+                  for (final t in DisciplineRules.types)
+                    DropdownMenuItem(value: t, child: Text(t)),
+                ],
+                onChanged: (v) => setState(() => _type = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: _severity.isEmpty ? null : _severity,
+                isExpanded: true,
+                decoration: _dec('Severity level'),
+                items: [
+                  for (final s in DisciplineRules.severities)
+                    DropdownMenuItem(
+                        value: s,
+                        child: Row(children: [
+                          Icon(Icons.circle,
+                              size: 12,
+                              color: DisciplineRules.severityColor(s)),
+                          const SizedBox(width: 8),
+                          Text(s),
+                        ])),
+                ],
+                onChanged: (v) => setState(() => _severity = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: _action.isEmpty ? null : _action,
+                isExpanded: true,
+                decoration: _dec('Action taken'),
+                items: [
+                  for (final a in DisciplineRules.actions)
+                    DropdownMenuItem(value: a, child: Text(a)),
+                ],
+                onChanged: (v) => setState(() => _action = v ?? ''),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _note,
+                minLines: 3,
+                maxLines: 6,
+                maxLength: 1000,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: _dec('Explanatory note'),
+              ),
+              if (_err != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(_err!, style: const TextStyle(color: kRed)),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
     );
   }
 }
@@ -8808,7 +9542,11 @@ class AppSettings {
     this.exams = const [],
     this.closedExams = const [],
     this.sectionSubjects = const [],
-    this.teacherAccess = const [AppPages.attendance, AppPages.result],
+    this.teacherAccess = const [
+      AppPages.attendance,
+      AppPages.result,
+      AppPages.discipline,
+    ],
     this.studentAccess = const [AppPages.result],
     this.affairsAccess = const [
       AppPages.students,
