@@ -17409,6 +17409,9 @@ bool _printing = false;
 late Future<_RealSection> _secFuture = _loadRealSection();
 /// True for an administrator: may edit everything here.
 bool _admin = false;
+/// True when the signed-in user may open the Discipline page: the
+/// Discipline tab is then shown here too.
+bool _canDiscipline = false;
 StreamSubscription<UserProfile>? _meSub;
 String _filter = 'all'; // all | present | absent | late
 String? _twin; // the same student's record in the class <-> section twin
@@ -17418,7 +17421,13 @@ void initState() {
 super.initState();
 CheatService.start();
 _meSub = UserProfile.watchMine().listen((p) {
-if (mounted) setState(() => _admin = p.fullAccess);
+if (mounted) {
+setState(() {
+_admin = p.fullAccess;
+_canDiscipline = p.effectiveAccess(appSettings.value)
+    .contains(AppPages.discipline);
+});
+}
 }, onError: (_) {});
 }
 
@@ -17767,10 +17776,130 @@ tabs: [
 tab(Icons.badge_outlined, 'Overview'),
 tab(Icons.emoji_events_outlined, 'Results'),
 tab(Icons.fact_check_outlined, 'Attendance'),
+if (_canDiscipline) tab(Icons.gavel_outlined, 'Discipline'),
 ],
 ),
 );
 }
+
+// ---------------- discipline tab ----------------
+/// Incidents of this student (also the ones saved on the class / section
+/// twin record), newest first. Read only: they are added and edited in the
+/// Discipline page.
+Widget _disciplineTab() => FutureBuilder<String?>(
+future: _twinId,
+builder: (context, tw) {
+if (tw.connectionState != ConnectionState.done) {
+return const Center(child: CircularProgressIndicator());
+}
+final ids = <String>{widget.student.id, if (tw.data != null) tw.data!}
+    .toList();
+return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: FirebaseFirestore.instance
+    .collection('discipline')
+    .where('studentId', whereIn: ids)
+    .snapshots(),
+builder: (context, snap) {
+if (snap.hasError) {
+return _msg('Could not load discipline: ${snap.error}',
+Icons.error_outline);
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+final list = snap.data!.docs.map(DisciplineRecord.fromDoc).toList()
+..sort((a, b) => b.date.compareTo(a.date));
+if (list.isEmpty) {
+return _msg('No discipline incidents for this student.',
+Icons.gavel_outlined);
+}
+final fmt = DateFormat('d MMM y');
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+children: [
+Padding(
+padding: const EdgeInsets.only(bottom: 10),
+child: Text(
+'${list.length} incident${list.length == 1 ? '' : 's'}',
+style: const TextStyle(
+fontSize: 13, color: Colors.black54)),
+),
+for (final r in list)
+Builder(builder: (context) {
+final c = DisciplineRules.severityColor(r.severity);
+return Card(
+margin: const EdgeInsets.only(bottom: 10),
+elevation: 0,
+color: Colors.white,
+shape: _kSettingsCardShape,
+clipBehavior: Clip.antiAlias,
+child: IntrinsicHeight(
+child: Row(
+crossAxisAlignment: CrossAxisAlignment.stretch,
+children: [
+Container(width: 6, color: c),
+Expanded(
+child: Padding(
+padding: const EdgeInsets.all(14),
+child: Column(
+crossAxisAlignment:
+CrossAxisAlignment.start,
+children: [
+Row(children: [
+Expanded(
+child: Text(r.type,
+style: const TextStyle(
+fontSize: 15,
+fontWeight:
+FontWeight.w700))),
+Chip(
+visualDensity:
+VisualDensity.compact,
+side: BorderSide(color: c),
+backgroundColor:
+c.withOpacity(0.15),
+label: Text(r.severity,
+style: TextStyle(
+fontWeight:
+FontWeight.w600,
+color: c))),
+]),
+Text(fmt.format(r.date),
+style: const TextStyle(
+color: Colors.black54)),
+const SizedBox(height: 6),
+Text.rich(TextSpan(children: [
+const TextSpan(
+text: 'Action taken: ',
+style: TextStyle(
+fontWeight: FontWeight.w600)),
+TextSpan(text: r.action),
+])),
+if (r.note.isNotEmpty) ...[
+const SizedBox(height: 4),
+Text(r.note),
+],
+if (r.createdByName.isNotEmpty) ...[
+const SizedBox(height: 6),
+Text('Recorded by ${r.createdByName}',
+style: const TextStyle(
+fontSize: 11,
+color: Colors.black45)),
+],
+],
+),
+),
+),
+]),
+),
+);
+}),
+],
+);
+},
+);
+},
+);
 
 // ---------------- overview tab ----------------
 Widget _statsRow() {
@@ -19193,7 +19322,7 @@ crossAxisAlignment: CrossAxisAlignment.start, children: children),
 Widget build(BuildContext context) {
 final cs = Theme.of(context).colorScheme;
 return DefaultTabController(
-length: 3,
+length: _canDiscipline ? 4 : 3,
 child: Scaffold(
 appBar: AppBar(title: const Text('Student details'), actions: [
 IconButton(
@@ -19219,6 +19348,7 @@ child: TabBarView(children: [
 _overview(),
 _resultsTab(),
 _attendanceTab(),
+if (_canDiscipline) _disciplineTab(),
 ]),
 ),
 ]),
