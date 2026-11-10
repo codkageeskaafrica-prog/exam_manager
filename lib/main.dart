@@ -8450,10 +8450,40 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
   DateTimeRange? _range; // null = all time
   String _sectionId = ''; // '' = all classes
   String _severity = ''; // '' = all severities
+  String _query = ''; // student name search
 
   List<SectionInfo> _sections = [];
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _secSub;
   late Stream<List<DisciplineRecord>> _records;
+  final _searchCtl = TextEditingController();
+  List<DisciplineRecord> _shown = const [];
+
+  List<DisciplineRecord> _apply(List<DisciplineRecord> all) {
+    final q = _query.trim().toLowerCase();
+    return [
+      for (final r in all)
+        if ((_sectionId.isEmpty || r.sectionId == _sectionId) &&
+            (_severity.isEmpty || r.severity == _severity) &&
+            (q.isEmpty || r.studentName.toLowerCase().contains(q)))
+          r
+    ];
+  }
+
+  DisciplineReport _buildReport() {
+    final r = _range;
+    final cls = _sections.where((x) => x.id == _sectionId).toList();
+    return DisciplineReport(
+      items: _shown,
+      period: r == null
+          ? 'All dates'
+          : '${_fmt.format(r.start)} - ${_fmt.format(r.end)}',
+      filters: [
+        if (cls.isNotEmpty) 'Class: ${cls.first.fullName}',
+        if (_severity.isNotEmpty) 'Severity: $_severity',
+        if (_query.trim().isNotEmpty) 'Student: ${_query.trim()}',
+      ].join('  |  '),
+    );
+  }
 
   @override
   void initState() {
@@ -8476,6 +8506,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
   @override
   void dispose() {
     _secSub?.cancel();
+    _searchCtl.dispose();
     super.dispose();
   }
 
@@ -8531,6 +8562,8 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
           start: today.subtract(const Duration(days: 29)), end: today);
       _sectionId = '';
       _severity = '';
+      _query = '';
+      _searchCtl.clear();
       _records = _buildStream();
     });
   }
@@ -8618,6 +8651,27 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
           ),
           if (r != null)
             TextButton(onPressed: _allTime, child: const Text('All dates')),
+          SizedBox(
+            width: 220,
+            child: TextField(
+              controller: _searchCtl,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: InputDecoration(
+                labelText: 'Search student',
+                isDense: true,
+                border: const OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () => setState(() {
+                      _query = '';
+                      _searchCtl.clear();
+                    })),
+              ),
+            ),
+          ),
           SizedBox(
             width: 190,
             child: DropdownButtonFormField<String>(
@@ -8760,7 +8814,10 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
       builder: (context, ps) {
         final me = ps.data;
         return Scaffold(
-          appBar: AppBar(title: const Text('Discipline')),
+          appBar: AppBar(title: const Text('Discipline'), actions: [
+            _DisciplineReportButton(report: _buildReport),
+            const SizedBox(width: 8),
+          ]),
           floatingActionButton: DisciplineRules.canCreate(me)
               ? FloatingActionButton.extended(
             onPressed: () => _openEditor(me!),
@@ -8785,12 +8842,8 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
                   if (!s.hasData) {
                     return const Center(child: CircularProgressIndicator());
                   }
-                  final list = [
-                    for (final r in s.data!)
-                      if ((_sectionId.isEmpty || r.sectionId == _sectionId) &&
-                          (_severity.isEmpty || r.severity == _severity))
-                        r
-                  ];
+                  final list = _apply(s.data!);
+                  _shown = list;
                   if (list.isEmpty) {
                     return const Center(
                         child: Text('No incidents match these filters.'));
@@ -8824,7 +8877,11 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
 }
 
 /// Add / edit one incident. Returns the fields to save, or null.
-/// When editing, the student cannot be changed (delete and re-add instead).
+/// - Student: type a name to search (all classes), no dropdown.
+/// - Incident type / Action taken: tick one or more checkboxes.
+/// - Severity: tick one checkbox (ticking another replaces it).
+/// Several ticked values are saved as "A, B" in the same text field the old
+/// dropdown used, so existing records, cards and filters keep working.
 class _IncidentDialog extends StatefulWidget {
   final List<SectionInfo> sections;
   final DisciplineRecord? record;
@@ -8834,16 +8891,24 @@ class _IncidentDialog extends StatefulWidget {
   State<_IncidentDialog> createState() => _IncidentDialogState();
 }
 
+typedef _Stu = ({String id, String name, String sectionId});
+
 class _IncidentDialogState extends State<_IncidentDialog> {
   final _note = TextEditingController();
+  final _search = TextEditingController();
+  final _searchFocus = FocusNode();
   late DateTime _date;
-  String _sectionId = '', _studentId = '';
-  String _type = '', _severity = '', _action = '';
-  List<({String id, String name})> _students = [];
+  _Stu? _student;
+  final Set<String> _types = {}, _actions = {};
+  String _severity = '';
+  List<_Stu> _all = [];
   bool _loading = false;
   String? _err;
 
   bool get _editing => widget.record != null;
+
+  static Set<String> _split(String s) =>
+      {for (final p in s.split(',')) if (p.trim().isNotEmpty) p.trim()};
 
   @override
   void initState() {
@@ -8852,41 +8917,45 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     final t = DateTime.now();
     _date = r?.date ?? DateTime(t.year, t.month, t.day);
     if (r != null) {
-      _sectionId = r.sectionId;
-      _studentId = r.studentId;
-      _students = [(id: r.studentId, name: r.studentName)];
-      _type = r.type;
+      _student =
+      (id: r.studentId, name: r.studentName, sectionId: r.sectionId);
+      _search.text = r.studentName;
+      _types.addAll(_split(r.type));
       _severity = r.severity;
-      _action = r.action;
+      _actions.addAll(_split(r.action));
       _note.text = r.note;
+    } else {
+      _loadStudents();
     }
   }
 
   @override
   void dispose() {
     _note.dispose();
+    _search.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
-  Future<void> _loadStudents(String sectionId) async {
-    setState(() {
-      _sectionId = sectionId;
-      _studentId = '';
-      _students = [];
-      _loading = true;
-      _err = null;
-    });
+  /// Loads every student once; the search then runs on the device.
+  Future<void> _loadStudents() async {
+    setState(() => _loading = true);
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection('students')
-          .where('sectionId', isEqualTo: sectionId)
-          .get();
+      final snap =
+      await FirebaseFirestore.instance.collection('students').get();
       final l = [
-        for (final d in snap.docs) (id: d.id, name: '${d.data()['name'] ?? ''}')
-      ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-      if (!mounted || _sectionId != sectionId) return;
+        for (final d in snap.docs)
+          (
+          id: d.id,
+          name: '${d.data()['name'] ?? ''}'.trim(),
+          sectionId: '${d.data()['sectionId'] ?? ''}',
+          )
+      ]
+        ..removeWhere((s) => s.name.isEmpty)
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      if (!mounted) return;
       setState(() {
-        _students = l;
+        _all = l;
         _loading = false;
       });
     } catch (e) {
@@ -8896,6 +8965,15 @@ class _IncidentDialogState extends State<_IncidentDialog> {
         _err = 'Could not load the students: $e';
       });
     }
+  }
+
+  String _classOf(String sectionId) {
+    for (final s in widget.sections) {
+      if (s.id == sectionId) return s.fullName;
+    }
+    return widget.record?.sectionId == sectionId
+        ? widget.record!.classLabel
+        : '';
   }
 
   Future<void> _pickDate() async {
@@ -8910,49 +8988,190 @@ class _IncidentDialogState extends State<_IncidentDialog> {
   }
 
   void _save() {
-    if (_sectionId.isEmpty || _studentId.isEmpty) {
-      setState(() => _err = 'Choose the class and the student.');
+    final stu = _student;
+    if (stu == null) {
+      setState(() => _err = 'Search and choose the student.');
       return;
     }
-    if (_type.isEmpty || _severity.isEmpty || _action.isEmpty) {
-      setState(() => _err = 'Choose the incident type, severity and action.');
+    if (_types.isEmpty) {
+      setState(() => _err = 'Tick at least one incident type.');
+      return;
+    }
+    if (_severity.isEmpty) {
+      setState(() => _err = 'Tick the severity level.');
+      return;
+    }
+    if (_actions.isEmpty) {
+      setState(() => _err = 'Tick at least one action taken.');
       return;
     }
     if (_note.text.trim().isEmpty) {
       setState(() => _err = 'Write a short note explaining what happened.');
       return;
     }
-    final stu = _students.firstWhere((s) => s.id == _studentId);
-    String classLabel = widget.record?.classLabel ?? '';
-    for (final s in widget.sections) {
-      if (s.id == _sectionId) classLabel = s.fullName;
-    }
+    // keep the order of the lists, not the order of ticking
+    String join(List<String> order, Set<String> s) =>
+        order.where(s.contains).followedBy(s.where((e) => !order.contains(e))).join(', ');
     Navigator.pop(context, {
       'date': Timestamp.fromDate(DateTime(_date.year, _date.month, _date.day)),
-      'type': _type,
+      'type': join(DisciplineRules.types, _types),
       'severity': _severity,
-      'action': _action,
+      'action': join(DisciplineRules.actions, _actions),
       'note': _note.text.trim(),
       'studentId': stu.id,
       'studentName': stu.name,
-      'sectionId': _sectionId,
-      'classLabel': classLabel,
+      'sectionId': stu.sectionId,
+      'classLabel': _classOf(stu.sectionId).isNotEmpty
+          ? _classOf(stu.sectionId)
+          : (widget.record?.classLabel ?? ''),
     });
   }
 
-  InputDecoration _dec(String label) => InputDecoration(
-      labelText: label, isDense: true, border: const OutlineInputBorder());
+  // ---------- pieces ----------
+
+  Widget _label(String t) => Padding(
+    padding: const EdgeInsets.only(top: 16, bottom: 4),
+    child: Text(t,
+        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+  );
+
+  /// Student search box: type part of the name, tap the match.
+  Widget _studentField() {
+    if (_editing) {
+      // the student of a saved incident cannot be changed
+      return InputDecorator(
+        decoration: const InputDecoration(
+            isDense: true,
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.person)),
+        child: Text(
+            '${_student!.name}  ${_classOf(_student!.sectionId).isEmpty ? '' : '(${_classOf(_student!.sectionId)})'}'),
+      );
+    }
+    return RawAutocomplete<_Stu>(
+      textEditingController: _search,
+      focusNode: _searchFocus,
+      displayStringForOption: (s) => s.name,
+      optionsBuilder: (v) {
+        final q = v.text.trim().toLowerCase();
+        if (q.isEmpty) return const Iterable<_Stu>.empty();
+        final words = q.split(RegExp(r'\s+'));
+        return _all
+            .where((s) {
+          final n = s.name.toLowerCase();
+          return words.every(n.contains);
+        })
+            .take(8);
+      },
+      onSelected: (s) => setState(() {
+        _student = s;
+        _err = null;
+      }),
+      fieldViewBuilder: (context, c, f, _) => TextField(
+        controller: c,
+        focusNode: f,
+        onChanged: (_) {
+          // typing again clears the previous choice
+          if (_student != null && c.text != _student!.name) {
+            setState(() => _student = null);
+          }
+        },
+        decoration: InputDecoration(
+          isDense: true,
+          border: const OutlineInputBorder(),
+          hintText: _loading ? 'Loading students...' : 'Type the student name',
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: _student != null
+              ? const Icon(Icons.check_circle, color: Color(0xFF2E7D32))
+              : (c.text.isEmpty
+              ? null
+              : IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                c.clear();
+                setState(() => _student = null);
+              })),
+        ),
+      ),
+      optionsViewBuilder: (context, onSelected, options) => Align(
+        alignment: Alignment.topLeft,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260, maxWidth: 440),
+            child: ListView(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              children: [
+                for (final s in options)
+                  ListTile(
+                    dense: true,
+                    title: Text(s.name),
+                    trailing: Text(_classOf(s.sectionId),
+                        style: const TextStyle(color: Colors.black54)),
+                    onTap: () => onSelected(s),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A tidy two-column grid of checkboxes.
+  Widget _checks({
+    required List<String> options,
+    required bool Function(String) checked,
+    required void Function(String) onTap,
+    Color? Function(String)? dot,
+  }) {
+    return LayoutBuilder(builder: (context, box) {
+      final w = (box.maxWidth - 8) / 2;
+      return Wrap(
+        spacing: 8,
+        runSpacing: 0,
+        children: [
+          for (final o in options)
+            SizedBox(
+              width: w,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () => onTap(o),
+                child: Row(children: [
+                  Checkbox(
+                    value: checked(o),
+                    visualDensity: VisualDensity.compact,
+                    onChanged: (_) => onTap(o),
+                  ),
+                  if (dot != null) ...[
+                    Icon(Icons.circle, size: 11, color: dot(o)),
+                    const SizedBox(width: 6),
+                  ],
+                  Expanded(
+                      child: Text(o,
+                          style: const TextStyle(fontSize: 13.5),
+                          overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ),
+        ],
+      );
+    });
+  }
+
+  void _toggle(Set<String> s, String v) => setState(() {
+    s.contains(v) ? s.remove(v) : s.add(v);
+    _err = null;
+  });
 
   @override
   Widget build(BuildContext context) {
-    final secValue =
-    widget.sections.any((s) => s.id == _sectionId) ? _sectionId : null;
-    final stuValue =
-    _students.any((s) => s.id == _studentId) ? _studentId : null;
     return AlertDialog(
       title: Text(_editing ? 'Edit incident' : 'New incident'),
       content: SizedBox(
-        width: 440,
+        width: 460,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -8963,83 +9182,41 @@ class _IncidentDialogState extends State<_IncidentDialog> {
                 label: Text('Date: ${DateFormat('d MMM y').format(_date)}'),
                 onPressed: _pickDate,
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: secValue,
-                isExpanded: true,
-                decoration: _dec('Class'),
-                items: [
-                  for (final s in widget.sections)
-                    DropdownMenuItem(value: s.id, child: Text(s.fullName)),
-                ],
-                onChanged: _editing
-                    ? null
-                    : (v) {
-                  if (v != null) _loadStudents(v);
-                },
+              _label('Student'),
+              _studentField(),
+              _label('Incident type  (tick one or more)'),
+              _checks(
+                options: DisciplineRules.types,
+                checked: _types.contains,
+                onTap: (v) => _toggle(_types, v),
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: stuValue,
-                isExpanded: true,
-                decoration: _dec(_loading ? 'Loading students...' : 'Student'),
-                items: [
-                  for (final s in _students)
-                    DropdownMenuItem(value: s.id, child: Text(s.name)),
-                ],
-                onChanged: _editing
-                    ? null
-                    : (v) => setState(() => _studentId = v ?? ''),
+              _label('Severity level'),
+              _checks(
+                options: DisciplineRules.severities,
+                checked: (v) => _severity == v,
+                onTap: (v) => setState(() {
+                  _severity = _severity == v ? '' : v;
+                  _err = null;
+                }),
+                dot: DisciplineRules.severityColor,
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: _type.isEmpty ? null : _type,
-                isExpanded: true,
-                decoration: _dec('Incident type'),
-                items: [
-                  for (final t in DisciplineRules.types)
-                    DropdownMenuItem(value: t, child: Text(t)),
-                ],
-                onChanged: (v) => setState(() => _type = v ?? ''),
+              _label('Action taken  (tick one or more)'),
+              _checks(
+                options: DisciplineRules.actions,
+                checked: _actions.contains,
+                onTap: (v) => _toggle(_actions, v),
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: _severity.isEmpty ? null : _severity,
-                isExpanded: true,
-                decoration: _dec('Severity level'),
-                items: [
-                  for (final s in DisciplineRules.severities)
-                    DropdownMenuItem(
-                        value: s,
-                        child: Row(children: [
-                          Icon(Icons.circle,
-                              size: 12,
-                              color: DisciplineRules.severityColor(s)),
-                          const SizedBox(width: 8),
-                          Text(s),
-                        ])),
-                ],
-                onChanged: (v) => setState(() => _severity = v ?? ''),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: _action.isEmpty ? null : _action,
-                isExpanded: true,
-                decoration: _dec('Action taken'),
-                items: [
-                  for (final a in DisciplineRules.actions)
-                    DropdownMenuItem(value: a, child: Text(a)),
-                ],
-                onChanged: (v) => setState(() => _action = v ?? ''),
-              ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               TextField(
                 controller: _note,
                 minLines: 3,
                 maxLines: 6,
                 maxLength: 1000,
                 textCapitalization: TextCapitalization.sentences,
-                decoration: _dec('Explanatory note'),
+                decoration: const InputDecoration(
+                    labelText: 'Explanatory note',
+                    alignLabelWithHint: true,
+                    border: OutlineInputBorder()),
               ),
               if (_err != null)
                 Padding(
@@ -9059,6 +9236,388 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     );
   }
 }
+
+
+// ---------------- Discipline report (Excel, Word, PDF, Print) ----------------
+
+/// Builds the discipline report from the incidents currently shown on the
+/// page (so the date range, class, severity and name filters all apply).
+class DisciplineReport {
+  final List<DisciplineRecord> items;
+  final String period; // e.g. "1 Oct 2026 - 10 Nov 2026"
+  final String filters; // e.g. "Class: 2A · Severity: Severe"
+  DisciplineReport(
+      {required this.items, required this.period, required this.filters});
+
+  static final _d = DateFormat('d MMM y');
+  static const _head = [
+    '#', 'Date', 'Student', 'Class', 'Incident type', 'Severity',
+    'Action taken', 'Note', 'Recorded by'
+  ];
+
+  List<List<String>> get _rows => [
+    for (var i = 0; i < items.length; i++)
+      [
+        '${i + 1}',
+        _d.format(items[i].date),
+        items[i].studentName,
+        items[i].classLabel,
+        items[i].type,
+        items[i].severity,
+        items[i].action,
+        items[i].note,
+        items[i].createdByName,
+      ]
+  ];
+
+  String get _summary {
+    final c = {
+      for (final s in DisciplineRules.severities)
+        s: items.where((r) => r.severity == s).length
+    };
+    return 'Total: ${items.length}   |   '
+        '${DisciplineRules.severities.map((s) => '$s: ${c[s]}').join('   |   ')}';
+  }
+
+  String get _by => 'Printed ${DateFormat('d MMM y, HH:mm').format(DateTime.now())}';
+
+  static String _x(String t) => t
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+
+  void _check() {
+    if (items.isEmpty) throw Exception('There are no incidents to put in the report.');
+  }
+
+  // ---------- PDF ----------
+  Future<Uint8List> buildPdf() async {
+    _check();
+    pw.Font? arabic;
+    try {
+      arabic = await PdfGoogleFonts.notoNaskhArabicRegular();
+    } catch (_) {}
+    final theme = pw.ThemeData.withFont(
+      base: pw.Font.helvetica(),
+      bold: pw.Font.helveticaBold(),
+      fontFallback: [if (arabic != null) arabic],
+    );
+    final doc = pw.Document();
+    final grey = PdfColor.fromInt(0xFFE8EAF0);
+    doc.addPage(pw.MultiPage(
+      pageTheme: pw.PageTheme(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
+        theme: theme,
+      ),
+      footer: (c) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('$_by   -   Page ${c.pageNumber} / ${c.pagesCount}',
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+      ),
+      build: (c) => [
+        pw.Text('Student Discipline Report',
+            style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 4),
+        pw.Text('Period: $period${filters.isEmpty ? '' : '   |   $filters'}',
+            style: const pw.TextStyle(fontSize: 10)),
+        pw.SizedBox(height: 2),
+        pw.Text(_summary,
+            style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 10),
+        pw.Table.fromTextArray(
+          headers: _head,
+          data: _rows,
+          headerStyle:
+          pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+          cellStyle: const pw.TextStyle(fontSize: 8.5),
+          headerDecoration: pw.BoxDecoration(color: grey),
+          border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+          cellPadding: const pw.EdgeInsets.all(4),
+          cellAlignments: {
+            0: pw.Alignment.center,
+            1: pw.Alignment.centerLeft,
+            5: pw.Alignment.center,
+          },
+          columnWidths: {
+            0: const pw.FixedColumnWidth(22),
+            1: const pw.FixedColumnWidth(56),
+            2: const pw.FlexColumnWidth(2.2),
+            3: const pw.FixedColumnWidth(48),
+            4: const pw.FlexColumnWidth(2),
+            5: const pw.FixedColumnWidth(50),
+            6: const pw.FlexColumnWidth(2),
+            7: const pw.FlexColumnWidth(3.2),
+            8: const pw.FlexColumnWidth(1.4),
+          },
+        ),
+      ],
+    ));
+    return doc.save();
+  }
+
+  // ---------- Excel ----------
+  Future<Uint8List> buildXlsx() async {
+    _check();
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const rel =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    String col(int i) => String.fromCharCode(65 + i);
+    String c(int ci, int r, String t, int s) =>
+        '<c r="${col(ci)}$r" s="$s" t="inlineStr"><is>'
+            '<t xml:space="preserve">${_x(t)}</t></is></c>';
+    String n(int ci, int r, num v, int s) =>
+        '<c r="${col(ci)}$r" s="$s"><v>$v</v></c>';
+
+    final rows = StringBuffer();
+    final last = col(_head.length - 1);
+    rows.write('<row r="1" ht="24" customHeight="1">${c(0, 1, 'Student Discipline Report', 3)}</row>');
+    rows.write('<row r="2">${c(0, 2, 'Period: $period${filters.isEmpty ? '' : '   |   $filters'}', 4)}</row>');
+    rows.write('<row r="3">${c(0, 3, _summary, 5)}</row>');
+    rows.write('<row r="5">');
+    for (var i = 0; i < _head.length; i++) {
+      rows.write(c(i, 5, _head[i], 1));
+    }
+    rows.write('</row>');
+    var r = 6;
+    for (final row in _rows) {
+      rows.write('<row r="$r">');
+      for (var i = 0; i < row.length; i++) {
+        rows.write(i == 0
+            ? n(i, r, int.parse(row[i]), 2)
+            : c(i, r, row[i], i == 5 ? 6 : 2));
+      }
+      rows.write('</row>');
+      r++;
+    }
+    const widths = [5, 13, 28, 12, 28, 11, 28, 50, 20];
+    final sheet = '$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        '<cols>${[for (var i = 0; i < widths.length; i++) '<col min="${i + 1}" max="${i + 1}" width="${widths[i]}" customWidth="1"/>'].join()}</cols>'
+        '<sheetData>$rows</sheetData>'
+        '<autoFilter ref="A5:$last${r - 1}"/>'
+        '<mergeCells count="3"><mergeCell ref="A1:${last}1"/><mergeCell ref="A2:${last}2"/><mergeCell ref="A3:${last}3"/></mergeCells>'
+        '<pageSetup orientation="landscape" fitToHeight="0"/>'
+        '</worksheet>';
+    const edge = '<left style="thin"><color rgb="FF808080"/></left><right style="thin"><color rgb="FF808080"/></right>'
+        '<top style="thin"><color rgb="FF808080"/></top><bottom style="thin"><color rgb="FF808080"/></bottom>';
+    const styles = '$xmlHead<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="15"/><name val="Calibri"/></font></fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFE8EAF0"/></patternFill></fill></fills>'
+        '<borders count="2"><border><left/><right/><top/><bottom/></border><border>$edge<diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="7">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' // 0
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>' // 1 header
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' // 2 body
+        '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>' // 3 title
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' // 4 note
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' // 5 bold note
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="top"/></xf>' // 6 severity
+        '</cellXfs></styleSheet>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+              '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+              '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+      'xl/workbook.xml': utf8.encode(
+          '$xmlHead<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="$rel">'
+              '<sheets><sheet name="Discipline" sheetId="1" r:id="rId1"/></sheets>'
+              '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Discipline!\$A\$5:\$$last\$${r - 1}</definedName></definedNames>'
+              '</workbook>'),
+      'xl/_rels/workbook.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$rel/worksheet" Target="worksheets/sheet1.xml"/>'
+              '<Relationship Id="rId2" Type="$rel/styles" Target="styles.xml"/></Relationships>'),
+      'xl/styles.xml': utf8.encode(styles),
+      'xl/worksheets/sheet1.xml': utf8.encode(sheet),
+    };
+    final out = zip.Archive();
+    files.forEach((k, v) => out.addFile(zip.ArchiveFile(k, v.length, v)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Excel file.');
+    return Uint8List.fromList(bytes);
+  }
+
+  // ---------- Word ----------
+  Future<Uint8List> buildDocx() async {
+    _check();
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const relBase =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const edge = 'w:val="single" w:sz="4" w:space="0" w:color="808080"';
+    const widths = [450, 1250, 2300, 900, 2300, 1000, 2300, 3700, 1500]; // 15700
+    const total = 15700;
+
+    String para(String t, {bool b = false, int sz = 20}) =>
+        '<w:p><w:pPr><w:spacing w:after="80"/></w:pPr><w:r><w:rPr>${b ? '<w:b/>' : ''}'
+            '<w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr>'
+            '<w:t xml:space="preserve">${_x(t)}</w:t></w:r></w:p>';
+    String cell(int i, String t, {bool head = false}) =>
+        '<w:tc><w:tcPr><w:tcW w:w="${widths[i]}" w:type="dxa"/>'
+            '${head ? '<w:shd w:val="clear" w:color="auto" w:fill="E8EAF0"/>' : ''}</w:tcPr>'
+            '<w:p><w:pPr><w:spacing w:after="0"/>${head || i == 0 || i == 5 ? '<w:jc w:val="center"/>' : ''}</w:pPr>'
+            '<w:r><w:rPr>${head ? '<w:b/>' : ''}<w:sz w:val="17"/><w:szCs w:val="17"/></w:rPr>'
+            '<w:t xml:space="preserve">${_x(t)}</w:t></w:r></w:p></w:tc>';
+
+    final tbl = StringBuffer(
+        '<w:tbl><w:tblPr><w:tblW w:w="$total" w:type="dxa"/>'
+            '<w:tblBorders><w:top $edge/><w:left $edge/><w:bottom $edge/><w:right $edge/>'
+            '<w:insideH $edge/><w:insideV $edge/></w:tblBorders>'
+            '<w:tblLayout w:type="fixed"/>'
+            '<w:tblCellMar><w:left w:w="70" w:type="dxa"/><w:right w:w="70" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+            '<w:tblGrid>${[for (final w in widths) '<w:gridCol w:w="$w"/>'].join()}</w:tblGrid>');
+    tbl.write('<w:tr><w:trPr><w:tblHeader/></w:trPr>'
+        '${[for (var i = 0; i < _head.length; i++) cell(i, _head[i], head: true)].join()}</w:tr>');
+    for (final row in _rows) {
+      tbl.write('<w:tr><w:trPr><w:cantSplit/></w:trPr>'
+          '${[for (var i = 0; i < row.length; i++) cell(i, row[i])].join()}</w:tr>');
+    }
+    tbl.write('</w:tbl>');
+
+    final body = '${para('Student Discipline Report', b: true, sz: 32)}'
+        '${para('Period: $period${filters.isEmpty ? '' : '   |   $filters'}')}'
+        '${para(_summary, b: true)}'
+        '${para(' ', sz: 8)}$tbl';
+    final documentXml = '$xmlHead<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>$body'
+        '<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        '<w:pgMar w:top="720" w:right="570" w:bottom="720" w:left="570" w:header="400" w:footer="400" w:gutter="0"/>'
+        '</w:sectPr></w:body></w:document>';
+    const stylesXml = '$xmlHead<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Arial"/>'
+        '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+              '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$relBase/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rIdStyles" Type="$relBase/styles" Target="styles.xml"/></Relationships>'),
+      'word/document.xml': utf8.encode(documentXml),
+      'word/styles.xml': utf8.encode(stylesXml),
+    };
+    final out = zip.Archive();
+    files.forEach((k, v) => out.addFile(zip.ArchiveFile(k, v.length, v)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Word file.');
+    return Uint8List.fromList(bytes);
+  }
+}
+
+/// "Report" button of the Discipline page: Excel, Word, PDF or Print.
+class _DisciplineReportButton extends StatefulWidget {
+  final DisciplineReport Function() report;
+  final bool enabled;
+  const _DisciplineReportButton({required this.report, this.enabled = true});
+
+  @override
+  State<_DisciplineReportButton> createState() =>
+      _DisciplineReportButtonState();
+}
+
+class _DisciplineReportButtonState extends State<_DisciplineReportButton> {
+  bool _busy = false;
+
+  Future<void> _run(String kind) async {
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final rep = widget.report();
+      final name =
+          'Discipline-report-${DateFormat('yyyy-MM-dd').format(DateTime.now())}';
+      if (kind == 'print') {
+        final bytes = await rep.buildPdf();
+        if (mounted) setState(() => _busy = false);
+        await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+        return;
+      }
+      final (bytes, ext, mime) = switch (kind) {
+        'xlsx' => (
+        await rep.buildXlsx(),
+        'xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        ),
+        'docx' => (await rep.buildDocx(), 'docx', ExamService._docxMime),
+        _ => (await rep.buildPdf(), 'pdf', 'application/pdf'),
+      };
+      final path = await _downloadInBrowser(bytes, '$name.$ext', mime);
+      messenger.showSnackBar(SnackBar(
+          content: Text(path == null && !kIsWeb
+              ? 'Download cancelled (nothing was saved).'
+              : 'Report saved${path == null ? '' : '\nSaved to: $path'}')));
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_busy) {
+      return const Padding(
+        padding: EdgeInsets.all(14),
+        child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
+      );
+    }
+    return PopupMenuButton<String>(
+      tooltip: 'Report: download or print',
+      enabled: widget.enabled,
+      onSelected: _run,
+      icon: const Icon(Icons.summarize),
+      itemBuilder: (_) => const [
+        PopupMenuItem(
+            value: 'xlsx',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
+                title: Text('Download Excel'))),
+        PopupMenuItem(
+            value: 'docx',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.description, color: Color(0xFF1565C0)),
+                title: Text('Download Word'))),
+        PopupMenuItem(
+            value: 'pdf',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
+                title: Text('Download PDF'))),
+        PopupMenuItem(
+            value: 'print',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.print, color: Color(0xFF546E7A)),
+                title: Text('Print'))),
+      ],
+    );
+  }
+}
+
 
 // ======================= SCHOOL LOGO =======================
 
