@@ -8351,7 +8351,7 @@ class _HomeCard extends StatelessWidget {
 //   delete : admin
 
 class DisciplineRules {
-  static const types = [
+  static const defaultTypes = [
     'Late arrival',
     'Skipping class',
     'Disrespect',
@@ -8364,8 +8364,8 @@ class DisciplineRules {
     'Damage to property',
     'Other',
   ];
-  static const severities = ['Minor', 'Moderate', 'Severe'];
-  static const actions = [
+  static const defaultSeverities = ['Minor', 'Moderate', 'Severe'];
+  static const defaultActions = [
     'Verbal warning',
     'Written warning',
     'Parent contacted',
@@ -8376,15 +8376,71 @@ class DisciplineRules {
     'Other',
   ];
 
-  static Color severityColor(String s) {
-    switch (s) {
-      case 'Severe':
-        return kRed;
-      case 'Moderate':
-        return const Color(0xFFE67E22);
-      default:
-        return const Color(0xFFF1C40F);
+  /// The lists shown in the form. The administrator can change them
+  /// (Firestore: settings/discipline = {types, severities, actions}).
+  static List<String> types = List.of(defaultTypes);
+  static List<String> severities = List.of(defaultSeverities);
+  static List<String> actions = List.of(defaultActions);
+
+  static DocumentReference<Map<String, dynamic>> get _doc =>
+      FirebaseFirestore.instance.collection('settings').doc('discipline');
+
+  /// Live copy of the saved lists (a list that was never saved keeps its
+  /// default).
+  static StreamSubscription<DocumentSnapshot<Map<String, dynamic>>> watch(
+      void Function() changed) {
+    return _doc.snapshots().listen((d) {
+      final m = d.data() ?? {};
+      List<String> read(String k, List<String> def) {
+        final v = m[k];
+        if (v is! List) return List.of(def);
+        final l = [
+          for (final e in v)
+            if (e is String && e.trim().isNotEmpty) e.trim()
+        ];
+        return l.isEmpty ? List.of(def) : l;
+      }
+
+      types = read('types', defaultTypes);
+      severities = read('severities', defaultSeverities);
+      actions = read('actions', defaultActions);
+      changed();
+    }, onError: (_) {});
+  }
+
+  /// Saves one list ('types', 'severities' or 'actions').
+  static Future<void> saveList(String field, List<String> list) async {
+    await _doc.set({
+      field: list,
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    switch (field) {
+      case 'types':
+        types = List.of(list);
+      case 'severities':
+        severities = List.of(list);
+      case 'actions':
+        actions = List.of(list);
     }
+  }
+
+  static const _palette = [
+    Color(0xFFF1C40F),
+    Color(0xFFE67E22),
+    kRed,
+    Color(0xFF8E44AD),
+    Color(0xFF795548),
+  ];
+
+  /// Colour by position in the list: lightest first, most serious last.
+  static Color severityColor(String s) {
+    final i = severities.indexOf(s);
+    final n = severities.length;
+    if (i < 0) return const Color(0xFF90A4AE);
+    if (n == 1) return _palette[0];
+    if (n == 2) return i == 0 ? _palette[0] : _palette[2];
+    return _palette[i % _palette.length];
   }
 
   static bool canCreate(UserProfile? p) =>
@@ -8456,6 +8512,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _secSub;
   late Stream<List<DisciplineRecord>> _records;
   final _searchCtl = TextEditingController();
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _optSub;
   List<DisciplineRecord> _shown = const [];
 
   List<DisciplineRecord> _apply(List<DisciplineRecord> all) {
@@ -8493,6 +8550,9 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
     _range = DateTimeRange(
         start: today.subtract(const Duration(days: 29)), end: today);
     _records = _buildStream();
+    _optSub = DisciplineRules.watch(() {
+      if (mounted) setState(() {});
+    });
     // every section of the school (the page is school-wide, so a teacher's
     // form restriction is not applied here)
     _secSub = _db.collection('sections').snapshots().listen((s) {
@@ -8506,6 +8566,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
   @override
   void dispose() {
     _secSub?.cancel();
+    _optSub?.cancel();
     _searchCtl.dispose();
     super.dispose();
   }
@@ -8573,7 +8634,8 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
     if (rec != null && !DisciplineRules.canEdit(me)) return;
     final data = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => _IncidentDialog(sections: _sections, record: rec),
+      builder: (_) => _IncidentDialog(
+          sections: _sections, record: rec, canManage: me.role == 'admin'),
     );
     if (data == null) return;
     final who = me.name.trim().isNotEmpty ? me.name.trim() : me.email;
@@ -8877,15 +8939,20 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
 }
 
 /// Add / edit one incident. Returns the fields to save, or null.
-/// - Student: type a name to search (all classes), no dropdown.
+/// - Class (optional) then Student: type a name to search. With no class
+///   chosen the search covers every student; with a class chosen it only
+///   covers that class.
 /// - Incident type / Action taken: tick one or more checkboxes.
 /// - Severity: tick one checkbox (ticking another replaces it).
+/// - An administrator can add / delete the options of every list.
 /// Several ticked values are saved as "A, B" in the same text field the old
 /// dropdown used, so existing records, cards and filters keep working.
 class _IncidentDialog extends StatefulWidget {
   final List<SectionInfo> sections;
   final DisciplineRecord? record;
-  const _IncidentDialog({required this.sections, this.record});
+  final bool canManage; // administrator: can edit the option lists
+  const _IncidentDialog(
+      {required this.sections, this.record, this.canManage = false});
 
   @override
   State<_IncidentDialog> createState() => _IncidentDialogState();
@@ -8898,6 +8965,7 @@ class _IncidentDialogState extends State<_IncidentDialog> {
   final _search = TextEditingController();
   final _searchFocus = FocusNode();
   late DateTime _date;
+  String _classId = ''; // '' = all classes
   _Stu? _student;
   final Set<String> _types = {}, _actions = {};
   String _severity = '';
@@ -8917,6 +8985,7 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     final t = DateTime.now();
     _date = r?.date ?? DateTime(t.year, t.month, t.day);
     if (r != null) {
+      _classId = r.sectionId;
       _student =
       (id: r.studentId, name: r.studentName, sectionId: r.sectionId);
       _search.text = r.studentName;
@@ -9010,8 +9079,10 @@ class _IncidentDialogState extends State<_IncidentDialog> {
       return;
     }
     // keep the order of the lists, not the order of ticking
-    String join(List<String> order, Set<String> s) =>
-        order.where(s.contains).followedBy(s.where((e) => !order.contains(e))).join(', ');
+    String join(List<String> order, Set<String> s) => order
+        .where(s.contains)
+        .followedBy(s.where((e) => !order.contains(e)))
+        .join(', ');
     Navigator.pop(context, {
       'date': Timestamp.fromDate(DateTime(_date.year, _date.month, _date.day)),
       'type': join(DisciplineRules.types, _types),
@@ -9027,13 +9098,70 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     });
   }
 
+  /// Opens the list editor (administrator) and saves the new list.
+  Future<void> _manage(String title, String field, List<String> current,
+      {bool ordered = false}) async {
+    final res = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _OptionsEditorDialog(
+          title: title, items: current, showOrderHint: ordered),
+    );
+    if (res == null) return;
+    try {
+      await DisciplineRules.saveList(field, res);
+      if (mounted) setState(() => _err = null);
+    } catch (e) {
+      if (mounted) setState(() => _err = 'Could not save the list: $e');
+    }
+  }
+
   // ---------- pieces ----------
 
-  Widget _label(String t) => Padding(
-    padding: const EdgeInsets.only(top: 16, bottom: 4),
-    child: Text(t,
-        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+  Widget _label(String t, {VoidCallback? onEdit}) => Padding(
+    padding: const EdgeInsets.only(top: 14, bottom: 4),
+    child: Row(children: [
+      Expanded(
+        child: Text(t,
+            style:
+            const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+      ),
+      if (onEdit != null)
+        TextButton.icon(
+          style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8)),
+          onPressed: onEdit,
+          icon: const Icon(Icons.edit, size: 16),
+          label: const Text('Edit list'),
+        ),
+    ]),
   );
+
+  Widget _classField() {
+    final value = widget.sections.any((s) => s.id == _classId) ? _classId : '';
+    return DropdownButtonFormField<String>(
+      value: value,
+      isExpanded: true,
+      decoration: const InputDecoration(
+          isDense: true,
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.groups)),
+      items: [
+        const DropdownMenuItem(value: '', child: Text('All classes')),
+        for (final s in widget.sections)
+          DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+      ],
+      onChanged: _editing
+          ? null
+          : (v) => setState(() {
+        _classId = v ?? '';
+        // a new class starts a new search
+        _student = null;
+        _search.clear();
+        _err = null;
+      }),
+    );
+  }
 
   /// Student search box: type part of the name, tap the match.
   Widget _studentField() {
@@ -9044,24 +9172,29 @@ class _IncidentDialogState extends State<_IncidentDialog> {
             isDense: true,
             border: OutlineInputBorder(),
             prefixIcon: Icon(Icons.person)),
-        child: Text(
-            '${_student!.name}  ${_classOf(_student!.sectionId).isEmpty ? '' : '(${_classOf(_student!.sectionId)})'}'),
+        child: Text(_student!.name),
       );
     }
     return RawAutocomplete<_Stu>(
+      key: ValueKey('stu-$_classId'),
       textEditingController: _search,
       focusNode: _searchFocus,
       displayStringForOption: (s) => s.name,
       optionsBuilder: (v) {
+        final pool = _classId.isEmpty
+            ? _all
+            : _all.where((s) => s.sectionId == _classId).toList();
         final q = v.text.trim().toLowerCase();
-        if (q.isEmpty) return const Iterable<_Stu>.empty();
+        if (q.isEmpty) {
+          // with a class chosen, tapping the box lists the whole class
+          return _classId.isEmpty ? const Iterable<_Stu>.empty() : pool;
+        }
         final words = q.split(RegExp(r'\s+'));
-        return _all
-            .where((s) {
+        final hits = pool.where((s) {
           final n = s.name.toLowerCase();
           return words.every(n.contains);
-        })
-            .take(8);
+        });
+        return _classId.isEmpty ? hits.take(8) : hits;
       },
       onSelected: (s) => setState(() {
         _student = s;
@@ -9079,7 +9212,11 @@ class _IncidentDialogState extends State<_IncidentDialog> {
         decoration: InputDecoration(
           isDense: true,
           border: const OutlineInputBorder(),
-          hintText: _loading ? 'Loading students...' : 'Type the student name',
+          hintText: _loading
+              ? 'Loading students...'
+              : (_classId.isEmpty
+              ? 'Type the student name (all classes)'
+              : 'Type the student name (this class)'),
           prefixIcon: const Icon(Icons.search),
           suffixIcon: _student != null
               ? const Icon(Icons.check_circle, color: Color(0xFF2E7D32))
@@ -9108,8 +9245,10 @@ class _IncidentDialogState extends State<_IncidentDialog> {
                   ListTile(
                     dense: true,
                     title: Text(s.name),
-                    trailing: Text(_classOf(s.sectionId),
-                        style: const TextStyle(color: Colors.black54)),
+                    trailing: _classId.isEmpty
+                        ? Text(_classOf(s.sectionId),
+                        style: const TextStyle(color: Colors.black54))
+                        : null,
                     onTap: () => onSelected(s),
                   ),
               ],
@@ -9166,8 +9305,14 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     _err = null;
   });
 
+  /// The list plus any ticked value that was deleted from the list later
+  /// (so an old record still shows what it was saved with).
+  List<String> _withExtras(List<String> list, Iterable<String> picked) =>
+      [...list, for (final p in picked) if (!list.contains(p)) p];
+
   @override
   Widget build(BuildContext context) {
+    final canManage = widget.canManage;
     return AlertDialog(
       title: Text(_editing ? 'Edit incident' : 'New incident'),
       content: SizedBox(
@@ -9182,17 +9327,30 @@ class _IncidentDialogState extends State<_IncidentDialog> {
                 label: Text('Date: ${DateFormat('d MMM y').format(_date)}'),
                 onPressed: _pickDate,
               ),
+              _label('Class  (optional - narrows the student search)'),
+              _classField(),
+              const SizedBox(height: 10),
               _label('Student'),
               _studentField(),
-              _label('Incident type  (tick one or more)'),
+              _label('Incident type  (tick one or more)',
+                  onEdit: canManage
+                      ? () => _manage('Incident types', 'types',
+                      DisciplineRules.types)
+                      : null),
               _checks(
-                options: DisciplineRules.types,
+                options: _withExtras(DisciplineRules.types, _types),
                 checked: _types.contains,
                 onTap: (v) => _toggle(_types, v),
               ),
-              _label('Severity level'),
+              _label('Severity level',
+                  onEdit: canManage
+                      ? () => _manage('Severity levels', 'severities',
+                      DisciplineRules.severities,
+                      ordered: true)
+                      : null),
               _checks(
-                options: DisciplineRules.severities,
+                options: _withExtras(DisciplineRules.severities,
+                    [if (_severity.isNotEmpty) _severity]),
                 checked: (v) => _severity == v,
                 onTap: (v) => setState(() {
                   _severity = _severity == v ? '' : v;
@@ -9200,9 +9358,13 @@ class _IncidentDialogState extends State<_IncidentDialog> {
                 }),
                 dot: DisciplineRules.severityColor,
               ),
-              _label('Action taken  (tick one or more)'),
+              _label('Action taken  (tick one or more)',
+                  onEdit: canManage
+                      ? () => _manage('Actions taken', 'actions',
+                      DisciplineRules.actions)
+                      : null),
               _checks(
-                options: DisciplineRules.actions,
+                options: _withExtras(DisciplineRules.actions, _actions),
                 checked: _actions.contains,
                 onTap: (v) => _toggle(_actions, v),
               ),
@@ -9237,6 +9399,138 @@ class _IncidentDialogState extends State<_IncidentDialog> {
   }
 }
 
+/// Administrator: add, delete and re-order the options of one list.
+/// Returns the new list, or null when cancelled. Old incidents keep the
+/// wording they were saved with.
+class _OptionsEditorDialog extends StatefulWidget {
+  final String title;
+  final List<String> items;
+  final bool showOrderHint;
+  const _OptionsEditorDialog(
+      {required this.title, required this.items, this.showOrderHint = false});
+
+  @override
+  State<_OptionsEditorDialog> createState() => _OptionsEditorDialogState();
+}
+
+class _OptionsEditorDialogState extends State<_OptionsEditorDialog> {
+  late List<String> _list = List.of(widget.items);
+  final _add = TextEditingController();
+  String? _err;
+
+  @override
+  void dispose() {
+    _add.dispose();
+    super.dispose();
+  }
+
+  void _addItem() {
+    final t = _add.text.trim().replaceAll(',', ' ').replaceAll(RegExp(r'\s+'), ' ');
+    if (t.isEmpty) return;
+    if (_list.any((e) => e.toLowerCase() == t.toLowerCase())) {
+      setState(() => _err = '"$t" is already in the list.');
+      return;
+    }
+    setState(() {
+      _list.add(t);
+      _add.clear();
+      _err = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SizedBox(
+        width: 400,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (widget.showOrderHint)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                  'Drag to re-order: lightest first, most serious last '
+                      '(this sets the colours).',
+                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _add,
+                textCapitalization: TextCapitalization.sentences,
+                onSubmitted: (_) => _addItem(),
+                decoration: const InputDecoration(
+                    labelText: 'New option',
+                    isDense: true,
+                    border: OutlineInputBorder()),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+                onPressed: _addItem,
+                icon: const Icon(Icons.add),
+                label: const Text('Add')),
+          ]),
+          if (_err != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(_err!, style: const TextStyle(color: kRed))),
+            ),
+          const SizedBox(height: 8),
+          Flexible(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: ReorderableListView(
+                shrinkWrap: true,
+                buildDefaultDragHandles: true,
+                onReorder: (a, b) => setState(() {
+                  if (b > a) b--;
+                  _list.insert(b, _list.removeAt(a));
+                }),
+                children: [
+                  for (final o in _list)
+                    ListTile(
+                      key: ValueKey(o),
+                      dense: true,
+                      title: Text(o),
+                      trailing: Padding(
+                        padding: const EdgeInsets.only(right: 28),
+                        child: IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline, color: kRed),
+                          onPressed: () => setState(() {
+                            _list.remove(o);
+                            _err = null;
+                          }),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(
+          onPressed: () {
+            if (_list.isEmpty) {
+              setState(() => _err = 'Keep at least one option.');
+              return;
+            }
+            Navigator.pop(context, _list);
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
 
 // ---------------- Discipline report (Excel, Word, PDF, Print) ----------------
 
