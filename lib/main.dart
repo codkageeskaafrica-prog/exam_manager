@@ -7340,8 +7340,8 @@ class AppPages {
 /// Who the signed-in person is and which pages they may open
 /// (Firestore: users/{uid}).
 ///  - role 'admin'   : sees every page and manages the permissions.
-///  - role 'affairs' (student affairs): full access, every page and every
-///    admin-level view (only managing users / roles stays with the admin).
+///  - role 'affairs' (student affairs): NOT full access. Sees only the pages
+///    in `access` (default: Settings > Users > Default access).
 ///  - role 'finance': sees the pages in `access` (default: Finance only) and,
 ///    when the administrator ticked classes (`financeSections`), only those
 ///    classes. No class ticked = every class.
@@ -7392,8 +7392,9 @@ class UserProfile {
 
   bool get isAdmin => role == 'admin';
 
-  /// Administrators and Student affairs can open everything.
-  bool get fullAccess => role == 'admin' || role == 'affairs';
+  /// Only administrators can open everything. Full access can only be
+  /// given by assigning the Admin account type.
+  bool get fullAccess => role == 'admin';
 
   List<String> effectiveAccess(AppSettings st) {
     if (fullAccess) return AppPages.all;
@@ -11626,7 +11627,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return StreamBuilder<UserProfile>(
       stream: _me,
       builder: (context, me) {
-        // only an administrator / Student affairs manages users (a rules error is shown there)
+        // only an administrator manages users (a rules error is shown there)
         final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
@@ -17380,7 +17381,7 @@ late Future<Map<String, ResultMarks>> _resFuture = _loadResults();
 final Map<String, bool> _exp = {}; // exam card open / closed
 bool _printing = false;
 late Future<_RealSection> _secFuture = _loadRealSection();
-/// True for an administrator / Student affairs: may edit everything here.
+/// True for an administrator: may edit everything here.
 bool _admin = false;
 StreamSubscription<UserProfile>? _meSub;
 String _filter = 'all'; // all | present | absent | late
@@ -29726,8 +29727,10 @@ const SizedBox(height: 10),
 const Text('Student affairs',
 style: TextStyle(fontSize: 12)),
 const SizedBox(height: 4),
-const Text('Full access: every page and every action.',
-style: TextStyle(fontSize: 12, color: Colors.black54)),
+_pageChips(
+st.affairsAccess,
+(v) => _run(context,
+() => appSettings.update({'affairsAccess': v}))),
 ],
 ),
 ),
@@ -30015,7 +30018,7 @@ _run(context,
 },
 ),
 const SizedBox(height: 12),
-Text(u.fullAccess ? 'Pages (administrators and Student affairs see all)' : 'Pages this user can see',
+Text(u.fullAccess ? 'Pages (administrators see all)' : 'Pages this user can see',
 style: const TextStyle(fontSize: 12)),
 const SizedBox(height: 6),
 _pageChips(
@@ -30586,8 +30589,8 @@ String presetEmail = '',
 String newId = ''}) async {
 void toast(String m) => ScaffoldMessenger.of(context)
     .showSnackBar(SnackBar(content: Text(m)));
-// Only the administrator / Student affairs sets the pages and account type of a person.
-var isAdminMe = false; // administrator or Student affairs
+// Only the administrator sets the pages and account type of a person.
+var isAdminMe = false; // administrator
 var meId = '';
 UserProfile? up; // the user of this person, when there is one
 try {
@@ -30697,7 +30700,7 @@ DropdownButtonFormField<String>(
 value: acctRole,
 decoration: const InputDecoration(
 labelText: 'Account type (access level)',
-helperText: 'Admin and Student affairs can open everything.',
+helperText: 'Only Admin can open everything. Student affairs sees the pages you tick.',
 border: OutlineInputBorder(),
 ),
 items: [
