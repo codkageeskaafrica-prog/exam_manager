@@ -8976,6 +8976,10 @@ class _IncidentDialogState extends State<_IncidentDialog> {
 
   bool get _editing => widget.record != null;
 
+  /// Only whole classes (1A, 3C ...) are offered, not their sections.
+  List<SectionInfo> get _classes =>
+      widget.sections.where((s) => !s.isSub).toList();
+
   static Set<String> _split(String s) =>
       {for (final p in s.split(',')) if (p.trim().isNotEmpty) p.trim()};
 
@@ -9023,6 +9027,28 @@ class _IncidentDialogState extends State<_IncidentDialog> {
       ]
         ..removeWhere((s) => s.name.isEmpty)
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      // A student of a section ("3C - Section B") is also listed in the
+      // whole class (3C): keep only the class record, so the search shows
+      // classes only. A section-only student is kept.
+      final subIds = {
+        for (final c in widget.sections)
+          if (c.isSub) c.id: c
+      };
+      final classIdOf = <String, String>{}; // sub section id -> class id
+      for (final sub in subIds.values) {
+        for (final c in widget.sections) {
+          if (!c.isSub &&
+              c.form == sub.form &&
+              c.name.toUpperCase() == sub.classKey) {
+            classIdOf[sub.id] = c.id;
+          }
+        }
+      }
+      final inClass = {for (final x in l) '${x.sectionId}|${x.name.toLowerCase()}'};
+      l.removeWhere((x) {
+        final cid = classIdOf[x.sectionId];
+        return cid != null && inClass.contains('$cid|${x.name.toLowerCase()}');
+      });
       if (!mounted) return;
       setState(() {
         _all = l;
@@ -9139,7 +9165,7 @@ class _IncidentDialogState extends State<_IncidentDialog> {
   );
 
   Widget _classField() {
-    final value = widget.sections.any((s) => s.id == _classId) ? _classId : '';
+    final value = _classes.any((s) => s.id == _classId) ? _classId : '';
     return DropdownButtonFormField<String>(
       value: value,
       isExpanded: true,
@@ -9149,7 +9175,7 @@ class _IncidentDialogState extends State<_IncidentDialog> {
           prefixIcon: Icon(Icons.groups)),
       items: [
         const DropdownMenuItem(value: '', child: Text('All classes')),
-        for (final s in widget.sections)
+        for (final s in _classes)
           DropdownMenuItem(value: s.id, child: Text(s.fullName)),
       ],
       onChanged: _editing
