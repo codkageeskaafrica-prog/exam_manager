@@ -17259,8 +17259,10 @@ PdfColor gradeColor(String g) => g == 'A' || g == 'B'
 ? PdfColors.orange800
     : PdfColors.red800;
 
-final head = await ExamService().letterheadPdfImage();
-final logoImg = pdfLogoImage(LogoPlace.result);
+// The report card uses the school LOGO (Settings > School > School logo),
+// not the letterhead. It is shown whenever a logo is saved.
+final logoBytes = schoolLogo.value.bytes;
+final logoImg = logoBytes == null ? null : pw.MemoryImage(logoBytes);
 final wmBg = pdfWatermark(LogoPlace.result);
 
 pw.Widget info(String label, String value) => pw.Container(
@@ -17369,9 +17371,6 @@ border: pw.Border.all(color: navy, width: 1.6))),
 ),
 build: (ctx) => [
 if (logoImg != null) pdfLogoBlock(logoImg),
-if (head != null)
-pw.Image(head,
-width: double.infinity, height: 80, fit: pw.BoxFit.contain),
 pw.SizedBox(height: 8),
 pw.Container(
 width: double.infinity,
