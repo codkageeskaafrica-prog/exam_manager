@@ -6997,8 +6997,11 @@ void stopPresence() {
   _presenceTimer = null;
 }
 
+/// Two cards in Settings > Activity log: the users' logins
+/// (students: false) and the students' changes (students: true).
 class _ActivityLogCard extends StatefulWidget {
-  const _ActivityLogCard();
+  final bool students;
+  const _ActivityLogCard({this.students = false});
 
   @override
   State<_ActivityLogCard> createState() => _ActivityLogCardState();
@@ -7012,7 +7015,9 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     start: DateUtils.dateOnly(DateTime.now()),
     end: DateUtils.dateOnly(DateTime.now()),
   );
-  String _filter = 'in'; // in = online now | out = last logged out
+  // users card: in = online now | out = last logged out
+  // students card: added | moved | deleted
+  late String _filter = widget.students ? 'added' : 'in';
   // one document per user: their current state (see logActivity)
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _people =
   FirebaseFirestore.instance.collection('presence').snapshots();
@@ -7267,12 +7272,20 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text(widget.students ? 'Students activity' : 'Users activity',
+                style:
+                const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text(
+                widget.students
+                    ? 'New, transferred and deleted students'
+                    : 'Who logged in or out, and who is online',
+                style: _hint),
+            const SizedBox(height: 10),
             Wrap(spacing: 8, runSpacing: 8, children: [
-              for (final f in [
-                ('in', 'Logged in'),
-                ('out', 'Logged out'),
-                for (final t in _studentTabs) (t.$1, t.$2),
-              ])
+              for (final f in widget.students
+                  ? [for (final t in _studentTabs) (t.$1, t.$2)]
+                  : [('in', 'Logged in'), ('out', 'Logged out')])
                 ChoiceChip(
                   label: Text(f.$2),
                   selected: _filter == f.$1,
@@ -11670,7 +11683,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     if (id == 6) {
       return <(String, List<Widget>)>[
-        ('Activity log', <Widget>[const _ActivityLogCard()]),
+        ('Activity log', <Widget>[
+          const _ActivityLogCard(),
+          const _ActivityLogCard(students: true),
+        ]),
       ];
     }
     return <(String, List<Widget>)>[
