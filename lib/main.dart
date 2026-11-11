@@ -988,7 +988,8 @@ class ExamService {
           scored.length;
       final gradeCount = <String, int>{};
       for (final x in scored) {
-        final gr = _gradeOf(g.results[x.id]!.average!);
+        final gr = _gradeOf(g.results[x.id]!.average!,
+            max: _gradeMax(exam, SchoolService.formOf(x)));
         gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
       }
 
@@ -1045,7 +1046,10 @@ class ExamService {
               final x = ordered[i];
               final r = g.results[x.id];
               final avg = r?.average;
-              final gr = avg == null ? null : _gradeOf(avg);
+              final gr = avg == null
+                  ? null
+                  : _gradeOf(avg,
+                  max: _gradeMax(exam, SchoolService.formOf(x)));
               return [
                 cell('${i + 1}'),
                 cell(x.name, left: true),
@@ -1769,7 +1773,7 @@ class ExamService {
   int scoredCount,
   Map<String, int> gradeCount,
   bool multi,
-  }) _rankResultGroup(ResultReportGroup g) {
+  }) _rankResultGroup(ResultReportGroup g, String exam) {
     final multi =
         {for (final x in g.students) g.sectionLabels[x.id] ?? ''}.length > 1;
     final subjects = [
@@ -1804,7 +1808,8 @@ class ExamService {
         scored.length;
     final gradeCount = <String, int>{};
     for (final x in scored) {
-      final gr = _gradeOf(g.results[x.id]!.average!);
+      final gr = _gradeOf(g.results[x.id]!.average!,
+          max: _gradeMax(exam, SchoolService.formOf(x)));
       gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
     }
     return (
@@ -1890,7 +1895,7 @@ class ExamService {
     final names = <String>[];
 
     for (final g in usable) {
-      final d = _rankResultGroup(g);
+      final d = _rankResultGroup(g, exam);
       final cols = 3 + (d.multi ? 1 : 0) + d.subjects.length + 3;
       final rows = StringBuffer();
       final merges = <String>[];
@@ -1934,7 +1939,9 @@ class ExamService {
       for (final x in d.ordered) {
         final res = g.results[x.id];
         final avg = res?.average;
-        final gr = avg == null ? null : _gradeOf(avg);
+        final gr = avg == null
+            ? null
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(x)));
         final line = StringBuffer('<row r="$r">');
         var k = 0;
         line.write(nc(k++, r, r - 5, 2)); // serial number 1, 2, 3...
@@ -2163,7 +2170,7 @@ class ExamService {
     final body = StringBuffer();
     for (var gi = 0; gi < usable.length; gi++) {
       final g = usable[gi];
-      final d = _rankResultGroup(g);
+      final d = _rankResultGroup(g, exam);
 
       // column widths (twips) that always add up to the page width
       const posW = 650, idW = 1000, totW = 1100, avgW = 1100, gradeW = 850, clsW = 900;
@@ -2219,7 +2226,9 @@ class ExamService {
         final s = d.ordered[i];
         final res = g.results[s.id];
         final avg = res?.average;
-        final gr = avg == null ? null : _gradeOf(avg);
+        final gr = avg == null
+            ? null
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(s)));
         final z = i.isOdd;
         rows.write(tr([
           tc(posW, '${i + 1}', sz: sz, zebraRow: z),
@@ -16666,7 +16675,10 @@ if (!ExamService.subjects.contains(s)) s,
 ];
 final avgs = [for (final e in exams) data[e]!.average!];
 final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-final overallG = _gradeOf(overall);
+// grade limits are percentages: marks are compared with the highest
+// subject mark of the exam (20, 50 ...), not with 100
+final mx = _gradeMax(exams.first);
+final overallG = _gradeOf(overall, max: mx);
 final multi = exams.length > 1;
 
 double? subAvg(String sub) {
@@ -16711,7 +16723,8 @@ child: Text(text,
 textAlign: TextAlign.center,
 style: TextStyle(fontWeight: FontWeight.w800, color: c)),
 );
-Widget markPill(double v) => pill(_fmtMark(v), _gradeColor(_gradeOf(v)));
+Widget markPill(double v) =>
+pill(_fmtMark(v), _gradeColor(_gradeOf(v, max: mx)));
 Widget gradeBadge(String g, {double size = 34}) => Container(
 width: size,
 height: size,
@@ -16824,7 +16837,7 @@ Text(f1(bestV),
 style: TextStyle(
 fontSize: 12,
 fontWeight: FontWeight.w700,
-color: _gradeColor(_gradeOf(bestV)))),
+color: _gradeColor(_gradeOf(bestV, max: mx)))),
 ]),
 ),
 ]),
@@ -16915,7 +16928,7 @@ decoration: BoxDecoration(color: cs.primary.withAlpha(18)),
 children: [
 label('Grade'),
 for (var i = 0; i < exams.length; i++)
-cell(gradeBadge(_gradeOf(avgs[i]))),
+cell(gradeBadge(_gradeOf(avgs[i], max: _gradeMax(exams[i])))),
 if (multi) cell(gradeBadge(overallG)),
 ]),
 ],
@@ -16937,7 +16950,7 @@ style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
 
 Widget _examCard(String exam, ResultMarks r) {
 final avg = r.average!;
-final g = _gradeOf(avg);
+final g = _gradeOf(avg, max: _gradeMax(exam));
 return Card(
 child: Padding(
 padding: const EdgeInsets.all(16),
@@ -18187,16 +18200,24 @@ if (!snap.hasData) {
 return _statTile(Icons.emoji_events_outlined, 'Average', '…',
 Colors.blueGrey);
 }
-final avgs = [
+final vs = [
 for (final v in _views(snap.data!))
-if (v.average != null) v.average!
+if (v.average != null) v
 ];
-if (avgs.isEmpty) {
+if (vs.isEmpty) {
 return _statTile(Icons.emoji_events_outlined, 'Average', '–',
 Colors.blueGrey, 'no result yet');
 }
-final o = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-final g = _gradeOf(o);
+final o = vs.fold(0.0, (a, v) => a + v.average!) / vs.length;
+final oPct = vs.fold(
+0.0,
+(a, v) =>
+a +
+v.average! /
+_gradeMax(v.exam, widget.section.form) *
+100) /
+vs.length;
+final g = _gradeOf(oPct);
 return _statTile(Icons.emoji_events_outlined, 'Average', _f1(o),
 _gradeColor(g), 'Grade $g');
 },
@@ -18347,7 +18368,13 @@ if (v.average != null) v.average!
 ];
 if (avgs.isEmpty) return const SizedBox.shrink();
 final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-final g = _gradeOf(overall);
+final overallPct = [
+for (final v in views)
+if (v.average != null)
+v.average! / _gradeMax(v.exam, widget.section.form) * 100
+].fold(0.0, (a, b) => a + b) /
+avgs.length;
+final g = _gradeOf(overallPct);
 final bySub = <String, List<double>>{};
 for (final v in views) {
 v.counted.forEach((k, x) => (bySub[k] ??= []).add(x));
@@ -18424,9 +18451,9 @@ color: _gradeColor(g))),
 
 Future<_RcData> _cardData(_ExamView v) async {
 final avg = v.average;
-final g = avg == null ? null : _gradeOf(avg);
 final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
 final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+final g = avg == null ? null : _gradeOf(avg, max: maxMark);
 final subs = <String>[
 for (final s in ExamService.subjects)
 if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
@@ -18460,7 +18487,7 @@ _RcRow(
 s,
 v.marks[s],
 maxMark,
-v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!),
+v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!, max: maxMark),
 v.cheatedAll || v.cheatedSubs.contains(s),
 ),
 ],
@@ -18553,10 +18580,10 @@ color: fill == null ? Colors.black54 : color)),
 
 Widget _examCard(_ExamView v, bool expanded) {
 final avg = v.average;
-final g = avg == null ? null : _gradeOf(avg);
-final gs = g ?? 'F'; // grade used where an average exists
 final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
 final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+final g = avg == null ? null : _gradeOf(avg, max: maxMark);
+final gs = g ?? 'F'; // grade used where an average exists
 final subs = <String>[
 for (final s in ExamService.subjects)
 if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
@@ -18602,7 +18629,7 @@ return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
 Widget subjectRow(int i, String sub) {
 final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
 final mark = v.marks[sub];
-final gr = mark == null ? null : _gradeOf(mark);
+final gr = mark == null ? null : _gradeOf(mark, max: maxMark);
 final c = cheated
 ? kCheatColor
     : gr == null
@@ -24178,13 +24205,23 @@ final x = t.trim().toLowerCase();
 return x == 'absent' || x == 'new' || x == 'cheated';
 }
 
-/// Grade of an average mark. The limits are set in Settings.
-String _gradeOf(double avg) {
+/// Grade of a mark / average mark. The grade limits in Settings (A from 80,
+/// B from 70 ...) are PERCENTAGES, so the mark is turned into a percentage
+/// of [max] first (the highest subject mark of the exam, e.g. 20 -> 12.2 is
+/// 61% = C). With the default max of 100 the mark is used as it is.
+String _gradeOf(double avg, {double max = 100}) {
+final pct = max > 0 ? avg / max * 100 : avg;
 final limits = appSettings.value.grades;
 for (var i = 0; i < limits.length; i++) {
-if (avg >= limits[i]) return AppSettings.gradeLetters[i];
+if (pct >= limits[i] - 1e-9) return AppSettings.gradeLetters[i];
 }
 return 'F';
+}
+
+/// Highest subject mark of [exam] for [form] (100 when not set).
+double _gradeMax(String exam, [String form = '']) {
+final m = appSettings.value.limitsFor(exam, form).maxMark;
+return m > 0 ? m : 100.0;
 }
 
 Color _gradeColor(String g) {
@@ -27943,7 +27980,10 @@ itemBuilder: (context, i) {
 final s = shown[i];
 final r = results[s.id];
 final avg = r?.average;
-final g = avg == null ? null : _gradeOf(avg);
+final g = avg == null
+? null
+    : _gradeOf(avg,
+max: _gradeMax(_ResultPrefs.exam, SchoolService.formOf(s)));
 // Marks are typed straight in the list (not for a student login).
 final sForm = secOf[s.sectionId]?.form;
 final inlineSubs = teacherScope.value.isStudent
@@ -28466,10 +28506,14 @@ _fmtMark(double.parse(avg.toStringAsFixed(1))),
 style: const TextStyle(
 fontWeight: FontWeight.w800)),
 const SizedBox(width: 6),
-Text(_gradeOf(avg),
+Text(
+_gradeOf(avg,
+max: _gradeMax(widget.exam, SchoolService.formOf(s))),
 style: TextStyle(
 fontWeight: FontWeight.w800,
-color: _gradeColor(_gradeOf(avg)))),
+color: _gradeColor(_gradeOf(avg,
+max: _gradeMax(
+widget.exam, SchoolService.formOf(s)))))),
 ]),
 ),
 ]),
@@ -28787,7 +28831,7 @@ if (r.marks.isEmpty && r.cheatedSubs.isEmpty) {
 return const Text('No result yet.');
 }
 final avg = r.average;
-final g = avg == null ? null : _gradeOf(avg);
+final g = avg == null ? null : _gradeOf(avg, max: _gradeMax(exam));
 return SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
 for (final sub in ExamService.subjects)
@@ -29025,7 +29069,9 @@ Widget build(BuildContext context) {
 final r = _read();
 final total = r.marks.values.fold(0.0, (a, b) => a + b);
 final avg = r.marks.isEmpty ? null : total / r.marks.length;
-final g = avg == null ? null : _gradeOf(avg);
+final g = avg == null
+? null
+    : _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''));
 
 return AlertDialog(
 title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
