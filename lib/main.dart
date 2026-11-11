@@ -6929,6 +6929,56 @@ Future<void> logActivity(String type, {User? user}) async {
   } catch (_) {}
 }
 
+/// Student events shown in Settings > Activity log:
+///   studentLog/{auto}  type ('added'|'moved'|'deleted'), studentId,
+///   studentName, from, to (class labels), byUid, byName, time
+/// Never throws: logging must not stop a student change from working.
+Future<void> logStudentEvents(List<Map<String, dynamic>> events) async {
+  if (events.isEmpty) return;
+  try {
+    final db = FirebaseFirestore.instance;
+    final u = FirebaseAuth.instance.currentUser;
+    var by = u?.displayName ?? '';
+    if (u != null) {
+      try {
+        final m = (await db.collection('users').doc(u.uid).get()).data();
+        if (m != null && '${m['name'] ?? ''}'.trim().isNotEmpty) {
+          by = '${m['name']}';
+        }
+      } catch (_) {}
+      if (by.trim().isEmpty) by = u.email ?? u.uid;
+    }
+    for (var i = 0; i < events.length; i += 400) {
+      final batch = db.batch();
+      for (final e in events.skip(i).take(400)) {
+        batch.set(db.collection('studentLog').doc(), {
+          'studentId': '',
+          'studentName': '',
+          'from': '',
+          'to': '',
+          ...e,
+          'byUid': u?.uid ?? '',
+          'byName': by,
+          'time': FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+  } catch (_) {}
+}
+
+/// section id -> readable class label (3C, 3C - Section B ...).
+Future<Map<String, String>> _sectionLabels() async {
+  try {
+    final snap = await FirebaseFirestore.instance.collection('sections').get();
+    return {
+      for (final d in snap.docs) d.id: SectionInfo.fromDoc(d).fullName
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
 /// Refreshes "lastSeen" every 2 minutes while somebody is signed in.
 void startPresence() {
   _presenceTimer?.cancel();
@@ -7028,6 +7078,184 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     );
   }
 
+  // ---- student activity (added / transferred / deleted) ----
+  static const _studentTabs = [
+    ('added', 'New students', Icons.person_add_alt_1),
+    ('moved', 'Transferred', Icons.swap_horiz),
+    ('deleted', 'Deleted', Icons.person_remove_alt_1),
+  ];
+
+  Widget _studentRow(Map<String, dynamic> m) {
+    final tf = DateFormat('d MMM yyyy, HH:mm');
+    final type = '${m['type'] ?? ''}';
+    final from = '${m['from'] ?? ''}';
+    final to = '${m['to'] ?? ''}';
+    final by = '${m['byName'] ?? ''}';
+    final color = type == 'added'
+        ? Colors.green.shade700
+        : type == 'moved'
+        ? Colors.blue.shade700
+        : Colors.red.shade700;
+    final icon = _studentTabs.firstWhere((t) => t.$1 == type).$3;
+    final what = type == 'added'
+        ? (to.isEmpty ? 'Added' : 'Added to $to')
+        : type == 'moved'
+        ? '${from.isEmpty ? '?' : from}  ->  ${to.isEmpty ? '?' : to}'
+        : (from.isEmpty ? 'Deleted' : 'Deleted from $from');
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 18,
+        backgroundColor: color.withOpacity(0.12),
+        child: Icon(icon, size: 18, color: color),
+      ),
+      title: Text('${m['studentName'] ?? ''}',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: Text('$what${by.isEmpty ? '' : ' - by $by'}'),
+      trailing: Text(
+          _time(m['time']) == null ? '...' : tf.format(_time(m['time'])!),
+          style: _hint),
+    );
+  }
+
+  Widget _studentLog(String type) {
+    final end = _range.end.add(const Duration(days: 1));
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      // one range on one field: needs no composite index
+      stream: FirebaseFirestore.instance
+          .collection('studentLog')
+          .where('time',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
+          .where('time', isLessThan: Timestamp.fromDate(end))
+          .snapshots(),
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Text(
+              'Could not load the student activity. Check that the '
+                  'Firestore rules allow reading studentLog.\n${snap.error}',
+              style: const TextStyle(color: Colors.red));
+        }
+        if (!snap.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final rows = [
+          for (final d in snap.data!.docs)
+            if (d.data()['type'] == type) d.data()
+        ]..sort((a, b) {
+          final x = _time(a['time']), y = _time(b['time']);
+          if (x == null || y == null) return 0;
+          return y.compareTo(x);
+        });
+        final label = _studentTabs.firstWhere((t) => t.$1 == type).$2;
+        final empty = type == 'added'
+            ? 'No new students on this date.'
+            : type == 'moved'
+            ? 'No students were transferred on this date.'
+            : 'No students were deleted on this date.';
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 12),
+            Text('$label (${rows.length})',
+                style:
+                const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _pickRange,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(_rangeLabel()),
+            ),
+            if (rows.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(empty, style: _hint),
+              )
+            else
+              for (final m in rows) _studentRow(m),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _loginLog() {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _people,
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Text(
+              'Could not load the activity log. Check that the '
+                  'Firestore rules allow the administrator to read '
+                  'presence.\n${snap.error}',
+              style: const TextStyle(color: Colors.red));
+        }
+        if (!snap.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final cutoff = DateTime.now().subtract(_onlineFor);
+        final end = _range.end.add(const Duration(days: 1));
+        final online = <(Map<String, dynamic>, DateTime?)>[];
+        final out = <(Map<String, dynamic>, DateTime?)>[];
+        for (final d in snap.data!.docs) {
+          final m = d.data();
+          final seen = _time(m['lastSeen']);
+          if (m['online'] == true && seen != null && seen.isAfter(cutoff)) {
+            online.add((m, seen));
+          } else if (seen != null &&
+              !seen.isBefore(_range.start) &&
+              seen.isBefore(end)) {
+            out.add((m, seen));
+          }
+        }
+        online.sort((a, b) => '${a.$1['name']}'.compareTo('${b.$1['name']}'));
+        out.sort((a, b) => b.$2!.compareTo(a.$2!));
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_filter == 'in') ...[
+              const SizedBox(height: 12),
+              Text('Online now (${online.length})',
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w700)),
+              if (online.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('Nobody is online right now.', style: _hint),
+                )
+              else
+                for (final p in online) _row(p.$1, true, p.$2),
+            ],
+            if (_filter == 'out') ...[
+              const Divider(height: 28),
+              const Text('Last logged out',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _pickRange,
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(_rangeLabel()),
+              ),
+              if (out.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text('Nobody logged out on this date.', style: _hint),
+                )
+              else
+                for (final p in out) _row(p.$1, false, p.$2),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -7036,91 +7264,26 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
       shape: _kSettingsCardShape,
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: _people,
-          builder: (context, snap) {
-            if (snap.hasError) {
-              return Text(
-                  'Could not load the activity log. Check that the '
-                      'Firestore rules allow the administrator to read '
-                      'presence.\n${snap.error}',
-                  style: const TextStyle(color: Colors.red));
-            }
-            if (!snap.hasData) {
-              return const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: CircularProgressIndicator()),
-              );
-            }
-            final cutoff = DateTime.now().subtract(_onlineFor);
-            final end = _range.end.add(const Duration(days: 1));
-            final online = <(Map<String, dynamic>, DateTime?)>[];
-            final out = <(Map<String, dynamic>, DateTime?)>[];
-            for (final d in snap.data!.docs) {
-              final m = d.data();
-              final seen = _time(m['lastSeen']);
-              if (m['online'] == true && seen != null && seen.isAfter(cutoff)) {
-                online.add((m, seen));
-              } else if (seen != null &&
-                  !seen.isBefore(_range.start) &&
-                  seen.isBefore(end)) {
-                out.add((m, seen));
-              }
-            }
-            online.sort((a, b) => '${a.$1['name']}'.compareTo('${b.$1['name']}'));
-            out.sort((a, b) => b.$2!.compareTo(a.$2!));
-            final showOnline = _filter == 'in';
-            final showOut = _filter == 'out';
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Wrap(spacing: 8, children: [
-                  for (final f in [
-                    ('in', 'Logged in'),
-                    ('out', 'Logged out'),
-                  ])
-                    ChoiceChip(
-                      label: Text(f.$2),
-                      selected: _filter == f.$1,
-                      onSelected: (_) => setState(() => _filter = f.$1),
-                    ),
-                ]),
-                if (showOnline) ...[
-                  const SizedBox(height: 12),
-                  Text('Online now (${online.length})',
-                      style: const TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w700)),
-                  if (online.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8),
-                      child: Text('Nobody is online right now.', style: _hint),
-                    )
-                  else
-                    for (final p in online) _row(p.$1, true, p.$2),
-                ],
-                if (showOut) ...[
-                  const Divider(height: 28),
-                  const Text('Last logged out',
-                      style:
-                      TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed: _pickRange,
-                    icon: const Icon(Icons.calendar_today, size: 18),
-                    label: Text(_rangeLabel()),
-                  ),
-                  if (out.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Text('Nobody logged out on this date.',
-                          style: _hint),
-                    )
-                  else
-                    for (final p in out) _row(p.$1, false, p.$2),
-                ],
-              ],
-            );
-          },
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final f in [
+                ('in', 'Logged in'),
+                ('out', 'Logged out'),
+                for (final t in _studentTabs) (t.$1, t.$2),
+              ])
+                ChoiceChip(
+                  label: Text(f.$2),
+                  selected: _filter == f.$1,
+                  onSelected: (_) => setState(() => _filter = f.$1),
+                ),
+            ]),
+            if (_filter == 'in' || _filter == 'out')
+              _loginLog()
+            else
+              _studentLog(_filter),
+          ],
         ),
       ),
     );
@@ -13242,6 +13405,7 @@ class SchoolService {
     }
 
     final writes = <void Function(WriteBatch)>[];
+    final addedLog = <Map<String, dynamic>>[]; // for the activity log
     var newSections = 0, newStudents = 0, skipped = 0;
     var updated = 0, noPhone = 0;
 
@@ -13359,6 +13523,11 @@ class SchoolService {
       newStudents++;
       if (phones.isEmpty) noPhone++;
       final nn = noForNew(row);
+      addedLog.add({
+        'type': 'added',
+        'studentName': name,
+        'to': secLabel[sid] ?? '',
+      });
       writes.add((b) => b.set(_students.doc(), {
         'studentNo': nn.no,
         'studentNoAuto': nn.auto,
@@ -13383,6 +13552,7 @@ class SchoolService {
       }
       await batch.commit();
     }
+    await logStudentEvents(addedLog);
     return (
     sections: newSections,
     students: newStudents,
@@ -13403,12 +13573,22 @@ class SchoolService {
   Future<void> deleteSection(String id) async {
     final st = await _students.where('sectionId', isEqualTo: id).get();
     final at = await _attendance.where('sectionId', isEqualTo: id).get();
+    final label = (await _sectionLabels())[id] ?? '';
     final batch = _db.batch();
     for (final d in [...st.docs, ...at.docs]) {
       batch.delete(d.reference);
     }
     batch.delete(_sections.doc(id));
     await batch.commit();
+    await logStudentEvents([
+      for (final d in st.docs)
+        {
+          'type': 'deleted',
+          'studentId': d.id,
+          'studentName': '${d.data()['name'] ?? ''}',
+          'from': label,
+        }
+    ]);
   }
 
   // ---------------- Students ----------------
@@ -13476,7 +13656,11 @@ class SchoolService {
         'createdAt': FieldValue.serverTimestamp(),
       });
     }
-    return batch.commit();
+    await batch.commit();
+    final label = (await _sectionLabels())[sectionId] ?? '';
+    await logStudentEvents([
+      for (final n in names) {'type': 'added', 'studentName': n, 'to': label}
+    ]);
   }
 
   /// Adds students that may have a phone number. Returns the new ids.
@@ -13503,10 +13687,35 @@ class SchoolService {
   });
   }
   await batch.commit();
+  final label = (await _sectionLabels())[sectionId] ?? '';
+  await logStudentEvents([
+  for (var i = 0; i < list.length; i++)
+  {
+  'type': 'added',
+  'studentId': ids[i],
+  'studentName': list[i].name,
+  'to': label,
+  }
+  ]);
   return ids;
 }
 
-Future<void> deleteStudent(String id) => _students.doc(id).delete();
+Future<void> deleteStudent(String id) async {
+  Map<String, dynamic>? m;
+  try {
+    m = (await _students.doc(id).get()).data();
+  } catch (_) {}
+  await _students.doc(id).delete();
+  if (m == null) return;
+  await logStudentEvents([
+    {
+      'type': 'deleted',
+      'studentId': id,
+      'studentName': '${m['name'] ?? ''}',
+      'from': (await _sectionLabels())['${m['sectionId'] ?? ''}'] ?? '',
+    }
+  ]);
+}
 
 /// Edit: changes the name of a student.
 Future<void> renameStudent(String id, String name) =>
@@ -13530,12 +13739,29 @@ Future<void> updateStudent(String id, String name, String phoneText) {
 }
 
 /// Change: moves a student to another section / class of the same form.
-Future<void> moveStudent(String id, String newSectionId) =>
-    _students.doc(id).update({
-      'sectionId': newSectionId,
-      'updatedBy': _uid,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+Future<void> moveStudent(String id, String newSectionId) async {
+  Map<String, dynamic>? m;
+  try {
+    m = (await _students.doc(id).get()).data();
+  } catch (_) {}
+  await _students.doc(id).update({
+    'sectionId': newSectionId,
+    'updatedBy': _uid,
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+  final oldId = '${m?['sectionId'] ?? ''}';
+  if (m == null || oldId == newSectionId) return;
+  final labels = await _sectionLabels();
+  await logStudentEvents([
+    {
+      'type': 'moved',
+      'studentId': id,
+      'studentName': '${m['name'] ?? ''}',
+      'from': labels[oldId] ?? '',
+      'to': labels[newSectionId] ?? '',
+    }
+  ]);
+}
 
 /// Every student of every section, live (used by the Students page).
 Stream<List<StudentInfo>> watchAllStudents() =>
