@@ -17370,13 +17370,24 @@ border: pw.Border.all(color: navy, width: 1.6))),
 ),
 ),
 build: (ctx) => [
-if (logoImg != null) pdfLogoBlock(logoImg),
-pw.SizedBox(height: 8),
+// Header bar: the school logo on the left, the title in the middle.
 pw.Container(
 width: double.infinity,
-padding: const pw.EdgeInsets.symmetric(vertical: 9),
+padding: const pw.EdgeInsets.symmetric(vertical: 9, horizontal: 10),
 color: navy,
-child: pw.Column(children: [
+child: pw.Stack(alignment: pw.Alignment.center, children: [
+if (logoImg != null)
+pw.Align(
+alignment: pw.Alignment.centerLeft,
+child: pw.Container(
+padding: const pw.EdgeInsets.all(2),
+decoration: pw.BoxDecoration(
+color: PdfColors.white,
+borderRadius: pw.BorderRadius.circular(4)),
+child: pw.Image(logoImg, height: 52, fit: pw.BoxFit.contain),
+),
+),
+pw.Column(children: [
 pw.Text('REPORT CARD',
 style: pw.TextStyle(
 fontSize: 19,
@@ -17388,6 +17399,7 @@ pw.Text(
 safe(d.year.isEmpty ? d.exam : '${d.exam}  |  ${d.year}'),
 style: const pw.TextStyle(
 fontSize: 10.5, color: PdfColors.white)),
+]),
 ]),
 ),
 pw.SizedBox(height: 12),
