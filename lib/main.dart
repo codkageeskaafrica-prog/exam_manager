@@ -7487,6 +7487,7 @@ class AppPages {
   static const sections = 'sections';
   static const students = 'students';
   static const attendance = 'attendance';
+  static const daily = 'daily';
   static const result = 'result';
   static const schedule = 'schedule';
   static const teachers = 'teachers';
@@ -7500,6 +7501,7 @@ class AppPages {
     sections,
     students,
     attendance,
+    daily,
     result,
     schedule,
     teachers,
@@ -7513,6 +7515,7 @@ class AppPages {
     sections: 'Sections',
     students: 'Students',
     attendance: 'Attendance',
+    daily: 'Daily attendance',
     result: 'Result',
     schedule: 'Schedule',
     teachers: 'Teachers',
@@ -7555,6 +7558,10 @@ class UserProfile {
   /// Finance role: the classes (whole classes like 1A) this person may manage.
   /// Empty = every class.
   final List<String> financeSections;
+
+  /// Class monitor: the classes (whole classes like 1A) this person takes the
+  /// DAILY attendance of. Set by the administrator in Settings > Users.
+  final List<String> monitorSections;
   const UserProfile({
     required this.uid,
     required this.role,
@@ -7568,6 +7575,7 @@ class UserProfile {
     this.approved = true,
     this.rejected = false,
     this.financeSections = const [],
+    this.monitorSections = const [],
   });
 
   static const roles = ['admin', 'teacher', 'affairs', 'finance', 'student'];
@@ -7583,6 +7591,15 @@ class UserProfile {
 
   List<String> effectiveAccess(AppSettings st) {
     if (fullAccess) return AppPages.all;
+    final base = _baseAccess(st);
+    // a class monitor always gets the Daily attendance page
+    if (monitorSections.isNotEmpty && !base.contains(AppPages.daily)) {
+      return [...base, AppPages.daily];
+    }
+    return base;
+  }
+
+  List<String> _baseAccess(AppSettings st) {
     final a = access;
     if (a != null) return a;
     if (role == 'student') return st.studentAccess;
@@ -7609,6 +7626,12 @@ class UserProfile {
       financeSections: m['financeSections'] is List
           ? [
         for (final e in (m['financeSections'] as List))
+          if (e is String) e
+      ]
+          : const <String>[],
+      monitorSections: m['monitorSections'] is List
+          ? [
+        for (final e in (m['monitorSections'] as List))
           if (e is String) e
       ]
           : const <String>[],
@@ -8333,6 +8356,14 @@ class HomeScreen extends StatelessWidget {
       icon: Icons.fact_check,
       color: kGreen,
       builder: (_) => const AttendanceScreen(),
+    ),
+    _HomeItem(
+      page: AppPages.daily,
+      title: 'Daily attendance',
+      subtitle: 'Morning and afternoon attendance, Monday to Friday',
+      icon: Icons.how_to_reg,
+      color: const Color(0xFF16A085),
+      builder: (_) => const DailyAttendanceScreen(),
     ),
     _HomeItem(
       page: AppPages.result,
@@ -10616,6 +10647,7 @@ class AppSettings {
     this.affairsAccess = const [
       AppPages.students,
       AppPages.attendance,
+      AppPages.daily,
       AppPages.result,
     ],
     this.financeAccess = const [AppPages.finance],
@@ -16463,6 +16495,9 @@ if (allowed.contains(AppPages.result))
 if (allowed.contains(AppPages.attendance))
 ('Attendance', Icons.fact_check,
 _StudentAttendanceBody(studentId: studentId)),
+// a student who is a class monitor takes the daily attendance here
+if (allowed.contains(AppPages.daily))
+('Daily attendance', Icons.how_to_reg, const DailyAttendanceBody()),
 ];
 final header = Padding(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -20107,6 +20142,460 @@ onPressed: () => Navigator.pop(context, _c.text),
 child: const Text('Save')),
 ],
 );
+}
+
+// ======================= DAILY (REGULAR) ATTENDANCE =======================
+/// Regular school attendance, taken twice a day (morning / afternoon),
+/// Monday to Friday. It is separate from the exam attendance above.
+///   dailyAttendance/{classId}_{yyyy-MM-dd}_{am|pm}
+///     sectionId, date, session, marks {studentId: p|a|l|e},
+///     byUid, byName, updatedAt
+/// Admin / Student affairs (and anybody given the page) take any class on any
+/// day. A class monitor (classes ticked in Settings > Users) takes only those
+/// classes, only for today.
+class DailyAttendanceScreen extends StatelessWidget {
+const DailyAttendanceScreen({super.key});
+
+@override
+Widget build(BuildContext context) => Scaffold(
+appBar: AppBar(title: const Text('Daily attendance')),
+body: const Align(
+alignment: Alignment.topCenter,
+child: ConstrainedBox(
+constraints: BoxConstraints(maxWidth: 760),
+child: DailyAttendanceBody(),
+),
+),
+);
+}
+
+class DailyAttendanceBody extends StatefulWidget {
+const DailyAttendanceBody({super.key});
+
+@override
+State<DailyAttendanceBody> createState() => _DailyAttendanceBodyState();
+}
+
+class _DailyAttendanceBodyState extends State<DailyAttendanceBody> {
+static const _presentColor = Color(0xFF2E7D32);
+static const _absentColor = Color(0xFFC62828);
+
+final _db = FirebaseFirestore.instance;
+late final Stream<UserProfile> _me = UserProfile.watchMine();
+late final Stream<QuerySnapshot<Map<String, dynamic>>> _secs =
+_db.collection('sections').snapshots();
+late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
+_db.collection('students').snapshots();
+
+String? _classId;
+late DateTime _date = _lastWeekday(DateTime.now());
+late String _session = (DateTime.now().hour >= 12) ? 'pm' : 'am';
+// studentId -> 'a' (absent). Everybody else counts as present (ticked).
+Map<String, String> _marks = {};
+List<String> _current = const []; // ids of the students shown
+bool _exists = false; // a register is already saved for this day / session
+String _loadedKey = '';
+bool _loading = false, _saving = false, _dirty = false;
+String? _error;
+
+static DateTime _lastWeekday(DateTime d) {
+var x = DateTime(d.year, d.month, d.day);
+while (x.weekday > DateTime.friday) {
+x = x.subtract(const Duration(days: 1));
+}
+return x;
+}
+
+static bool _sameDay(DateTime a, DateTime b) =>
+a.year == b.year && a.month == b.month && a.day == b.day;
+
+String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
+String get _docId => '${_classId}_${_dateKey}_$_session';
+
+Future<void> _load() async {
+final id = _classId;
+if (id == null) return;
+final key = _docId;
+setState(() {
+_loading = true;
+_error = null;
+_dirty = false;
+_exists = false;
+_marks = {};
+_loadedKey = key;
+});
+try {
+final d = await _db.collection('dailyAttendance').doc(key).get();
+if (!mounted || _loadedKey != key) return;
+final m = d.data()?['marks'];
+setState(() {
+_exists = d.exists;
+_marks = {
+if (m is Map)
+for (final e in m.entries)
+if ('${e.value}' != 'p') '${e.key}': 'a'
+};
+_loading = false;
+});
+} catch (e) {
+if (!mounted || _loadedKey != key) return;
+setState(() {
+_loading = false;
+_error = '$e'.replaceFirst('Exception: ', '');
+});
+}
+}
+
+Future<void> _save(UserProfile me) async {
+final id = _classId;
+if (id == null) return;
+setState(() => _saving = true);
+try {
+await _db.collection('dailyAttendance').doc(_docId).set({
+'sectionId': id,
+'date': _dateKey,
+'session': _session,
+// every student of the class: p = ticked, a = unticked
+'marks': {
+for (final sid in _current) sid: _marks[sid] == 'a' ? 'a' : 'p'
+},
+'byUid': me.uid,
+'byName': me.name.isEmpty ? me.email : me.name,
+'updatedAt': FieldValue.serverTimestamp(),
+});
+if (!mounted) return;
+setState(() {
+_saving = false;
+_dirty = false;
+_exists = true;
+});
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('Saved: ${_session == 'am' ? 'morning' : 'afternoon'}'
+' attendance of ${DateFormat('EEE d MMM').format(_date)}')));
+} catch (e) {
+if (!mounted) return;
+setState(() => _saving = false);
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('Could not save: '
+'${'$e'.replaceFirst('Exception: ', '')}')));
+}
+}
+
+Future<void> _pickDate() async {
+final p = await showDatePicker(
+context: context,
+initialDate: _date,
+firstDate: DateTime(2020),
+lastDate: DateTime.now(),
+selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
+);
+if (p == null || !mounted) return;
+setState(() => _date = DateTime(p.year, p.month, p.day));
+_load();
+}
+
+Widget _msg(String t, {bool error = false}) => Padding(
+padding: const EdgeInsets.all(24),
+child: Center(
+child: Text(t,
+textAlign: TextAlign.center,
+style: TextStyle(color: error ? Colors.red : Colors.black54))),
+);
+
+@override
+Widget build(BuildContext context) {
+return StreamBuilder<UserProfile>(
+stream: _me,
+builder: (context, meSnap) {
+if (meSnap.hasError) return _msg('${meSnap.error}', error: true);
+final me = meSnap.data;
+if (me == null) {
+return const Center(child: CircularProgressIndicator());
+}
+return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: _secs,
+builder: (context, secSnap) =>
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: _stus,
+builder: (context, stuSnap) {
+final err = secSnap.error ?? stuSnap.error;
+if (err != null) {
+return _msg('Could not load: $err', error: true);
+}
+if (!secSnap.hasData || !stuSnap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+return _content(me, secSnap.data!, stuSnap.data!);
+},
+),
+);
+},
+);
+}
+
+Widget _content(UserProfile me, QuerySnapshot<Map<String, dynamic>> secDocs,
+QuerySnapshot<Map<String, dynamic>> stuDocs) {
+final allSecs = [for (final d in secDocs.docs) SectionInfo.fromDoc(d)];
+// a class monitor takes only the own classes, only for today
+final restricted =
+me.monitorSections.isNotEmpty && !me.fullAccess && me.role != 'affairs';
+final classes = [
+for (final c in allSecs)
+if (!c.isSub && (!restricted || me.monitorSections.contains(c.id))) c
+]..sort((a, b) {
+final f = a.form.compareTo(b.form);
+return f != 0 ? f : a.name.compareTo(b.name);
+});
+if (classes.isEmpty) {
+return _msg(restricted
+? 'None of your classes was found. Ask the administrator.'
+    : 'There are no classes yet.');
+}
+final cid =
+classes.any((c) => c.id == _classId) ? _classId! : classes.first.id;
+if (cid != _classId) {
+WidgetsBinding.instance.addPostFrameCallback((_) {
+if (!mounted) return;
+_classId = cid;
+_load();
+});
+}
+final cls = classes.firstWhere((c) => c.id == cid);
+
+// students of the class: the whole class + the ones that exist only in a
+// divided section of it (a student saved in both counts once)
+final subIds = {
+for (final c in allSecs)
+if (c.isSub &&
+c.form == cls.form &&
+c.classKey == cls.name.toUpperCase())
+c.id
+};
+final inClass = <Map<String, String>>[];
+final inSubs = <Map<String, String>>[];
+for (final d in stuDocs.docs) {
+final m = d.data();
+final sid = '${m['sectionId'] ?? ''}';
+final row = {
+'id': d.id,
+'name': '${m['name'] ?? ''}'.trim(),
+'no': '${m['studentNo'] ?? ''}'.trim(),
+};
+if (sid == cid) {
+inClass.add(row);
+} else if (subIds.contains(sid)) {
+inSubs.add(row);
+}
+}
+final names = {for (final r in inClass) r['name']!.toLowerCase()};
+final students = [
+...inClass,
+for (final r in inSubs)
+if (!names.contains(r['name']!.toLowerCase())) r
+]..sort((a, b) =>
+a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+
+final today = DateTime.now();
+final canEdit = !restricted || _sameDay(_date, today);
+final isWeekend = today.weekday > DateTime.friday;
+_current = [for (final r in students) r['id']!];
+final absent = students.where((r) => _marks[r['id']] == 'a').length;
+final present = students.length - absent;
+
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+children: [
+DropdownButtonFormField<String>(
+value: cid,
+isExpanded: true,
+decoration: const InputDecoration(
+labelText: 'Class',
+border: OutlineInputBorder(),
+isDense: true,
+prefixIcon: Icon(Icons.groups),
+),
+items: [
+for (final c in classes)
+DropdownMenuItem(value: c.id, child: Text(c.fullName)),
+],
+onChanged: (v) {
+if (v == null || v == _classId) return;
+setState(() => _classId = v);
+_load();
+},
+),
+const SizedBox(height: 10),
+Wrap(
+spacing: 10,
+runSpacing: 10,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [
+OutlinedButton.icon(
+onPressed: restricted ? null : _pickDate,
+icon: const Icon(Icons.calendar_today, size: 18),
+label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
+),
+SegmentedButton<String>(
+showSelectedIcon: false,
+segments: const [
+ButtonSegment(
+value: 'am',
+icon: Icon(Icons.wb_sunny_outlined, size: 18),
+label: Text('Morning')),
+ButtonSegment(
+value: 'pm',
+icon: Icon(Icons.wb_twilight, size: 18),
+label: Text('Afternoon')),
+],
+selected: {_session},
+onSelectionChanged: (v) {
+setState(() => _session = v.first);
+_load();
+},
+),
+]),
+if (restricted && isWeekend)
+const Padding(
+padding: EdgeInsets.only(top: 10),
+child: Text(
+'Attendance is taken Monday to Friday. Today is a weekend, '
+'so you can only look at the last school day.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+)
+else if (restricted)
+const Padding(
+padding: EdgeInsets.only(top: 10),
+child: Text('Class monitor: you can take today\'s attendance.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+),
+const SizedBox(height: 12),
+Wrap(spacing: 8, runSpacing: 6, children: [
+Chip(
+visualDensity: VisualDensity.compact,
+side: const BorderSide(color: _presentColor),
+backgroundColor: _presentColor.withOpacity(0.12),
+label: Text('Present $present',
+style: const TextStyle(
+color: _presentColor,
+fontWeight: FontWeight.w600,
+fontSize: 12)),
+),
+Chip(
+visualDensity: VisualDensity.compact,
+side: const BorderSide(color: _absentColor),
+backgroundColor: _absentColor.withOpacity(0.12),
+label: Text('Absent $absent',
+style: const TextStyle(
+color: _absentColor,
+fontWeight: FontWeight.w600,
+fontSize: 12)),
+),
+if (_exists)
+const Chip(
+visualDensity: VisualDensity.compact,
+label: Text('Register saved', style: TextStyle(fontSize: 12)),
+),
+]),
+const SizedBox(height: 10),
+Row(children: [
+TextButton.icon(
+onPressed: !canEdit || students.isEmpty
+? null
+    : () => setState(() {
+_marks.clear();
+_dirty = true;
+}),
+icon: const Icon(Icons.check_box, size: 18),
+label: const Text('Tick all'),
+),
+TextButton.icon(
+onPressed: !canEdit || students.isEmpty
+? null
+    : () => setState(() {
+for (final r in students) {
+_marks[r['id']!] = 'a';
+}
+_dirty = true;
+}),
+icon: const Icon(Icons.check_box_outline_blank, size: 18),
+label: const Text('Untick all'),
+),
+const Spacer(),
+FilledButton.icon(
+onPressed: !canEdit || _saving || (_exists && !_dirty)
+? null
+    : () => _save(me),
+icon: _saving
+? const SizedBox(
+width: 16,
+height: 16,
+child: CircularProgressIndicator(strokeWidth: 2))
+    : const Icon(Icons.save, size: 18),
+label: Text(_exists && !_dirty ? 'Saved' : 'Save'),
+),
+]),
+const SizedBox(height: 8),
+if (_loading)
+const Padding(
+padding: EdgeInsets.all(24),
+child: Center(child: CircularProgressIndicator()))
+else if (_error != null)
+_msg('Could not load this register.\n$_error', error: true)
+else if (students.isEmpty)
+_msg('This class has no students yet.')
+else
+for (var i = 0; i < students.length; i++)
+Card(
+margin: const EdgeInsets.symmetric(vertical: 3),
+child: Padding(
+padding:
+const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+child: Row(children: [
+SizedBox(
+width: 26,
+child: Text('${i + 1}',
+style: const TextStyle(
+fontSize: 12, color: Colors.black45))),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(students[i]['name']!,
+style: const TextStyle(
+fontSize: 14.5, fontWeight: FontWeight.w600)),
+if (students[i]['no']!.isNotEmpty)
+Text('ID ${students[i]['no']}',
+style: const TextStyle(
+fontSize: 11.5, color: Colors.black54)),
+]),
+),
+Text(_marks[students[i]['id']] == 'a' ? 'Absent' : 'Present',
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w600,
+color: _marks[students[i]['id']] == 'a'
+? _absentColor
+    : _presentColor)),
+Checkbox(
+value: _marks[students[i]['id']] != 'a',
+activeColor: _presentColor,
+onChanged: !canEdit
+? null
+    : (on) => setState(() {
+if (on == true) {
+_marks.remove(students[i]['id']);
+} else {
+_marks[students[i]['id']!] = 'a';
+}
+_dirty = true;
+}),
+),
+]),
+),
+),
+],
+);
+}
 }
 
 class AttendanceScreen extends StatefulWidget {
@@ -30435,6 +30924,7 @@ subtitle: Text(
 '${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
 '${u.fullAccess ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
 '${u.role == 'finance' ? (u.financeSections.isEmpty ? ' · all classes' : ' · ${u.financeSections.length} class${u.financeSections.length == 1 ? '' : 'es'}') : ''}'
+'${u.monitorSections.isEmpty ? '' : ' · monitor of ${u.monitorSections.length} class${u.monitorSections.length == 1 ? '' : 'es'}'}'
 '${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
 '${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
 style: const TextStyle(fontSize: 12),
@@ -30499,6 +30989,20 @@ onChanged: (v) => _run(
 context,
 () => users.doc(u.uid).set(
 {..._base(u), 'financeSections': v}, SetOptions(merge: true))),
+),
+],
+if (!u.fullAccess) ...[
+const Divider(height: 24),
+_FinanceClassesPicker(
+title: 'Class monitor: classes this user takes the daily '
+'attendance of',
+allowAll: false,
+selected: u.monitorSections,
+enabled: !isMe,
+onChanged: (v) => _run(
+context,
+() => users.doc(u.uid).set(
+{..._base(u), 'monitorSections': v}, SetOptions(merge: true))),
 ),
 ],
 if (u.role != 'student') ...[
@@ -30575,10 +31079,16 @@ class _FinanceClassesPicker extends StatelessWidget {
 final List<String> selected;
 final bool enabled;
 final ValueChanged<List<String>> onChanged;
+final String title;
+
+/// Finance: no class ticked = every class. Class monitor: none = not a monitor.
+final bool allowAll;
 const _FinanceClassesPicker({
 required this.selected,
 required this.enabled,
 required this.onChanged,
+this.title = 'Classes this finance user can manage',
+this.allowAll = true,
 });
 
 @override
@@ -30612,9 +31122,9 @@ byForm.putIfAbsent(s.form, () => []).add(s);
 return Column(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
-const Text('Classes this finance user can manage',
-style: TextStyle(fontSize: 12)),
+Text(title, style: const TextStyle(fontSize: 12)),
 const SizedBox(height: 6),
+if (allowAll)
 ChoiceChip(
 label: const Text('All classes'),
 selected: selected.isEmpty,
@@ -30643,7 +31153,12 @@ x.id
 ],
 const SizedBox(height: 8),
 Text(
-selected.isEmpty
+!allowAll
+? (selected.isEmpty
+? 'No class ticked: this user is not a class monitor.'
+    : 'This user can take the daily attendance of the ticked '
+'classes (today only).')
+    : selected.isEmpty
 ? 'No class ticked: this user can open every class.'
     : 'Only the ticked classes are shown in Finance '
 '(fees, payments and reports).',
