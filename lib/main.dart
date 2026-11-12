@@ -20783,6 +20783,7 @@ DateTime _rFrom = _monday(DateTime.now());
 DateTime _rTo = _lastWeekday(DateTime.now());
 String _rClass = ''; // '' = every class
 String _rShift = ''; // '' = Shift A + Shift B
+String _show = 'all'; // list filter: all | p (present) | a (absent)
 QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
 late DateTime _date = _lastWeekday(DateTime.now());
 // 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
@@ -21129,6 +21130,13 @@ final isWeekend = today.weekday > DateTime.friday;
 _current = [for (final r in students) r['id']!];
 final absent = students.where((r) => _marks[r['id']] == 'a').length;
 final present = students.length - absent;
+// rows shown (keeps the number of the full list)
+final shownIdx = [
+for (var i = 0; i < students.length; i++)
+if (_show == 'all' ||
+(_show == 'a') == (_marks[students[i]['id']] == 'a'))
+i
+];
 
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
@@ -21199,26 +21207,42 @@ child: Text('You can take today\'s attendance of your classes.',
 style: TextStyle(fontSize: 12, color: Colors.black54)),
 ),
 const SizedBox(height: 12),
+// the counts are also the filter of the list below
 Wrap(spacing: 8, runSpacing: 6, children: [
-Chip(
+ChoiceChip(
 visualDensity: VisualDensity.compact,
+showCheckmark: false,
+selected: _show == 'all',
+label: Text('All ${students.length}',
+style: const TextStyle(
+fontWeight: FontWeight.w600, fontSize: 12)),
+onSelected: (_) => setState(() => _show = 'all'),
+),
+ChoiceChip(
+visualDensity: VisualDensity.compact,
+showCheckmark: false,
+selected: _show == 'p',
+selectedColor: _presentColor.withOpacity(0.2),
 side: const BorderSide(color: _presentColor),
-backgroundColor: _presentColor.withOpacity(0.12),
 label: Text('Present $present',
 style: const TextStyle(
 color: _presentColor,
 fontWeight: FontWeight.w600,
 fontSize: 12)),
+onSelected: (_) => setState(() => _show = 'p'),
 ),
-Chip(
+ChoiceChip(
 visualDensity: VisualDensity.compact,
+showCheckmark: false,
+selected: _show == 'a',
+selectedColor: _absentColor.withOpacity(0.2),
 side: const BorderSide(color: _absentColor),
-backgroundColor: _absentColor.withOpacity(0.12),
 label: Text('Absent $absent',
 style: const TextStyle(
 color: _absentColor,
 fontWeight: FontWeight.w600,
 fontSize: 12)),
+onSelected: (_) => setState(() => _show = 'a'),
 ),
 if (_exists)
 const Chip(
@@ -21273,8 +21297,12 @@ else if (_error != null)
 _msg('Could not load this register.\n$_error', error: true)
 else if (students.isEmpty)
 _msg('This class has no students yet.')
+else if (shownIdx.isEmpty)
+_msg(_show == 'a'
+? 'No student is absent.'
+    : 'No student is present.')
 else
-for (var i = 0; i < students.length; i++)
+for (final i in shownIdx)
 Card(
 margin: const EdgeInsets.symmetric(vertical: 3),
 child: Padding(
