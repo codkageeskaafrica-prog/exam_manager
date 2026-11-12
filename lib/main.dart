@@ -20159,11 +20159,11 @@ const DailyAttendanceScreen({super.key});
 @override
 Widget build(BuildContext context) => Scaffold(
 appBar: AppBar(title: const Text('Daily attendance')),
-body: const Align(
+body: Align(
 alignment: Alignment.topCenter,
 child: ConstrainedBox(
-constraints: BoxConstraints(maxWidth: 760),
-child: DailyAttendanceBody(),
+constraints: const BoxConstraints(maxWidth: 760),
+child: const DailyAttendanceBody(),
 ),
 ),
 );
