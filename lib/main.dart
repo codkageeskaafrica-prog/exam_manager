@@ -25805,14 +25805,18 @@ return ref.set({
 });
 }
 
-await put(s.id, s.sectionId).timeout(const Duration(seconds: 30), onTimeout: () {
+// the same marks go to the twin copy of the student (whole class <->
+// section): both are written at the same time
+String? t;
+try {
+t = (await twinMap())[s.id];
+} catch (_) {}
+await Future.wait([
+put(s.id, s.sectionId),
+if (t != null) put(t, _stuSection[t] ?? s.sectionId).catchError((_) {}),
+]).timeout(const Duration(seconds: 30), onTimeout: () {
 throw Exception('Saving timed out. Check the internet connection.');
 });
-// the same marks go to the twin copy of the student (whole class <-> section)
-try {
-final t = (await twinMap())[s.id];
-if (t != null) await put(t, _stuSection[t] ?? s.sectionId);
-} catch (_) {}
 }
 }
 
@@ -28106,20 +28110,6 @@ style: const TextStyle(
 fontSize: 16,
 fontWeight: FontWeight.w800)),
 ]),
-const SizedBox(height: 2),
-Text(
-'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}'
-'${appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 && r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin ? ' · below min' : ''}',
-style: TextStyle(
-fontSize: 11.5,
-fontWeight: appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 &&
-r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin
-? FontWeight.w700
-    : FontWeight.normal,
-color: appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 &&
-r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin
-? const Color(0xFFC62828)
-    : Colors.grey.shade600)),
 ],
 ),
 if (!teacherScope.value.isStudent) ...[
@@ -28635,6 +28625,13 @@ for (final s in widget.subjects) s: FocusNode(),
 final Map<String, String> _saved = {}; // subject -> text already saved
 Future<void> _chain = Future.value();
 bool _saving = false, _ok = false;
+Timer? _typing;
+
+/// Queue a save now (saves never overlap, so no mark is lost).
+void _saveNow() {
+_typing?.cancel();
+_chain = _chain.then((_) => _run());
+}
 
 @override
 void initState() {
@@ -28644,7 +28641,7 @@ node.addListener(() {
 if (node.hasFocus) {
 widget.onStart();
 } else {
-_chain = _chain.then((_) => _run());
+_saveNow();
 }
 });
 });
@@ -28652,6 +28649,7 @@ _chain = _chain.then((_) => _run());
 
 @override
 void dispose() {
+_typing?.cancel();
 for (final c in _c.values) {
 c.dispose();
 }
@@ -28734,8 +28732,16 @@ style: _lock(sub)
 ? TextStyle(
 fontSize: 13, fontWeight: FontWeight.w700, color: _lockColor(sub))
     : const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-onChanged: (_) => setState(() => _ok = false),
-onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+onChanged: (_) {
+setState(() => _ok = false);
+// auto-save a moment after the last key, no need to leave the box
+_typing?.cancel();
+_typing = Timer(const Duration(milliseconds: 300), _saveNow);
+},
+onSubmitted: (_) {
+_saveNow();
+FocusScope.of(context).nextFocus();
+},
 decoration: InputDecoration(
 isDense: true,
 filled: _lock(sub),
