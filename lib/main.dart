@@ -1049,7 +1049,7 @@ class ExamService {
               final gr = avg == null
                   ? null
                   : _gradeOf(avg,
-                  max: _gradeMax(exam, SchoolService.formOf(x)));
+                      max: _gradeMax(exam, SchoolService.formOf(x)));
               return [
                 cell('${i + 1}'),
                 cell(x.name, left: true),
@@ -7108,14 +7108,14 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     final color = type == 'added'
         ? Colors.green.shade700
         : type == 'moved'
-        ? Colors.blue.shade700
-        : Colors.red.shade700;
+            ? Colors.blue.shade700
+            : Colors.red.shade700;
     final icon = _studentTabs.firstWhere((t) => t.$1 == type).$3;
     final what = type == 'added'
         ? (to.isEmpty ? 'Added' : 'Added to $to')
         : type == 'moved'
-        ? '${from.isEmpty ? '?' : from}  ->  ${to.isEmpty ? '?' : to}'
-        : (from.isEmpty ? 'Deleted' : 'Deleted from $from');
+            ? '${from.isEmpty ? '?' : from}  ->  ${to.isEmpty ? '?' : to}'
+            : (from.isEmpty ? 'Deleted' : 'Deleted from $from');
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
@@ -7140,14 +7140,14 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
       stream: FirebaseFirestore.instance
           .collection('studentLog')
           .where('time',
-          isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
+              isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
           .where('time', isLessThan: Timestamp.fromDate(end))
           .snapshots(),
       builder: (context, snap) {
         if (snap.hasError) {
           return Text(
               'Could not load the student activity. Check that the '
-                  'Firestore rules allow reading studentLog.\n${snap.error}',
+              'Firestore rules allow reading studentLog.\n${snap.error}',
               style: const TextStyle(color: Colors.red));
         }
         if (!snap.hasData) {
@@ -7160,23 +7160,23 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
           for (final d in snap.data!.docs)
             if (d.data()['type'] == type) d.data()
         ]..sort((a, b) {
-          final x = _time(a['time']), y = _time(b['time']);
-          if (x == null || y == null) return 0;
-          return y.compareTo(x);
-        });
+            final x = _time(a['time']), y = _time(b['time']);
+            if (x == null || y == null) return 0;
+            return y.compareTo(x);
+          });
         final label = _studentTabs.firstWhere((t) => t.$1 == type).$2;
         final empty = type == 'added'
             ? 'No new students on this date.'
             : type == 'moved'
-            ? 'No students were transferred on this date.'
-            : 'No students were deleted on this date.';
+                ? 'No students were transferred on this date.'
+                : 'No students were deleted on this date.';
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const SizedBox(height: 12),
             Text('$label (${rows.length})',
                 style:
-                const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
             const SizedBox(height: 8),
             OutlinedButton.icon(
               onPressed: _pickRange,
@@ -7203,8 +7203,8 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
         if (snap.hasError) {
           return Text(
               'Could not load the activity log. Check that the '
-                  'Firestore rules allow the administrator to read '
-                  'presence.\n${snap.error}',
+              'Firestore rules allow the administrator to read '
+              'presence.\n${snap.error}',
               style: const TextStyle(color: Colors.red));
         }
         if (!snap.hasData) {
@@ -7283,7 +7283,7 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
           children: [
             Text(widget.students ? 'Students activity' : 'Users activity',
                 style:
-                const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                    const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
             const SizedBox(height: 4),
             Text(
                 widget.students
@@ -13746,13 +13746,13 @@ class SchoolService {
   await batch.commit();
   final label = (await _sectionLabels())[sectionId] ?? '';
   await logStudentEvents([
-  for (var i = 0; i < list.length; i++)
-  {
-  'type': 'added',
-  'studentId': ids[i],
-  'studentName': list[i].name,
-  'to': label,
-  }
+    for (var i = 0; i < list.length; i++)
+      {
+        'type': 'added',
+        'studentId': ids[i],
+        'studentName': list[i].name,
+        'to': label,
+      }
   ]);
   return ids;
 }
@@ -20147,18 +20147,18 @@ child: const Text('Save')),
 // ======================= DAILY ATTENDANCE REPORT (admin) =======================
 /// One table of the daily attendance report (one class).
 class _DrTable {
-final String title; // e.g. "Form1 - 1A"
-final List<String> headers;
-final List<List<String>> rows;
-final List<double> weights; // relative column widths
-final List<String> notes;
-const _DrTable({
-required this.title,
-required this.headers,
-required this.rows,
-required this.weights,
-this.notes = const [],
-});
+  final String title; // e.g. "Form1 - 1A"
+  final List<String> headers;
+  final List<List<String>> rows;
+  final List<double> weights; // relative column widths
+  final List<String> notes;
+  const _DrTable({
+    required this.title,
+    required this.headers,
+    required this.rows,
+    required this.weights,
+    this.notes = const [],
+  });
 }
 
 /// Builds the daily attendance report from the saved registers and writes it
@@ -20166,571 +20166,599 @@ this.notes = const [],
 ///  - period of ONE day: a row per student with Present / Absent for each shift
 ///  - longer period: a row per student with Present, Absent, Sessions and %
 class DailyAttendanceReport {
-static const _shiftName = {'am': 'Shift A', 'pm': 'Shift B'};
-static final _day = DateFormat('d MMM yyyy');
-static String _t(String s) =>
-s.replaceAll('–', '-').replaceAll('—', '-').replaceAll('·', '-');
+  static const _shiftName = {'am': 'Shift A', 'pm': 'Shift B'};
+  static final _day = DateFormat('d MMM yyyy');
+  static String _t(String s) =>
+      s.replaceAll('–', '-').replaceAll('—', '-').replaceAll('·', '-');
 
-static String periodText(DateTime from, DateTime to, String shift) {
-final p = from == to
-? _day.format(from)
-    : '${_day.format(from)} - ${_day.format(to)}';
-return 'Period: $p   |   ${shift.isEmpty ? 'Shift A + Shift B' : _shiftName[shift]}';
-}
+  static String periodText(DateTime from, DateTime to, String shift,
+      [String status = '']) {
+    final p = from == to
+        ? _day.format(from)
+        : '${_day.format(from)} - ${_day.format(to)}';
+    return 'Period: $p   |   ${shift.isEmpty ? 'Shift A + Shift B' : _shiftName[shift]}'
+        '${status == 'a' ? '   |   Absent students only' : status == 'p' ? '   |   Students never absent only' : ''}';
+  }
 
-static Future<List<_DrTable>> tables({
-required DateTime from,
-required DateTime to,
-required String classId, // '' = every class
-required String shift, // '' = both shifts
-required QuerySnapshot<Map<String, dynamic>> secs,
-required QuerySnapshot<Map<String, dynamic>> stus,
-}) async {
-if (teacherScope.value.scoped) {
-throw Exception('Only an administrator can create the report.');
-}
-final key = DateFormat('yyyy-MM-dd');
-final snap = await FirebaseFirestore.instance
-    .collection('dailyAttendance')
-    .where('date', isGreaterThanOrEqualTo: key.format(from))
-    .where('date', isLessThanOrEqualTo: key.format(to))
-    .get();
-final regs = [
-for (final d in snap.docs)
-if (shift.isEmpty || d.data()['session'] == shift) d.data()
-];
-if (regs.isEmpty) {
-throw Exception('No attendance was taken in this period.');
-}
-final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
-final classes = [
-for (final c in all)
-if (!c.isSub && (classId.isEmpty || c.id == classId)) c
-]..sort((a, b) {
-final f = a.form.compareTo(b.form);
-return f != 0 ? f : a.name.compareTo(b.name);
-});
-final single = from == to;
-final shifts = shift.isEmpty ? ['am', 'pm'] : [shift];
-String pct(int p, int n) =>
-n == 0 ? '-' : '${(p * 100 / n).toStringAsFixed(1)}%';
+  static Future<List<_DrTable>> tables({
+    required DateTime from,
+    required DateTime to,
+    required String classId, // '' = every class
+    required String shift, // '' = both shifts
+    String status = '', // '' = everybody, 'a' = absent at least once, 'p' = never absent
+    required QuerySnapshot<Map<String, dynamic>> secs,
+    required QuerySnapshot<Map<String, dynamic>> stus,
+  }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
+    final key = DateFormat('yyyy-MM-dd');
+    final snap = await FirebaseFirestore.instance
+        .collection('dailyAttendance')
+        .where('date', isGreaterThanOrEqualTo: key.format(from))
+        .where('date', isLessThanOrEqualTo: key.format(to))
+        .get();
+    final regs = [
+      for (final d in snap.docs)
+        if (shift.isEmpty || d.data()['session'] == shift) d.data()
+    ];
+    if (regs.isEmpty) {
+      throw Exception('No attendance was taken in this period.');
+    }
+    final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
+    final classes = [
+      for (final c in all)
+        if (!c.isSub && (classId.isEmpty || c.id == classId)) c
+    ]..sort((a, b) {
+        final f = a.form.compareTo(b.form);
+        return f != 0 ? f : a.name.compareTo(b.name);
+      });
+    final single = from == to;
+    final shifts = shift.isEmpty ? ['am', 'pm'] : [shift];
+    String pct(int p, int n) =>
+        n == 0 ? '-' : '${(p * 100 / n).toStringAsFixed(1)}%';
+    // Absent = absent at least once in the period; Present = never absent
+    // (and marked at least once)
+    bool keep(int pr, int ab) =>
+        status.isEmpty || (status == 'a' ? ab > 0 : (ab == 0 && pr > 0));
 
-final out = <_DrTable>[];
-for (final cls in classes) {
-final mine = [for (final r in regs) if (r['sectionId'] == cls.id) r];
-if (mine.isEmpty) continue;
-// students of the class (+ the ones only in a divided section)
-final subIds = {
-for (final c in all)
-if (c.isSub &&
-c.form == cls.form &&
-c.classKey == cls.name.toUpperCase())
-c.id
-};
-final inClass = <Map<String, String>>[];
-final inSubs = <Map<String, String>>[];
-for (final d in stus.docs) {
-final m = d.data();
-final sid = '${m['sectionId'] ?? ''}';
-final row = {
-'id': d.id,
-'name': '${m['name'] ?? ''}'.trim(),
-'no': '${m['studentNo'] ?? ''}'.trim(),
-};
-if (sid == cls.id) {
-inClass.add(row);
-} else if (subIds.contains(sid)) {
-inSubs.add(row);
-}
-}
-final names = {for (final r in inClass) r['name']!.toLowerCase()};
-final students = [
-...inClass,
-for (final r in inSubs)
-if (!names.contains(r['name']!.toLowerCase())) r
-]..sort((a, b) =>
-a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+    final out = <_DrTable>[];
+    for (final cls in classes) {
+      final mine = [for (final r in regs) if (r['sectionId'] == cls.id) r];
+      if (mine.isEmpty) continue;
+      // students of the class (+ the ones only in a divided section)
+      final subIds = {
+        for (final c in all)
+          if (c.isSub &&
+              c.form == cls.form &&
+              c.classKey == cls.name.toUpperCase())
+            c.id
+      };
+      final inClass = <Map<String, String>>[];
+      final inSubs = <Map<String, String>>[];
+      for (final d in stus.docs) {
+        final m = d.data();
+        final sid = '${m['sectionId'] ?? ''}';
+        final row = {
+          'id': d.id,
+          'name': '${m['name'] ?? ''}'.trim(),
+          'no': '${m['studentNo'] ?? ''}'.trim(),
+        };
+        if (sid == cls.id) {
+          inClass.add(row);
+        } else if (subIds.contains(sid)) {
+          inSubs.add(row);
+        }
+      }
+      final names = {for (final r in inClass) r['name']!.toLowerCase()};
+      final students = [
+        ...inClass,
+        for (final r in inSubs)
+          if (!names.contains(r['name']!.toLowerCase())) r
+      ]..sort((a, b) =>
+          a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
-Map<String, dynamic> marksOf(Map<String, dynamic> r) =>
-r['marks'] is Map ? Map<String, dynamic>.from(r['marks'] as Map) : {};
+      Map<String, dynamic> marksOf(Map<String, dynamic> r) =>
+          r['marks'] is Map ? Map<String, dynamic>.from(r['marks'] as Map) : {};
 
-if (single) {
-final bySession = {
-for (final r in mine) '${r['session']}': marksOf(r),
-};
-final rows = <List<String>>[];
-for (var i = 0; i < students.length; i++) {
-final s = students[i];
-rows.add([
-'${i + 1}',
-s['name']!,
-s['no']!.isEmpty ? '-' : s['no']!,
-for (final sh in shifts)
-bySession[sh] == null || bySession[sh]![s['id']] == null
-? '-'
-    : (bySession[sh]![s['id']] == 'a' ? 'Absent' : 'Present'),
-]);
-}
-final notes = <String>[];
-for (final sh in shifts) {
-final m = bySession[sh];
-if (m == null) {
-notes.add('${_shiftName[sh]}: attendance was not taken.');
-} else {
-final ab = students.where((s) => m[s['id']] == 'a').length;
-final pr = students.where((s) => m[s['id']] != null).length - ab;
-notes.add('${_shiftName[sh]}: Present $pr, Absent $ab');
-}
-}
-out.add(_DrTable(
-title: '${cls.form} - ${cls.label}',
-headers: ['No.', 'Student name', 'ID', for (final sh in shifts) _shiftName[sh]!],
-rows: rows,
-weights: [0.7, 4, 1.5, for (final _ in shifts) 1.4],
-notes: notes,
-));
-} else {
-var tp = 0, tn = 0;
-final rows = <List<String>>[];
-for (var i = 0; i < students.length; i++) {
-final s = students[i];
-var pr = 0, ab = 0;
-for (final r in mine) {
-final v = marksOf(r)[s['id']];
-if (v == null) continue;
-if (v == 'a') {
-ab++;
-} else {
-pr++;
-}
-}
-tp += pr;
-tn += pr + ab;
-rows.add([
-'${i + 1}',
-s['name']!,
-s['no']!.isEmpty ? '-' : s['no']!,
-'$pr',
-'$ab',
-'${pr + ab}',
-pct(pr, pr + ab),
-]);
-}
-final a = mine.where((r) => r['session'] == 'am').length;
-final b = mine.where((r) => r['session'] == 'pm').length;
-out.add(_DrTable(
-title: '${cls.form} - ${cls.label}',
-headers: const [
-'No.', 'Student name', 'ID', 'Present', 'Absent', 'Sessions', 'Attendance'
-],
-rows: rows,
-weights: const [0.7, 4, 1.5, 1.2, 1.2, 1.3, 1.6],
-notes: [
-'Registers taken: ${mine.length} (Shift A: $a, Shift B: $b)',
-'Class attendance: ${pct(tp, tn)}',
-],
-));
-}
-}
-if (out.isEmpty) {
-throw Exception('No attendance was taken in this period.');
-}
-return out;
-}
+      if (single) {
+        final bySession = {
+          for (final r in mine) '${r['session']}': marksOf(r),
+        };
+        final rows = <List<String>>[];
+        for (final s in students) {
+          var pr = 0, ab = 0;
+          for (final sh in shifts) {
+            final v = bySession[sh]?[s['id']];
+            if (v == null) continue;
+            if (v == 'a') {
+              ab++;
+            } else {
+              pr++;
+            }
+          }
+          if (!keep(pr, ab)) continue;
+          rows.add([
+            '${rows.length + 1}',
+            s['name']!,
+            s['no']!.isEmpty ? '-' : s['no']!,
+            for (final sh in shifts)
+              bySession[sh] == null || bySession[sh]![s['id']] == null
+                  ? '-'
+                  : (bySession[sh]![s['id']] == 'a' ? 'Absent' : 'Present'),
+          ]);
+        }
+        if (rows.isEmpty) continue;
+        final notes = <String>[];
+        for (final sh in shifts) {
+          final m = bySession[sh];
+          if (m == null) {
+            notes.add('${_shiftName[sh]}: attendance was not taken.');
+          } else {
+            final ab = students.where((s) => m[s['id']] == 'a').length;
+            final pr = students.where((s) => m[s['id']] != null).length - ab;
+            notes.add('${_shiftName[sh]}: Present $pr, Absent $ab');
+          }
+        }
+        if (status.isNotEmpty) {
+          notes.add('Shown: ${rows.length} of ${students.length} students '
+              '(${status == 'a' ? 'absent' : 'never absent'}).');
+        }
+        out.add(_DrTable(
+          title: '${cls.form} - ${cls.label}',
+          headers: ['No.', 'Student name', 'ID', for (final sh in shifts) _shiftName[sh]!],
+          rows: rows,
+          weights: [0.7, 4, 1.5, for (final _ in shifts) 1.4],
+          notes: notes,
+        ));
+      } else {
+        var tp = 0, tn = 0;
+        final rows = <List<String>>[];
+        for (final s in students) {
+          var pr = 0, ab = 0;
+          for (final r in mine) {
+            final v = marksOf(r)[s['id']];
+            if (v == null) continue;
+            if (v == 'a') {
+              ab++;
+            } else {
+              pr++;
+            }
+          }
+          tp += pr;
+          tn += pr + ab;
+          if (!keep(pr, ab)) continue;
+          rows.add([
+            '${rows.length + 1}',
+            s['name']!,
+            s['no']!.isEmpty ? '-' : s['no']!,
+            '$pr',
+            '$ab',
+            '${pr + ab}',
+            pct(pr, pr + ab),
+          ]);
+        }
+        if (rows.isEmpty) continue;
+        final a = mine.where((r) => r['session'] == 'am').length;
+        final b = mine.where((r) => r['session'] == 'pm').length;
+        out.add(_DrTable(
+          title: '${cls.form} - ${cls.label}',
+          headers: const [
+            'No.', 'Student name', 'ID', 'Present', 'Absent', 'Sessions', 'Attendance'
+          ],
+          rows: rows,
+          weights: const [0.7, 4, 1.5, 1.2, 1.2, 1.3, 1.6],
+          notes: [
+            'Registers taken: ${mine.length} (Shift A: $a, Shift B: $b)',
+            'Class attendance: ${pct(tp, tn)}',
+            if (status.isNotEmpty)
+              'Shown: ${rows.length} of ${students.length} students '
+                  '(${status == 'a' ? 'absent at least once' : 'never absent'}).',
+          ],
+        ));
+      }
+    }
+    if (out.isEmpty) {
+      throw Exception(status.isEmpty
+          ? 'No attendance was taken in this period.'
+          : 'No student matches this filter in this period.');
+    }
+    return out;
+  }
 
-// ---------------- PDF (and Print) ----------------
-static Future<Uint8List> pdf(List<_DrTable> tables, String period) async {
-final doc = pw.Document();
-final lb = schoolLogo.value.bytes;
-final logo = lb == null ? null : pw.MemoryImage(lb);
-const navy = PdfColor.fromInt(0xFF1F4E79);
-pw.Widget cell(String t, int c,
-{bool head = false, PdfColor? color, bool zebra = false}) =>
-pw.Container(
-color: head ? PdfColors.grey300 : (zebra ? PdfColors.grey100 : null),
-padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
-alignment: c == 1 ? pw.Alignment.centerLeft : pw.Alignment.center,
-child: pw.Text(_t(t),
-style: pw.TextStyle(
-fontSize: 9.5,
-fontWeight: head || color != null
-? pw.FontWeight.bold
-    : pw.FontWeight.normal,
-color: color)),
-);
-for (final tb in tables) {
-doc.addPage(pw.MultiPage(
-pageFormat: PdfPageFormat.a4,
-margin: const pw.EdgeInsets.all(28),
-build: (ctx) => [
-pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
-if (logo != null) ...[
-pw.Image(logo, height: 46),
-pw.SizedBox(width: 10),
-],
-pw.Expanded(
-child: pw.Column(
-crossAxisAlignment: pw.CrossAxisAlignment.start,
-children: [
-pw.Text('DAILY ATTENDANCE REPORT',
-style: pw.TextStyle(
-fontSize: 17, fontWeight: pw.FontWeight.bold)),
-pw.SizedBox(height: 2),
-pw.Text(_t(period), style: const pw.TextStyle(fontSize: 10)),
-]),
-),
-]),
-pw.SizedBox(height: 10),
-pw.Container(
-width: double.infinity,
-color: navy,
-padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-child: pw.Text(_t(tb.title),
-style: pw.TextStyle(
-color: PdfColors.white,
-fontSize: 12,
-fontWeight: pw.FontWeight.bold)),
-),
-pw.SizedBox(height: 6),
-pw.Table(
-border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
-columnWidths: {
-for (var i = 0; i < tb.weights.length; i++)
-i: pw.FlexColumnWidth(tb.weights[i]),
-},
-children: [
-pw.TableRow(children: [
-for (var c = 0; c < tb.headers.length; c++)
-cell(tb.headers[c], c, head: true),
-]),
-for (var r = 0; r < tb.rows.length; r++)
-pw.TableRow(children: [
-for (var c = 0; c < tb.rows[r].length; c++)
-cell(tb.rows[r][c], c,
-zebra: r.isOdd,
-color: tb.rows[r][c] == 'Absent'
-? PdfColors.red800
-    : (tb.rows[r][c] == 'Present'
-? PdfColors.green800
-    : null)),
-]),
-],
-),
-pw.SizedBox(height: 8),
-for (final n in tb.notes)
-pw.Padding(
-padding: const pw.EdgeInsets.only(top: 2),
-child: pw.Text(_t(n),
-style: pw.TextStyle(
-fontSize: 10, fontWeight: pw.FontWeight.bold)),
-),
-],
-));
-}
-return Uint8List.fromList(await doc.save());
-}
+  // ---------------- PDF (and Print) ----------------
+  static Future<Uint8List> pdf(List<_DrTable> tables, String period) async {
+    final doc = pw.Document();
+    final lb = schoolLogo.value.bytes;
+    final logo = lb == null ? null : pw.MemoryImage(lb);
+    const navy = PdfColor.fromInt(0xFF1F4E79);
+    pw.Widget cell(String t, int c,
+            {bool head = false, PdfColor? color, bool zebra = false}) =>
+        pw.Container(
+          color: head ? PdfColors.grey300 : (zebra ? PdfColors.grey100 : null),
+          padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+          alignment: c == 1 ? pw.Alignment.centerLeft : pw.Alignment.center,
+          child: pw.Text(_t(t),
+              style: pw.TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: head || color != null
+                      ? pw.FontWeight.bold
+                      : pw.FontWeight.normal,
+                  color: color)),
+        );
+    for (final tb in tables) {
+      doc.addPage(pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(28),
+        build: (ctx) => [
+          pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+            if (logo != null) ...[
+              pw.Image(logo, height: 46),
+              pw.SizedBox(width: 10),
+            ],
+            pw.Expanded(
+              child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text('DAILY ATTENDANCE REPORT',
+                        style: pw.TextStyle(
+                            fontSize: 17, fontWeight: pw.FontWeight.bold)),
+                    pw.SizedBox(height: 2),
+                    pw.Text(_t(period), style: const pw.TextStyle(fontSize: 10)),
+                  ]),
+            ),
+          ]),
+          pw.SizedBox(height: 10),
+          pw.Container(
+            width: double.infinity,
+            color: navy,
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            child: pw.Text(_t(tb.title),
+                style: pw.TextStyle(
+                    color: PdfColors.white,
+                    fontSize: 12,
+                    fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(height: 6),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+            columnWidths: {
+              for (var i = 0; i < tb.weights.length; i++)
+                i: pw.FlexColumnWidth(tb.weights[i]),
+            },
+            children: [
+              pw.TableRow(children: [
+                for (var c = 0; c < tb.headers.length; c++)
+                  cell(tb.headers[c], c, head: true),
+              ]),
+              for (var r = 0; r < tb.rows.length; r++)
+                pw.TableRow(children: [
+                  for (var c = 0; c < tb.rows[r].length; c++)
+                    cell(tb.rows[r][c], c,
+                        zebra: r.isOdd,
+                        color: tb.rows[r][c] == 'Absent'
+                            ? PdfColors.red800
+                            : (tb.rows[r][c] == 'Present'
+                                ? PdfColors.green800
+                                : null)),
+                ]),
+            ],
+          ),
+          pw.SizedBox(height: 8),
+          for (final n in tb.notes)
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(top: 2),
+              child: pw.Text(_t(n),
+                  style: pw.TextStyle(
+                      fontSize: 10, fontWeight: pw.FontWeight.bold)),
+            ),
+        ],
+      ));
+    }
+    return Uint8List.fromList(await doc.save());
+  }
 
-// ---------------- Excel ----------------
-static Uint8List xlsx(List<_DrTable> tables, String period) {
-const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-String col(int i) {
-var n = i + 1;
-var s = '';
-while (n > 0) {
-final m = (n - 1) % 26;
-s = String.fromCharCode(65 + m) + s;
-n = (n - 1) ~/ 26;
-}
-return s;
-}
+  // ---------------- Excel ----------------
+  static Uint8List xlsx(List<_DrTable> tables, String period) {
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    String col(int i) {
+      var n = i + 1;
+      var s = '';
+      while (n > 0) {
+        final m = (n - 1) % 26;
+        s = String.fromCharCode(65 + m) + s;
+        n = (n - 1) ~/ 26;
+      }
+      return s;
+    }
 
-String sc(int c, int r, String t, int style) =>
-'<c r="${col(c)}$r" s="$style" t="inlineStr"><is>'
-'<t xml:space="preserve">${ExamService._xml(_t(t))}</t></is></c>';
-String nc(int c, int r, num v, int style) =>
-'<c r="${col(c)}$r" s="$style"><v>$v</v></c>';
-String ec(int c, int r, int style) => '<c r="${col(c)}$r" s="$style"/>';
+    String sc(int c, int r, String t, int style) =>
+        '<c r="${col(c)}$r" s="$style" t="inlineStr"><is>'
+        '<t xml:space="preserve">${ExamService._xml(_t(t))}</t></is></c>';
+    String nc(int c, int r, num v, int style) =>
+        '<c r="${col(c)}$r" s="$style"><v>$v</v></c>';
+    String ec(int c, int r, int style) => '<c r="${col(c)}$r" s="$style"/>';
 
-final used = <String>{};
-String sheetName(String t) {
-var n = t.replaceAll(RegExp(r'[\[\]:*?/\\]'), '-').trim();
-if (n.isEmpty) n = 'Class';
-if (n.length > 31) n = n.substring(0, 31);
-var u = n;
-var k = 2;
-while (!used.add(u.toLowerCase())) {
-final suf = ' ($k)';
-u = n.substring(0, (31 - suf.length).clamp(0, n.length)) + suf;
-k++;
-}
-return u;
-}
+    final used = <String>{};
+    String sheetName(String t) {
+      var n = t.replaceAll(RegExp(r'[\[\]:*?/\\]'), '-').trim();
+      if (n.isEmpty) n = 'Class';
+      if (n.length > 31) n = n.substring(0, 31);
+      var u = n;
+      var k = 2;
+      while (!used.add(u.toLowerCase())) {
+        final suf = ' ($k)';
+        u = n.substring(0, (31 - suf.length).clamp(0, n.length)) + suf;
+        k++;
+      }
+      return u;
+    }
 
-final sheets = <String>[];
-final names = <String>[];
-for (final tb in tables) {
-final cols = tb.headers.length;
-final rows = StringBuffer();
-final merges = <String>[];
-String band(int r, String text, int style) {
-merges.add('A$r:${col(cols - 1)}$r');
-final b = StringBuffer('<row r="$r">')..write(sc(0, r, text, style));
-for (var c = 1; c < cols; c++) {
-b.write(ec(c, r, style));
-}
-b.write('</row>');
-return b.toString();
-}
+    final sheets = <String>[];
+    final names = <String>[];
+    for (final tb in tables) {
+      final cols = tb.headers.length;
+      final rows = StringBuffer();
+      final merges = <String>[];
+      String band(int r, String text, int style) {
+        merges.add('A$r:${col(cols - 1)}$r');
+        final b = StringBuffer('<row r="$r">')..write(sc(0, r, text, style));
+        for (var c = 1; c < cols; c++) {
+          b.write(ec(c, r, style));
+        }
+        b.write('</row>');
+        return b.toString();
+      }
 
-rows.write(band(1, 'DAILY ATTENDANCE REPORT', 5));
-rows.write(band(2, period, 10));
-rows.write(band(3, tb.title, 10));
-final head = StringBuffer('<row r="5" ht="26" customHeight="1">');
-for (var c = 0; c < cols; c++) {
-head.write(sc(c, 5, tb.headers[c], 1));
-}
-head.write('</row>');
-rows.write(head);
-var r = 6;
-for (final row in tb.rows) {
-final line = StringBuffer('<row r="$r">');
-for (var c = 0; c < row.length; c++) {
-final v = row[c];
-final n = (c == 1 || c == 2) ? null : int.tryParse(v);
-if (n != null) {
-line.write(nc(c, r, n, 2));
-} else if (v == 'Absent') {
-line.write(sc(c, r, v, 9));
-} else if (v == 'Present') {
-line.write(sc(c, r, v, 7));
-} else {
-line.write(sc(c, r, v, c == 1 ? 3 : 2));
-}
-}
-line.write('</row>');
-rows.write(line);
-r++;
-}
-r++;
-for (final n in tb.notes) {
-rows.write('<row r="$r">${sc(0, r, n, 6)}</row>');
-r++;
-}
-final colsXml = StringBuffer('<cols>');
-for (var c = 0; c < cols; c++) {
-final w = (tb.weights[c] * 7).clamp(8, 40);
-colsXml.write(
-'<col min="${c + 1}" max="${c + 1}" width="${c == 1 ? 34 : w}" customWidth="1"/>');
-}
-colsXml.write('</cols>');
-sheets.add('$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-'<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
-'<sheetViews><sheetView workbookViewId="0">'
-'<pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/>'
-'</sheetView></sheetViews>'
-'<sheetFormatPr defaultRowHeight="16"/>'
-'$colsXml<sheetData>$rows</sheetData>'
-'<mergeCells count="${merges.length}">'
-'${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>'
-'<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
-'<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>'
-'</worksheet>');
-names.add(sheetName(tb.title));
-}
+      rows.write(band(1, 'DAILY ATTENDANCE REPORT', 5));
+      rows.write(band(2, period, 10));
+      rows.write(band(3, tb.title, 10));
+      final head = StringBuffer('<row r="5" ht="26" customHeight="1">');
+      for (var c = 0; c < cols; c++) {
+        head.write(sc(c, 5, tb.headers[c], 1));
+      }
+      head.write('</row>');
+      rows.write(head);
+      var r = 6;
+      for (final row in tb.rows) {
+        final line = StringBuffer('<row r="$r">');
+        for (var c = 0; c < row.length; c++) {
+          final v = row[c];
+          final n = (c == 1 || c == 2) ? null : int.tryParse(v);
+          if (n != null) {
+            line.write(nc(c, r, n, 2));
+          } else if (v == 'Absent') {
+            line.write(sc(c, r, v, 9));
+          } else if (v == 'Present') {
+            line.write(sc(c, r, v, 7));
+          } else {
+            line.write(sc(c, r, v, c == 1 ? 3 : 2));
+          }
+        }
+        line.write('</row>');
+        rows.write(line);
+        r++;
+      }
+      r++;
+      for (final n in tb.notes) {
+        rows.write('<row r="$r">${sc(0, r, n, 6)}</row>');
+        r++;
+      }
+      final colsXml = StringBuffer('<cols>');
+      for (var c = 0; c < cols; c++) {
+        final w = (tb.weights[c] * 7).clamp(8, 40);
+        colsXml.write(
+            '<col min="${c + 1}" max="${c + 1}" width="${c == 1 ? 34 : w}" customWidth="1"/>');
+      }
+      colsXml.write('</cols>');
+      sheets.add('$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+          '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+          '<sheetViews><sheetView workbookViewId="0">'
+          '<pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/>'
+          '</sheetView></sheetViews>'
+          '<sheetFormatPr defaultRowHeight="16"/>'
+          '$colsXml<sheetData>$rows</sheetData>'
+          '<mergeCells count="${merges.length}">'
+          '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>'
+          '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
+          '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>'
+          '</worksheet>');
+      names.add(sheetName(tb.title));
+    }
 
-const rel =
-'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const b1 =
-'<border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right>'
-'<top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/></border>';
-String xf(int font, int fill, int border, String h, {bool wrap = false}) =>
-'<xf numFmtId="0" fontId="$font" fillId="$fill" borderId="$border" xfId="0" '
-'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
-'<alignment horizontal="$h" vertical="center"${wrap ? ' wrapText="1"' : ''}/></xf>';
-String font(String extra, {int sz = 11, String? color}) =>
-'<font>$extra<sz val="$sz"/>${color == null ? '' : '<color rgb="$color"/>'}'
-'<name val="Times New Roman"/></font>';
-final stylesXml = '$xmlHead<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-'<fonts count="5">${font('')}${font('<b/>')}${font('<b/>', sz: 14)}'
-'${font('<b/>', color: 'FF2E7D32')}${font('<b/>', color: 'FFC62828')}</fonts>'
-'<fills count="3"><fill><patternFill patternType="none"/></fill>'
-'<fill><patternFill patternType="gray125"/></fill>'
-'<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/><bgColor indexed="64"/></patternFill></fill></fills>'
-'<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>$b1</borders>'
-'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-'<cellXfs count="11">'
-'${xf(0, 0, 0, 'general')}' // 0
-'${xf(1, 2, 1, 'center', wrap: true)}' // 1 header
-'${xf(0, 0, 1, 'center')}' // 2 body centre
-'${xf(0, 0, 1, 'left')}' // 3 body left
-'${xf(1, 0, 1, 'center')}' // 4 bold centre
-'${xf(2, 2, 1, 'center')}' // 5 title
-'${xf(1, 0, 0, 'left')}' // 6 bold note
-'${xf(3, 0, 1, 'center')}' // 7 present (green)
-'${xf(1, 0, 1, 'center')}' // 8 spare
-'${xf(4, 0, 1, 'center')}' // 9 absent (red)
-'${xf(1, 2, 1, 'center')}' // 10 sub title
-'</cellXfs>'
-'<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
-'</styleSheet>';
+    const rel =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const b1 =
+        '<border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right>'
+        '<top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/></border>';
+    String xf(int font, int fill, int border, String h, {bool wrap = false}) =>
+        '<xf numFmtId="0" fontId="$font" fillId="$fill" borderId="$border" xfId="0" '
+        'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+        '<alignment horizontal="$h" vertical="center"${wrap ? ' wrapText="1"' : ''}/></xf>';
+    String font(String extra, {int sz = 11, String? color}) =>
+        '<font>$extra<sz val="$sz"/>${color == null ? '' : '<color rgb="$color"/>'}'
+        '<name val="Times New Roman"/></font>';
+    final stylesXml = '$xmlHead<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="5">${font('')}${font('<b/>')}${font('<b/>', sz: 14)}'
+        '${font('<b/>', color: 'FF2E7D32')}${font('<b/>', color: 'FFC62828')}</fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/><bgColor indexed="64"/></patternFill></fill></fills>'
+        '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>$b1</borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="11">'
+        '${xf(0, 0, 0, 'general')}' // 0
+        '${xf(1, 2, 1, 'center', wrap: true)}' // 1 header
+        '${xf(0, 0, 1, 'center')}' // 2 body centre
+        '${xf(0, 0, 1, 'left')}' // 3 body left
+        '${xf(1, 0, 1, 'center')}' // 4 bold centre
+        '${xf(2, 2, 1, 'center')}' // 5 title
+        '${xf(1, 0, 0, 'left')}' // 6 bold note
+        '${xf(3, 0, 1, 'center')}' // 7 present (green)
+        '${xf(1, 0, 1, 'center')}' // 8 spare
+        '${xf(4, 0, 1, 'center')}' // 9 absent (red)
+        '${xf(1, 2, 1, 'center')}' // 10 sub title
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>';
 
-final files = <String, List<int>>{
-'[Content_Types].xml': utf8.encode(
-'$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-'<Default Extension="xml" ContentType="application/xml"/>'
-'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-'${[for (var i = 0; i < sheets.length; i++) '<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'].join()}'
-'</Types>'),
-'_rels/.rels': utf8.encode(
-'$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-'<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/>'
-'</Relationships>'),
-'xl/workbook.xml': utf8.encode(
-'$xmlHead<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-'xmlns:r="$rel"><sheets>'
-'${[for (var i = 0; i < names.length; i++) '<sheet name="${ExamService._xml(names[i])}" sheetId="${i + 1}" r:id="rId${i + 1}"/>'].join()}'
-'</sheets></workbook>'),
-'xl/_rels/workbook.xml.rels': utf8.encode(
-'$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-'${[for (var i = 0; i < sheets.length; i++) '<Relationship Id="rId${i + 1}" Type="$rel/worksheet" Target="worksheets/sheet${i + 1}.xml"/>'].join()}'
-'<Relationship Id="rId${sheets.length + 1}" Type="$rel/styles" Target="styles.xml"/>'
-'</Relationships>'),
-'xl/styles.xml': utf8.encode(stylesXml),
-for (var i = 0; i < sheets.length; i++)
-'xl/worksheets/sheet${i + 1}.xml': utf8.encode(sheets[i]),
-};
-final out = zip.Archive();
-files.forEach(
-(name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
-final bytes = zip.ZipEncoder().encode(out);
-if (bytes == null) throw Exception('Could not create the Excel file.');
-return Uint8List.fromList(bytes);
-}
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+          '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+          '${[for (var i = 0; i < sheets.length; i++) '<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'].join()}'
+          '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          '<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/>'
+          '</Relationships>'),
+      'xl/workbook.xml': utf8.encode(
+          '$xmlHead<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+          'xmlns:r="$rel"><sheets>'
+          '${[for (var i = 0; i < names.length; i++) '<sheet name="${ExamService._xml(names[i])}" sheetId="${i + 1}" r:id="rId${i + 1}"/>'].join()}'
+          '</sheets></workbook>'),
+      'xl/_rels/workbook.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          '${[for (var i = 0; i < sheets.length; i++) '<Relationship Id="rId${i + 1}" Type="$rel/worksheet" Target="worksheets/sheet${i + 1}.xml"/>'].join()}'
+          '<Relationship Id="rId${sheets.length + 1}" Type="$rel/styles" Target="styles.xml"/>'
+          '</Relationships>'),
+      'xl/styles.xml': utf8.encode(stylesXml),
+      for (var i = 0; i < sheets.length; i++)
+        'xl/worksheets/sheet${i + 1}.xml': utf8.encode(sheets[i]),
+    };
+    final out = zip.Archive();
+    files.forEach(
+        (name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Excel file.');
+    return Uint8List.fromList(bytes);
+  }
 
-// ---------------- Word ----------------
-static Uint8List docx(List<_DrTable> tables, String period) {
-String x(String t) => ExamService._xml(_t(t));
-const ns =
-'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
-const relBase =
-'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const shade = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>';
-const zebra = '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>';
-const edge = 'w:val="single" w:sz="6" w:space="0" w:color="000000"';
-const tblBorders = '<w:tblBorders><w:top $edge/><w:left $edge/>'
-'<w:bottom $edge/><w:right $edge/><w:insideH $edge/>'
-'<w:insideV $edge/></w:tblBorders>';
-const pageW = 10106; // portrait A4 minus 900 twips margins
+  // ---------------- Word ----------------
+  static Uint8List docx(List<_DrTable> tables, String period) {
+    String x(String t) => ExamService._xml(_t(t));
+    const ns =
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const relBase =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const shade = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>';
+    const zebra = '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>';
+    const edge = 'w:val="single" w:sz="6" w:space="0" w:color="000000"';
+    const tblBorders = '<w:tblBorders><w:top $edge/><w:left $edge/>'
+        '<w:bottom $edge/><w:right $edge/><w:insideH $edge/>'
+        '<w:insideV $edge/></w:tblBorders>';
+    const pageW = 10106; // portrait A4 minus 900 twips margins
 
-String run(String t, {bool b = false, int sz = 20, String? color}) =>
-'<w:r><w:rPr>${b ? '<w:b/><w:bCs/>' : ''}'
-'${color == null ? '' : '<w:color w:val="$color"/>'}'
-'<w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr>'
-'<w:t xml:space="preserve">${x(t)}</w:t></w:r>';
-String para(String t,
-{bool b = true,
-String jc = 'center',
-bool pageBreak = false,
-int sz = 20,
-int sp = 20,
-String? color}) =>
-'<w:p><w:pPr>${pageBreak ? '<w:pageBreakBefore/>' : ''}'
-'<w:spacing w:before="$sp" w:after="$sp"/><w:jc w:val="$jc"/>'
-'<w:rPr><w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr></w:pPr>'
-'${t.isEmpty ? '' : run(t, b: b, sz: sz, color: color)}</w:p>';
-String tc(int w, String t,
-{bool head = false,
-String jc = 'center',
-bool zebraRow = false,
-String? color}) =>
-'<w:tc><w:tcPr><w:tcW w:w="$w" w:type="dxa"/>'
-'${head ? shade : (zebraRow ? zebra : '')}<w:vAlign w:val="center"/></w:tcPr>'
-'${para(t, b: head || color != null, jc: jc, sz: 19, sp: 30, color: color)}</w:tc>';
-String tr(List<String> cells, {bool head = false}) =>
-'<w:tr><w:trPr><w:cantSplit/>${head ? '<w:tblHeader/>' : ''}'
-'<w:trHeight w:val="340" w:hRule="atLeast"/></w:trPr>${cells.join()}</w:tr>';
+    String run(String t, {bool b = false, int sz = 20, String? color}) =>
+        '<w:r><w:rPr>${b ? '<w:b/><w:bCs/>' : ''}'
+        '${color == null ? '' : '<w:color w:val="$color"/>'}'
+        '<w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr>'
+        '<w:t xml:space="preserve">${x(t)}</w:t></w:r>';
+    String para(String t,
+            {bool b = true,
+            String jc = 'center',
+            bool pageBreak = false,
+            int sz = 20,
+            int sp = 20,
+            String? color}) =>
+        '<w:p><w:pPr>${pageBreak ? '<w:pageBreakBefore/>' : ''}'
+        '<w:spacing w:before="$sp" w:after="$sp"/><w:jc w:val="$jc"/>'
+        '<w:rPr><w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr></w:pPr>'
+        '${t.isEmpty ? '' : run(t, b: b, sz: sz, color: color)}</w:p>';
+    String tc(int w, String t,
+            {bool head = false,
+            String jc = 'center',
+            bool zebraRow = false,
+            String? color}) =>
+        '<w:tc><w:tcPr><w:tcW w:w="$w" w:type="dxa"/>'
+        '${head ? shade : (zebraRow ? zebra : '')}<w:vAlign w:val="center"/></w:tcPr>'
+        '${para(t, b: head || color != null, jc: jc, sz: 19, sp: 30, color: color)}</w:tc>';
+    String tr(List<String> cells, {bool head = false}) =>
+        '<w:tr><w:trPr><w:cantSplit/>${head ? '<w:tblHeader/>' : ''}'
+        '<w:trHeight w:val="340" w:hRule="atLeast"/></w:trPr>${cells.join()}</w:tr>';
 
-final body = StringBuffer();
-for (var ti = 0; ti < tables.length; ti++) {
-final tb = tables[ti];
-final total = tb.weights.fold<double>(0, (a, b) => a + b);
-final widths = [
-for (final w in tb.weights) (pageW * w / total).floor()
-];
-widths[1] += pageW - widths.fold<int>(0, (a, b) => a + b);
-body.write(para('DAILY ATTENDANCE REPORT',
-sz: 30, sp: 30, pageBreak: ti > 0));
-body.write(para(period, b: false, sz: 20, sp: 20));
-body.write(
-'<w:tbl><w:tblPr><w:tblW w:w="$pageW" w:type="dxa"/>$tblBorders'
-'<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>'
-'${widths.map((w) => '<w:gridCol w:w="$w"/>').join()}</w:tblGrid>');
-body.write('<w:tr><w:tc><w:tcPr><w:tcW w:w="$pageW" w:type="dxa"/>'
-'<w:gridSpan w:val="${tb.headers.length}"/>$shade</w:tcPr>'
-'${para(tb.title, sz: 22, sp: 30)}</w:tc></w:tr>');
-body.write(tr([
-for (var c = 0; c < tb.headers.length; c++)
-tc(widths[c], tb.headers[c], head: true),
-], head: true));
-for (var r = 0; r < tb.rows.length; r++) {
-body.write(tr([
-for (var c = 0; c < tb.rows[r].length; c++)
-tc(widths[c], tb.rows[r][c],
-jc: c == 1 ? 'left' : 'center',
-zebraRow: r.isOdd,
-color: tb.rows[r][c] == 'Absent'
-? 'C62828'
-    : (tb.rows[r][c] == 'Present' ? '2E7D32' : null)),
-]));
-}
-body.write('</w:tbl>');
-body.write(para('', b: false, sz: 12, sp: 0));
-for (final n in tb.notes) {
-body.write(para(n, jc: 'left', sz: 19, sp: 10));
-}
-}
+    final body = StringBuffer();
+    for (var ti = 0; ti < tables.length; ti++) {
+      final tb = tables[ti];
+      final total = tb.weights.fold<double>(0, (a, b) => a + b);
+      final widths = [
+        for (final w in tb.weights) (pageW * w / total).floor()
+      ];
+      widths[1] += pageW - widths.fold<int>(0, (a, b) => a + b);
+      body.write(para('DAILY ATTENDANCE REPORT',
+          sz: 30, sp: 30, pageBreak: ti > 0));
+      body.write(para(period, b: false, sz: 20, sp: 20));
+      body.write(
+          '<w:tbl><w:tblPr><w:tblW w:w="$pageW" w:type="dxa"/>$tblBorders'
+          '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>'
+          '${widths.map((w) => '<w:gridCol w:w="$w"/>').join()}</w:tblGrid>');
+      body.write('<w:tr><w:tc><w:tcPr><w:tcW w:w="$pageW" w:type="dxa"/>'
+          '<w:gridSpan w:val="${tb.headers.length}"/>$shade</w:tcPr>'
+          '${para(tb.title, sz: 22, sp: 30)}</w:tc></w:tr>');
+      body.write(tr([
+        for (var c = 0; c < tb.headers.length; c++)
+          tc(widths[c], tb.headers[c], head: true),
+      ], head: true));
+      for (var r = 0; r < tb.rows.length; r++) {
+        body.write(tr([
+          for (var c = 0; c < tb.rows[r].length; c++)
+            tc(widths[c], tb.rows[r][c],
+                jc: c == 1 ? 'left' : 'center',
+                zebraRow: r.isOdd,
+                color: tb.rows[r][c] == 'Absent'
+                    ? 'C62828'
+                    : (tb.rows[r][c] == 'Present' ? '2E7D32' : null)),
+        ]));
+      }
+      body.write('</w:tbl>');
+      body.write(para('', b: false, sz: 12, sp: 0));
+      for (final n in tb.notes) {
+        body.write(para(n, jc: 'left', sz: 19, sp: 10));
+      }
+    }
 
-const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-final documentXml = '$xmlHead<w:document $ns><w:body>$body'
-'<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-'<w:pgMar w:top="720" w:right="900" w:bottom="720" w:left="900" '
-'w:header="400" w:footer="400" w:gutter="0"/>'
-'</w:sectPr></w:body></w:document>';
-const stylesXml =
-'$xmlHead<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-'<w:docDefaults><w:rPrDefault><w:rPr>'
-'<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman"/>'
-'<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault>'
-'<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
-'</w:docDefaults></w:styles>';
-final files = <String, List<int>>{
-'[Content_Types].xml': utf8.encode(
-'$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-'<Default Extension="xml" ContentType="application/xml"/>'
-'<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-'<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
-'</Types>'),
-'_rels/.rels': utf8.encode(
-'$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-'<Relationship Id="rId1" Type="$relBase/officeDocument" Target="word/document.xml"/>'
-'</Relationships>'),
-'word/_rels/document.xml.rels': utf8.encode(
-'$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-'<Relationship Id="rIdStyles" Type="$relBase/styles" Target="styles.xml"/>'
-'</Relationships>'),
-'word/document.xml': utf8.encode(documentXml),
-'word/styles.xml': utf8.encode(stylesXml),
-};
-final out = zip.Archive();
-files.forEach(
-(name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
-final bytes = zip.ZipEncoder().encode(out);
-if (bytes == null) throw Exception('Could not create the Word file.');
-return Uint8List.fromList(bytes);
-}
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    final documentXml = '$xmlHead<w:document $ns><w:body>$body'
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="720" w:right="900" w:bottom="720" w:left="900" '
+        'w:header="400" w:footer="400" w:gutter="0"/>'
+        '</w:sectPr></w:body></w:document>';
+    const stylesXml =
+        '$xmlHead<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman"/>'
+        '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault>'
+        '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
+        '</w:docDefaults></w:styles>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+          '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+          '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          '<Relationship Id="rId1" Type="$relBase/officeDocument" Target="word/document.xml"/>'
+          '</Relationships>'),
+      'word/_rels/document.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+          '<Relationship Id="rIdStyles" Type="$relBase/styles" Target="styles.xml"/>'
+          '</Relationships>'),
+      'word/document.xml': utf8.encode(documentXml),
+      'word/styles.xml': utf8.encode(stylesXml),
+    };
+    final out = zip.Archive();
+    files.forEach(
+        (name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Word file.');
+    return Uint8List.fromList(bytes);
+  }
 }
 
 // ======================= DAILY (REGULAR) ATTENDANCE =======================
@@ -20743,617 +20771,634 @@ return Uint8List.fromList(bytes);
 /// day. A class monitor (classes ticked in Settings > Users) takes only those
 /// classes, only for today.
 class DailyAttendanceScreen extends StatelessWidget {
-const DailyAttendanceScreen({super.key});
+  const DailyAttendanceScreen({super.key});
 
-@override
-Widget build(BuildContext context) => Scaffold(
-appBar: AppBar(title: const Text('Daily attendance')),
-body: Align(
-alignment: Alignment.topCenter,
-child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 760),
-child: const DailyAttendanceBody(),
-),
-),
-);
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Daily attendance')),
+        body: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: const DailyAttendanceBody(),
+          ),
+        ),
+      );
 }
 
 class DailyAttendanceBody extends StatefulWidget {
-const DailyAttendanceBody({super.key});
+  const DailyAttendanceBody({super.key});
 
-@override
-State<DailyAttendanceBody> createState() => _DailyAttendanceBodyState();
+  @override
+  State<DailyAttendanceBody> createState() => _DailyAttendanceBodyState();
 }
 
 class _DailyAttendanceBodyState extends State<DailyAttendanceBody> {
-static const _presentColor = Color(0xFF2E7D32);
-static const _absentColor = Color(0xFFC62828);
+  static const _presentColor = Color(0xFF2E7D32);
+  static const _absentColor = Color(0xFFC62828);
 
-final _db = FirebaseFirestore.instance;
-late final Stream<UserProfile> _me = UserProfile.watchMine();
-late final Stream<QuerySnapshot<Map<String, dynamic>>> _secs =
-_db.collection('sections').snapshots();
-late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
-_db.collection('students').snapshots();
+  final _db = FirebaseFirestore.instance;
+  late final Stream<UserProfile> _me = UserProfile.watchMine();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _secs =
+      _db.collection('sections').snapshots();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
+      _db.collection('students').snapshots();
 
-String? _classId;
+  String? _classId;
 
-// ---- report (admin) ----
-DateTime _rFrom = _monday(DateTime.now());
-DateTime _rTo = _lastWeekday(DateTime.now());
-String _rClass = ''; // '' = every class
-String _rShift = ''; // '' = Shift A + Shift B
-String _show = 'all'; // list filter: all | p (present) | a (absent)
-QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
-late DateTime _date = _lastWeekday(DateTime.now());
-// 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
-// stay valid)
-String _session = 'am';
-// studentId -> 'a' (absent). Everybody else counts as present (ticked).
-Map<String, String> _marks = {};
-List<String> _current = const []; // ids of the students shown
-bool _exists = false; // a register is already saved for this day / session
-String _loadedKey = '';
-bool _loading = false, _saving = false, _dirty = false;
-String? _error;
+  // ---- report (admin) ----
+  DateTime _rFrom = _monday(DateTime.now());
+  DateTime _rTo = _lastWeekday(DateTime.now());
+  String _rClass = ''; // '' = every class
+  String _rShift = ''; // '' = Shift A + Shift B
+  String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
+  String _show = 'all'; // list filter: all | p (present) | a (absent)
+  QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
+  late DateTime _date = _lastWeekday(DateTime.now());
+  // 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
+  // stay valid)
+  String _session = 'am';
+  // studentId -> 'a' (absent). Everybody else counts as present (ticked).
+  Map<String, String> _marks = {};
+  List<String> _current = const []; // ids of the students shown
+  bool _exists = false; // a register is already saved for this day / session
+  String _loadedKey = '';
+  bool _loading = false, _saving = false, _dirty = false;
+  String? _error;
 
-static DateTime _lastWeekday(DateTime d) {
-var x = DateTime(d.year, d.month, d.day);
-while (x.weekday > DateTime.friday) {
-x = x.subtract(const Duration(days: 1));
-}
-return x;
-}
+  static DateTime _lastWeekday(DateTime d) {
+    var x = DateTime(d.year, d.month, d.day);
+    while (x.weekday > DateTime.friday) {
+      x = x.subtract(const Duration(days: 1));
+    }
+    return x;
+  }
 
-static DateTime _monday(DateTime d) {
-final x = DateTime(d.year, d.month, d.day);
-return x.subtract(Duration(days: x.weekday - 1));
-}
+  static DateTime _monday(DateTime d) {
+    final x = DateTime(d.year, d.month, d.day);
+    return x.subtract(Duration(days: x.weekday - 1));
+  }
 
-static bool _sameDay(DateTime a, DateTime b) =>
-a.year == b.year && a.month == b.month && a.day == b.day;
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 
-String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
-String get _docId => '${_classId}_${_dateKey}_$_session';
+  String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
+  String get _docId => '${_classId}_${_dateKey}_$_session';
 
-Future<void> _load() async {
-final id = _classId;
-if (id == null) return;
-final key = _docId;
-setState(() {
-_loading = true;
-_error = null;
-_dirty = false;
-_exists = false;
-_marks = {};
-_loadedKey = key;
-});
-try {
-final d = await _db.collection('dailyAttendance').doc(key).get();
-if (!mounted || _loadedKey != key) return;
-final m = d.data()?['marks'];
-setState(() {
-_exists = d.exists;
-_marks = {
-if (m is Map)
-for (final e in m.entries)
-if ('${e.value}' != 'p') '${e.key}': 'a'
-};
-_loading = false;
-});
-} catch (e) {
-if (!mounted || _loadedKey != key) return;
-setState(() {
-_loading = false;
-_error = '$e'.replaceFirst('Exception: ', '');
-});
-}
-}
+  Future<void> _load() async {
+    final id = _classId;
+    if (id == null) return;
+    final key = _docId;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _dirty = false;
+      _exists = false;
+      _marks = {};
+      _loadedKey = key;
+    });
+    try {
+      final d = await _db.collection('dailyAttendance').doc(key).get();
+      if (!mounted || _loadedKey != key) return;
+      final m = d.data()?['marks'];
+      setState(() {
+        _exists = d.exists;
+        _marks = {
+          if (m is Map)
+            for (final e in m.entries)
+              if ('${e.value}' != 'p') '${e.key}': 'a'
+        };
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted || _loadedKey != key) return;
+      setState(() {
+        _loading = false;
+        _error = '$e'.replaceFirst('Exception: ', '');
+      });
+    }
+  }
 
-Future<void> _save(UserProfile me) async {
-final id = _classId;
-if (id == null) return;
-setState(() => _saving = true);
-try {
-await _db.collection('dailyAttendance').doc(_docId).set({
-'sectionId': id,
-'date': _dateKey,
-'session': _session,
-// every student of the class: p = ticked, a = unticked
-'marks': {
-for (final sid in _current) sid: _marks[sid] == 'a' ? 'a' : 'p'
-},
-'byUid': me.uid,
-'byName': me.name.isEmpty ? me.email : me.name,
-'updatedAt': FieldValue.serverTimestamp(),
-});
-if (!mounted) return;
-setState(() {
-_saving = false;
-_dirty = false;
-_exists = true;
-});
-ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-content: Text('Saved: ${_session == 'am' ? 'Shift A' : 'Shift B'}'
-' attendance of ${DateFormat('EEE d MMM').format(_date)}')));
-} catch (e) {
-if (!mounted) return;
-setState(() => _saving = false);
-ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-content: Text('Could not save: '
-'${'$e'.replaceFirst('Exception: ', '')}')));
-}
-}
+  Future<void> _save(UserProfile me) async {
+    final id = _classId;
+    if (id == null) return;
+    setState(() => _saving = true);
+    try {
+      await _db.collection('dailyAttendance').doc(_docId).set({
+        'sectionId': id,
+        'date': _dateKey,
+        'session': _session,
+        // every student of the class: p = ticked, a = unticked
+        'marks': {
+          for (final sid in _current) sid: _marks[sid] == 'a' ? 'a' : 'p'
+        },
+        'byUid': me.uid,
+        'byName': me.name.isEmpty ? me.email : me.name,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _dirty = false;
+        _exists = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Saved: ${_session == 'am' ? 'Shift A' : 'Shift B'}'
+              ' attendance of ${DateFormat('EEE d MMM').format(_date)}')));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not save: '
+              '${'$e'.replaceFirst('Exception: ', '')}')));
+    }
+  }
 
-Future<void> _pickReportDate(bool from) async {
-final p = await showDatePicker(
-context: context,
-initialDate: from ? _rFrom : _rTo,
-firstDate: DateTime(2020),
-lastDate: DateTime.now(),
-selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
-);
-if (p == null || !mounted) return;
-final d = DateTime(p.year, p.month, p.day);
-setState(() {
-if (from) {
-_rFrom = d;
-if (_rTo.isBefore(d)) _rTo = d;
-} else {
-_rTo = d;
-if (_rFrom.isAfter(d)) _rFrom = d;
-}
-});
-}
+  Future<void> _pickReportDate(bool from) async {
+    final p = await showDatePicker(
+      context: context,
+      initialDate: from ? _rFrom : _rTo,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
+    );
+    if (p == null || !mounted) return;
+    final d = DateTime(p.year, p.month, p.day);
+    setState(() {
+      if (from) {
+        _rFrom = d;
+        if (_rTo.isBefore(d)) _rTo = d;
+      } else {
+        _rTo = d;
+        if (_rFrom.isAfter(d)) _rFrom = d;
+      }
+    });
+  }
 
-Future<List<_DrTable>> _reportTables() => DailyAttendanceReport.tables(
-from: _rFrom,
-to: _rTo,
-classId: _rClass,
-shift: _rShift,
-secs: _secsSnap!,
-stus: _stusSnap!,
-);
+  Future<List<_DrTable>> _reportTables() => DailyAttendanceReport.tables(
+        from: _rFrom,
+        to: _rTo,
+        classId: _rClass,
+        shift: _rShift,
+        status: _rStatus,
+        secs: _secsSnap!,
+        stus: _stusSnap!,
+      );
 
-String get _reportPeriod =>
-DailyAttendanceReport.periodText(_rFrom, _rTo, _rShift);
+  String get _reportPeriod =>
+      DailyAttendanceReport.periodText(_rFrom, _rTo, _rShift, _rStatus);
 
-Widget _reportPanel(List<SectionInfo> classes) {
-final fmt = DateFormat('EEE d MMM yyyy');
-return Card(
-margin: const EdgeInsets.only(bottom: 10),
-child: ExpansionTile(
-leading: const Icon(Icons.summarize),
-title: const Text('Report',
-style: TextStyle(fontWeight: FontWeight.w700)),
-subtitle: const Text('Excel, Word, PDF and Print',
-style: TextStyle(fontSize: 12)),
-childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-expandedCrossAxisAlignment: CrossAxisAlignment.start,
-children: [
-Wrap(spacing: 10, runSpacing: 10, children: [
-OutlinedButton.icon(
-onPressed: () => _pickReportDate(true),
-icon: const Icon(Icons.calendar_today, size: 18),
-label: Text('From ${fmt.format(_rFrom)}'),
-),
-OutlinedButton.icon(
-onPressed: () => _pickReportDate(false),
-icon: const Icon(Icons.event, size: 18),
-label: Text('To ${fmt.format(_rTo)}'),
-),
-]),
-const SizedBox(height: 12),
-Wrap(spacing: 10, runSpacing: 10, children: [
-SizedBox(
-width: 220,
-child: DropdownButtonFormField<String>(
-value: classes.any((c) => c.id == _rClass) ? _rClass : '',
-isExpanded: true,
-decoration: const InputDecoration(
-labelText: 'Class',
-border: OutlineInputBorder(),
-isDense: true),
-items: [
-const DropdownMenuItem(value: '', child: Text('All classes')),
-for (final c in classes)
-DropdownMenuItem(value: c.id, child: Text(c.fullName)),
-],
-onChanged: (v) => setState(() => _rClass = v ?? ''),
-),
-),
-SizedBox(
-width: 200,
-child: DropdownButtonFormField<String>(
-value: _rShift,
-isExpanded: true,
-decoration: const InputDecoration(
-labelText: 'Shift',
-border: OutlineInputBorder(),
-isDense: true),
-items: const [
-DropdownMenuItem(value: '', child: Text('Shift A + B')),
-DropdownMenuItem(value: 'am', child: Text('Shift A')),
-DropdownMenuItem(value: 'pm', child: Text('Shift B')),
-],
-onChanged: (v) => setState(() => _rShift = v ?? ''),
-),
-),
-]),
-const SizedBox(height: 8),
-Text(
-_rFrom == _rTo
-? 'One day: each student shows Present / Absent for each shift.'
-    : 'More than one day: each student shows Present, Absent, '
-'Sessions and Attendance %.',
-style: const TextStyle(fontSize: 12, color: Colors.black54)),
-const SizedBox(height: 10),
-Align(
-alignment: Alignment.centerLeft,
-child: _ReportMenuButton(
-fileName: () => _safeFile(
-'Daily-attendance-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
-'${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
-build: () async => DailyAttendanceReport.pdf(
-await _reportTables(), _reportPeriod),
-buildXlsx: () async => DailyAttendanceReport.xlsx(
-await _reportTables(), _reportPeriod),
-buildDocx: () async => DailyAttendanceReport.docx(
-await _reportTables(), _reportPeriod),
-),
-),
-],
-),
-);
-}
+  Widget _reportPanel(List<SectionInfo> classes) {
+    final fmt = DateFormat('EEE d MMM yyyy');
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ExpansionTile(
+        leading: const Icon(Icons.summarize),
+        title: const Text('Report',
+            style: TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: const Text('Excel, Word, PDF and Print',
+            style: TextStyle(fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(spacing: 10, runSpacing: 10, children: [
+            OutlinedButton.icon(
+              onPressed: () => _pickReportDate(true),
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text('From ${fmt.format(_rFrom)}'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _pickReportDate(false),
+              icon: const Icon(Icons.event, size: 18),
+              label: Text('To ${fmt.format(_rTo)}'),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          Wrap(spacing: 10, runSpacing: 10, children: [
+            SizedBox(
+              width: 220,
+              child: DropdownButtonFormField<String>(
+                value: classes.any((c) => c.id == _rClass) ? _rClass : '',
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Class',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('All classes')),
+                  for (final c in classes)
+                    DropdownMenuItem(value: c.id, child: Text(c.fullName)),
+                ],
+                onChanged: (v) => setState(() => _rClass = v ?? ''),
+              ),
+            ),
+            SizedBox(
+              width: 200,
+              child: DropdownButtonFormField<String>(
+                value: _rShift,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Shift',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: const [
+                  DropdownMenuItem(value: '', child: Text('Shift A + B')),
+                  DropdownMenuItem(value: 'am', child: Text('Shift A')),
+                  DropdownMenuItem(value: 'pm', child: Text('Shift B')),
+                ],
+                onChanged: (v) => setState(() => _rShift = v ?? ''),
+              ),
+            ),
+            SizedBox(
+              width: 220,
+              child: DropdownButtonFormField<String>(
+                value: _rStatus,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Show',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: const [
+                  DropdownMenuItem(value: '', child: Text('All students')),
+                  DropdownMenuItem(value: 'a', child: Text('Absent only')),
+                  DropdownMenuItem(value: 'p', child: Text('Present only')),
+                ],
+                onChanged: (v) => setState(() => _rStatus = v ?? ''),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+              '${_rFrom == _rTo ? 'One day: each student shows Present / Absent for each shift.' : 'More than one day: each student shows Present, Absent, Sessions and Attendance %.'}'
+              '${_rStatus == 'a' ? '\nAbsent only: students who were absent at least once.' : _rStatus == 'p' ? '\nPresent only: students who were never absent.' : ''}',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _ReportMenuButton(
+              fileName: () => _safeFile(
+                  'Daily-attendance-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
+                  '${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
+              build: () async => DailyAttendanceReport.pdf(
+                  await _reportTables(), _reportPeriod),
+              buildXlsx: () async => DailyAttendanceReport.xlsx(
+                  await _reportTables(), _reportPeriod),
+              buildDocx: () async => DailyAttendanceReport.docx(
+                  await _reportTables(), _reportPeriod),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-Future<void> _pickDate() async {
-final p = await showDatePicker(
-context: context,
-initialDate: _date,
-firstDate: DateTime(2020),
-lastDate: DateTime.now(),
-selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
-);
-if (p == null || !mounted) return;
-setState(() => _date = DateTime(p.year, p.month, p.day));
-_load();
-}
+  Future<void> _pickDate() async {
+    final p = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
+    );
+    if (p == null || !mounted) return;
+    setState(() => _date = DateTime(p.year, p.month, p.day));
+    _load();
+  }
 
-Widget _msg(String t, {bool error = false}) => Padding(
-padding: const EdgeInsets.all(24),
-child: Center(
-child: Text(t,
-textAlign: TextAlign.center,
-style: TextStyle(color: error ? Colors.red : Colors.black54))),
-);
+  Widget _msg(String t, {bool error = false}) => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+            child: Text(t,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: error ? Colors.red : Colors.black54))),
+      );
 
-@override
-Widget build(BuildContext context) {
-return StreamBuilder<UserProfile>(
-stream: _me,
-builder: (context, meSnap) {
-if (meSnap.hasError) return _msg('${meSnap.error}', error: true);
-final me = meSnap.data;
-if (me == null) {
-return const Center(child: CircularProgressIndicator());
-}
-return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-stream: _secs,
-builder: (context, secSnap) =>
-StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-stream: _stus,
-builder: (context, stuSnap) {
-final err = secSnap.error ?? stuSnap.error;
-if (err != null) {
-return _msg('Could not load: $err', error: true);
-}
-if (!secSnap.hasData || !stuSnap.hasData) {
-return const Center(child: CircularProgressIndicator());
-}
-return _content(me, secSnap.data!, stuSnap.data!);
-},
-),
-);
-},
-);
-}
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _me,
+      builder: (context, meSnap) {
+        if (meSnap.hasError) return _msg('${meSnap.error}', error: true);
+        final me = meSnap.data;
+        if (me == null) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _secs,
+          builder: (context, secSnap) =>
+              StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: _stus,
+            builder: (context, stuSnap) {
+              final err = secSnap.error ?? stuSnap.error;
+              if (err != null) {
+                return _msg('Could not load: $err', error: true);
+              }
+              if (!secSnap.hasData || !stuSnap.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              return _content(me, secSnap.data!, stuSnap.data!);
+            },
+          ),
+        );
+      },
+    );
+  }
 
-Widget _content(UserProfile me, QuerySnapshot<Map<String, dynamic>> secDocs,
-QuerySnapshot<Map<String, dynamic>> stuDocs) {
-_secsSnap = secDocs;
-_stusSnap = stuDocs;
-final allSecs = [for (final d in secDocs.docs) SectionInfo.fromDoc(d)];
-// a person with assigned classes sees ONLY those classes; they can take
-// today only (Student affairs keep any date)
-final restricted = me.monitorSections.isNotEmpty && !me.fullAccess;
-final todayOnly = restricted && me.role != 'affairs';
-final classes = [
-for (final c in allSecs)
-if (!c.isSub && (!restricted || me.monitorSections.contains(c.id))) c
-]..sort((a, b) {
-final f = a.form.compareTo(b.form);
-return f != 0 ? f : a.name.compareTo(b.name);
-});
-if (classes.isEmpty) {
-return _msg(restricted
-? 'None of your classes was found. Ask the administrator.'
-    : 'There are no classes yet.');
-}
-final cid =
-classes.any((c) => c.id == _classId) ? _classId! : classes.first.id;
-if (cid != _classId) {
-WidgetsBinding.instance.addPostFrameCallback((_) {
-if (!mounted) return;
-_classId = cid;
-_load();
-});
-}
-final cls = classes.firstWhere((c) => c.id == cid);
+  Widget _content(UserProfile me, QuerySnapshot<Map<String, dynamic>> secDocs,
+      QuerySnapshot<Map<String, dynamic>> stuDocs) {
+    _secsSnap = secDocs;
+    _stusSnap = stuDocs;
+    final allSecs = [for (final d in secDocs.docs) SectionInfo.fromDoc(d)];
+    // a person with assigned classes sees ONLY those classes; they can take
+    // today only (Student affairs keep any date)
+    final restricted = me.monitorSections.isNotEmpty && !me.fullAccess;
+    final todayOnly = restricted && me.role != 'affairs';
+    final classes = [
+      for (final c in allSecs)
+        if (!c.isSub && (!restricted || me.monitorSections.contains(c.id))) c
+    ]..sort((a, b) {
+        final f = a.form.compareTo(b.form);
+        return f != 0 ? f : a.name.compareTo(b.name);
+      });
+    if (classes.isEmpty) {
+      return _msg(restricted
+          ? 'None of your classes was found. Ask the administrator.'
+          : 'There are no classes yet.');
+    }
+    final cid =
+        classes.any((c) => c.id == _classId) ? _classId! : classes.first.id;
+    if (cid != _classId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _classId = cid;
+        _load();
+      });
+    }
+    final cls = classes.firstWhere((c) => c.id == cid);
 
-// students of the class: the whole class + the ones that exist only in a
-// divided section of it (a student saved in both counts once)
-final subIds = {
-for (final c in allSecs)
-if (c.isSub &&
-c.form == cls.form &&
-c.classKey == cls.name.toUpperCase())
-c.id
-};
-final inClass = <Map<String, String>>[];
-final inSubs = <Map<String, String>>[];
-for (final d in stuDocs.docs) {
-final m = d.data();
-final sid = '${m['sectionId'] ?? ''}';
-final row = {
-'id': d.id,
-'name': '${m['name'] ?? ''}'.trim(),
-'no': '${m['studentNo'] ?? ''}'.trim(),
-};
-if (sid == cid) {
-inClass.add(row);
-} else if (subIds.contains(sid)) {
-inSubs.add(row);
-}
-}
-final names = {for (final r in inClass) r['name']!.toLowerCase()};
-final students = [
-...inClass,
-for (final r in inSubs)
-if (!names.contains(r['name']!.toLowerCase())) r
-]..sort((a, b) =>
-a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+    // students of the class: the whole class + the ones that exist only in a
+    // divided section of it (a student saved in both counts once)
+    final subIds = {
+      for (final c in allSecs)
+        if (c.isSub &&
+            c.form == cls.form &&
+            c.classKey == cls.name.toUpperCase())
+          c.id
+    };
+    final inClass = <Map<String, String>>[];
+    final inSubs = <Map<String, String>>[];
+    for (final d in stuDocs.docs) {
+      final m = d.data();
+      final sid = '${m['sectionId'] ?? ''}';
+      final row = {
+        'id': d.id,
+        'name': '${m['name'] ?? ''}'.trim(),
+        'no': '${m['studentNo'] ?? ''}'.trim(),
+      };
+      if (sid == cid) {
+        inClass.add(row);
+      } else if (subIds.contains(sid)) {
+        inSubs.add(row);
+      }
+    }
+    final names = {for (final r in inClass) r['name']!.toLowerCase()};
+    final students = [
+      ...inClass,
+      for (final r in inSubs)
+        if (!names.contains(r['name']!.toLowerCase())) r
+    ]..sort((a, b) =>
+        a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
-final today = DateTime.now();
-final canEdit = !todayOnly || _sameDay(_date, today);
-final isWeekend = today.weekday > DateTime.friday;
-_current = [for (final r in students) r['id']!];
-final absent = students.where((r) => _marks[r['id']] == 'a').length;
-final present = students.length - absent;
-// rows shown (keeps the number of the full list)
-final shownIdx = [
-for (var i = 0; i < students.length; i++)
-if (_show == 'all' ||
-(_show == 'a') == (_marks[students[i]['id']] == 'a'))
-i
-];
+    final today = DateTime.now();
+    final canEdit = !todayOnly || _sameDay(_date, today);
+    final isWeekend = today.weekday > DateTime.friday;
+    _current = [for (final r in students) r['id']!];
+    final absent = students.where((r) => _marks[r['id']] == 'a').length;
+    final present = students.length - absent;
+    // rows shown (keeps the number of the full list)
+    final shownIdx = [
+      for (var i = 0; i < students.length; i++)
+        if (_show == 'all' ||
+            (_show == 'a') == (_marks[students[i]['id']] == 'a'))
+          i
+    ];
 
-return ListView(
-padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-children: [
-// only the administrator sees the report
-if (me.fullAccess) _reportPanel(classes),
-DropdownButtonFormField<String>(
-value: cid,
-isExpanded: true,
-decoration: const InputDecoration(
-labelText: 'Class',
-border: OutlineInputBorder(),
-isDense: true,
-prefixIcon: Icon(Icons.groups),
-),
-items: [
-for (final c in classes)
-DropdownMenuItem(value: c.id, child: Text(c.fullName)),
-],
-onChanged: (v) {
-if (v == null || v == _classId) return;
-setState(() => _classId = v);
-_load();
-},
-),
-const SizedBox(height: 10),
-Wrap(
-spacing: 10,
-runSpacing: 10,
-crossAxisAlignment: WrapCrossAlignment.center,
-children: [
-OutlinedButton.icon(
-onPressed: todayOnly ? null : _pickDate,
-icon: const Icon(Icons.calendar_today, size: 18),
-label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
-),
-SegmentedButton<String>(
-showSelectedIcon: false,
-segments: const [
-ButtonSegment(
-value: 'am',
-icon: Icon(Icons.looks_one_outlined, size: 18),
-label: Text('Shift A')),
-ButtonSegment(
-value: 'pm',
-icon: Icon(Icons.looks_two_outlined, size: 18),
-label: Text('Shift B')),
-],
-selected: {_session},
-onSelectionChanged: (v) {
-setState(() => _session = v.first);
-_load();
-},
-),
-]),
-if (todayOnly && isWeekend)
-const Padding(
-padding: EdgeInsets.only(top: 10),
-child: Text(
-'Attendance is taken Monday to Friday. Today is a weekend, '
-'so you can only look at the last school day.',
-style: TextStyle(fontSize: 12, color: Colors.black54)),
-)
-else if (todayOnly)
-const Padding(
-padding: EdgeInsets.only(top: 10),
-child: Text('You can take today\'s attendance of your classes.',
-style: TextStyle(fontSize: 12, color: Colors.black54)),
-),
-const SizedBox(height: 12),
-// the counts are also the filter of the list below
-Wrap(spacing: 8, runSpacing: 6, children: [
-ChoiceChip(
-visualDensity: VisualDensity.compact,
-showCheckmark: false,
-selected: _show == 'all',
-label: Text('All ${students.length}',
-style: const TextStyle(
-fontWeight: FontWeight.w600, fontSize: 12)),
-onSelected: (_) => setState(() => _show = 'all'),
-),
-ChoiceChip(
-visualDensity: VisualDensity.compact,
-showCheckmark: false,
-selected: _show == 'p',
-selectedColor: _presentColor.withOpacity(0.2),
-side: const BorderSide(color: _presentColor),
-label: Text('Present $present',
-style: const TextStyle(
-color: _presentColor,
-fontWeight: FontWeight.w600,
-fontSize: 12)),
-onSelected: (_) => setState(() => _show = 'p'),
-),
-ChoiceChip(
-visualDensity: VisualDensity.compact,
-showCheckmark: false,
-selected: _show == 'a',
-selectedColor: _absentColor.withOpacity(0.2),
-side: const BorderSide(color: _absentColor),
-label: Text('Absent $absent',
-style: const TextStyle(
-color: _absentColor,
-fontWeight: FontWeight.w600,
-fontSize: 12)),
-onSelected: (_) => setState(() => _show = 'a'),
-),
-if (_exists)
-const Chip(
-visualDensity: VisualDensity.compact,
-label: Text('Register saved', style: TextStyle(fontSize: 12)),
-),
-]),
-const SizedBox(height: 10),
-Row(children: [
-TextButton.icon(
-onPressed: !canEdit || students.isEmpty
-? null
-    : () => setState(() {
-_marks.clear();
-_dirty = true;
-}),
-icon: const Icon(Icons.check_box, size: 18),
-label: const Text('Tick all'),
-),
-TextButton.icon(
-onPressed: !canEdit || students.isEmpty
-? null
-    : () => setState(() {
-for (final r in students) {
-_marks[r['id']!] = 'a';
-}
-_dirty = true;
-}),
-icon: const Icon(Icons.check_box_outline_blank, size: 18),
-label: const Text('Untick all'),
-),
-const Spacer(),
-FilledButton.icon(
-onPressed: !canEdit || _saving || (_exists && !_dirty)
-? null
-    : () => _save(me),
-icon: _saving
-? const SizedBox(
-width: 16,
-height: 16,
-child: CircularProgressIndicator(strokeWidth: 2))
-    : const Icon(Icons.save, size: 18),
-label: Text(_exists && !_dirty ? 'Saved' : 'Save'),
-),
-]),
-const SizedBox(height: 8),
-if (_loading)
-const Padding(
-padding: EdgeInsets.all(24),
-child: Center(child: CircularProgressIndicator()))
-else if (_error != null)
-_msg('Could not load this register.\n$_error', error: true)
-else if (students.isEmpty)
-_msg('This class has no students yet.')
-else if (shownIdx.isEmpty)
-_msg(_show == 'a'
-? 'No student is absent.'
-    : 'No student is present.')
-else
-for (final i in shownIdx)
-Card(
-margin: const EdgeInsets.symmetric(vertical: 3),
-child: Padding(
-padding:
-const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-child: Row(children: [
-SizedBox(
-width: 26,
-child: Text('${i + 1}',
-style: const TextStyle(
-fontSize: 12, color: Colors.black45))),
-Expanded(
-child: Column(
-crossAxisAlignment: CrossAxisAlignment.start,
-children: [
-Text(students[i]['name']!,
-style: const TextStyle(
-fontSize: 14.5, fontWeight: FontWeight.w600)),
-if (students[i]['no']!.isNotEmpty)
-Text('ID ${students[i]['no']}',
-style: const TextStyle(
-fontSize: 11.5, color: Colors.black54)),
-]),
-),
-Text(_marks[students[i]['id']] == 'a' ? 'Absent' : 'Present',
-style: TextStyle(
-fontSize: 12,
-fontWeight: FontWeight.w600,
-color: _marks[students[i]['id']] == 'a'
-? _absentColor
-    : _presentColor)),
-Checkbox(
-value: _marks[students[i]['id']] != 'a',
-activeColor: _presentColor,
-onChanged: !canEdit
-? null
-    : (on) => setState(() {
-if (on == true) {
-_marks.remove(students[i]['id']);
-} else {
-_marks[students[i]['id']!] = 'a';
-}
-_dirty = true;
-}),
-),
-]),
-),
-),
-],
-);
-}
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+      children: [
+        // only the administrator sees the report
+        if (me.fullAccess) _reportPanel(classes),
+        DropdownButtonFormField<String>(
+          value: cid,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Class',
+            border: OutlineInputBorder(),
+            isDense: true,
+            prefixIcon: Icon(Icons.groups),
+          ),
+          items: [
+            for (final c in classes)
+              DropdownMenuItem(value: c.id, child: Text(c.fullName)),
+          ],
+          onChanged: (v) {
+            if (v == null || v == _classId) return;
+            setState(() => _classId = v);
+            _load();
+          },
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                onPressed: todayOnly ? null : _pickDate,
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
+              ),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                      value: 'am',
+                      icon: Icon(Icons.looks_one_outlined, size: 18),
+                      label: Text('Shift A')),
+                  ButtonSegment(
+                      value: 'pm',
+                      icon: Icon(Icons.looks_two_outlined, size: 18),
+                      label: Text('Shift B')),
+                ],
+                selected: {_session},
+                onSelectionChanged: (v) {
+                  setState(() => _session = v.first);
+                  _load();
+                },
+              ),
+            ]),
+        if (todayOnly && isWeekend)
+          const Padding(
+            padding: EdgeInsets.only(top: 10),
+            child: Text(
+                'Attendance is taken Monday to Friday. Today is a weekend, '
+                'so you can only look at the last school day.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          )
+        else if (todayOnly)
+          const Padding(
+            padding: EdgeInsets.only(top: 10),
+            child: Text('You can take today\'s attendance of your classes.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ),
+        const SizedBox(height: 12),
+        // the counts are also the filter of the list below
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'all',
+            label: Text('All ${students.length}',
+                style: const TextStyle(
+                    fontWeight: FontWeight.w600, fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'all'),
+          ),
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'p',
+            selectedColor: _presentColor.withOpacity(0.2),
+            side: const BorderSide(color: _presentColor),
+            label: Text('Present $present',
+                style: const TextStyle(
+                    color: _presentColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'p'),
+          ),
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'a',
+            selectedColor: _absentColor.withOpacity(0.2),
+            side: const BorderSide(color: _absentColor),
+            label: Text('Absent $absent',
+                style: const TextStyle(
+                    color: _absentColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'a'),
+          ),
+          if (_exists)
+            const Chip(
+              visualDensity: VisualDensity.compact,
+              label: Text('Register saved', style: TextStyle(fontSize: 12)),
+            ),
+        ]),
+        const SizedBox(height: 10),
+        Row(children: [
+          TextButton.icon(
+            onPressed: !canEdit || students.isEmpty
+                ? null
+                : () => setState(() {
+                      _marks.clear();
+                      _dirty = true;
+                    }),
+            icon: const Icon(Icons.check_box, size: 18),
+            label: const Text('Tick all'),
+          ),
+          TextButton.icon(
+            onPressed: !canEdit || students.isEmpty
+                ? null
+                : () => setState(() {
+                      for (final r in students) {
+                        _marks[r['id']!] = 'a';
+                      }
+                      _dirty = true;
+                    }),
+            icon: const Icon(Icons.check_box_outline_blank, size: 18),
+            label: const Text('Untick all'),
+          ),
+          const Spacer(),
+          FilledButton.icon(
+            onPressed: !canEdit || _saving || (_exists && !_dirty)
+                ? null
+                : () => _save(me),
+            icon: _saving
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save, size: 18),
+            label: Text(_exists && !_dirty ? 'Saved' : 'Save'),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        if (_loading)
+          const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: CircularProgressIndicator()))
+        else if (_error != null)
+          _msg('Could not load this register.\n$_error', error: true)
+        else if (students.isEmpty)
+          _msg('This class has no students yet.')
+        else if (shownIdx.isEmpty)
+          _msg(_show == 'a'
+              ? 'No student is absent.'
+              : 'No student is present.')
+        else
+          for (final i in shownIdx)
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 3),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(children: [
+                  SizedBox(
+                      width: 26,
+                      child: Text('${i + 1}',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black45))),
+                  Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(students[i]['name']!,
+                              style: const TextStyle(
+                                  fontSize: 14.5, fontWeight: FontWeight.w600)),
+                          if (students[i]['no']!.isNotEmpty)
+                            Text('ID ${students[i]['no']}',
+                                style: const TextStyle(
+                                    fontSize: 11.5, color: Colors.black54)),
+                        ]),
+                  ),
+                  Text(_marks[students[i]['id']] == 'a' ? 'Absent' : 'Present',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: _marks[students[i]['id']] == 'a'
+                              ? _absentColor
+                              : _presentColor)),
+                  Checkbox(
+                    value: _marks[students[i]['id']] != 'a',
+                    activeColor: _presentColor,
+                    onChanged: !canEdit
+                        ? null
+                        : (on) => setState(() {
+                              if (on == true) {
+                                _marks.remove(students[i]['id']);
+                              } else {
+                                _marks[students[i]['id']!] = 'a';
+                              }
+                              _dirty = true;
+                            }),
+                  ),
+                ]),
+              ),
+            ),
+      ],
+    );
+  }
 }
 
 class AttendanceScreen extends StatefulWidget {
@@ -29244,7 +29289,7 @@ final r = results[s.id];
 final avg = r?.average;
 final g = avg == null
 ? null
-    : _gradeOf(avg,
+: _gradeOf(avg,
 max: _gradeMax(_ResultPrefs.exam, SchoolService.formOf(s)));
 // Marks are typed straight in the list (not for a student login).
 final sForm = secOf[s.sectionId]?.form;
@@ -30335,7 +30380,7 @@ final total = r.marks.values.fold(0.0, (a, b) => a + b);
 final avg = r.marks.isEmpty ? null : total / r.marks.length;
 final g = avg == null
 ? null
-    : _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''));
+: _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''));
 
 return AlertDialog(
 title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
