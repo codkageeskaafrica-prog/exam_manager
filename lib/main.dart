@@ -8360,7 +8360,7 @@ class HomeScreen extends StatelessWidget {
     _HomeItem(
       page: AppPages.daily,
       title: 'Daily attendance',
-      subtitle: 'Morning and afternoon attendance, Monday to Friday',
+      subtitle: 'Shift A and Shift B attendance, Monday to Friday',
       icon: Icons.how_to_reg,
       color: const Color(0xFF16A085),
       builder: (_) => const DailyAttendanceScreen(),
@@ -20145,9 +20145,9 @@ child: const Text('Save')),
 }
 
 // ======================= DAILY (REGULAR) ATTENDANCE =======================
-/// Regular school attendance, taken twice a day (morning / afternoon),
+/// Regular school attendance, taken for two shifts (Shift A / Shift B),
 /// Monday to Friday. It is separate from the exam attendance above.
-///   dailyAttendance/{classId}_{yyyy-MM-dd}_{am|pm}
+///   dailyAttendance/{classId}_{yyyy-MM-dd}_{am|pm}   (am = Shift A, pm = Shift B)
 ///     sectionId, date, session, marks {studentId: p|a|l|e},
 ///     byUid, byName, updatedAt
 /// Admin / Student affairs (and anybody given the page) take any class on any
@@ -20189,7 +20189,9 @@ _db.collection('students').snapshots();
 
 String? _classId;
 late DateTime _date = _lastWeekday(DateTime.now());
-late String _session = (DateTime.now().hour >= 12) ? 'pm' : 'am';
+// 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
+// stay valid)
+String _session = 'am';
 // studentId -> 'a' (absent). Everybody else counts as present (ticked).
 Map<String, String> _marks = {};
 List<String> _current = const []; // ids of the students shown
@@ -20270,7 +20272,7 @@ _dirty = false;
 _exists = true;
 });
 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-content: Text('Saved: ${_session == 'am' ? 'morning' : 'afternoon'}'
+content: Text('Saved: ${_session == 'am' ? 'Shift A' : 'Shift B'}'
 ' attendance of ${DateFormat('EEE d MMM').format(_date)}')));
 } catch (e) {
 if (!mounted) return;
@@ -20336,9 +20338,10 @@ return _content(me, secSnap.data!, stuSnap.data!);
 Widget _content(UserProfile me, QuerySnapshot<Map<String, dynamic>> secDocs,
 QuerySnapshot<Map<String, dynamic>> stuDocs) {
 final allSecs = [for (final d in secDocs.docs) SectionInfo.fromDoc(d)];
-// a class monitor takes only the own classes, only for today
-final restricted =
-me.monitorSections.isNotEmpty && !me.fullAccess && me.role != 'affairs';
+// a person with assigned classes sees ONLY those classes; they can take
+// today only (Student affairs keep any date)
+final restricted = me.monitorSections.isNotEmpty && !me.fullAccess;
+final todayOnly = restricted && me.role != 'affairs';
 final classes = [
 for (final c in allSecs)
 if (!c.isSub && (!restricted || me.monitorSections.contains(c.id))) c
@@ -20396,7 +20399,7 @@ if (!names.contains(r['name']!.toLowerCase())) r
 a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
 final today = DateTime.now();
-final canEdit = !restricted || _sameDay(_date, today);
+final canEdit = !todayOnly || _sameDay(_date, today);
 final isWeekend = today.weekday > DateTime.friday;
 _current = [for (final r in students) r['id']!];
 final absent = students.where((r) => _marks[r['id']] == 'a').length;
@@ -20431,7 +20434,7 @@ runSpacing: 10,
 crossAxisAlignment: WrapCrossAlignment.center,
 children: [
 OutlinedButton.icon(
-onPressed: restricted ? null : _pickDate,
+onPressed: todayOnly ? null : _pickDate,
 icon: const Icon(Icons.calendar_today, size: 18),
 label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
 ),
@@ -20440,12 +20443,12 @@ showSelectedIcon: false,
 segments: const [
 ButtonSegment(
 value: 'am',
-icon: Icon(Icons.wb_sunny_outlined, size: 18),
-label: Text('Morning')),
+icon: Icon(Icons.looks_one_outlined, size: 18),
+label: Text('Shift A')),
 ButtonSegment(
 value: 'pm',
-icon: Icon(Icons.wb_twilight, size: 18),
-label: Text('Afternoon')),
+icon: Icon(Icons.looks_two_outlined, size: 18),
+label: Text('Shift B')),
 ],
 selected: {_session},
 onSelectionChanged: (v) {
@@ -20454,7 +20457,7 @@ _load();
 },
 ),
 ]),
-if (restricted && isWeekend)
+if (todayOnly && isWeekend)
 const Padding(
 padding: EdgeInsets.only(top: 10),
 child: Text(
@@ -20462,10 +20465,10 @@ child: Text(
 'so you can only look at the last school day.',
 style: TextStyle(fontSize: 12, color: Colors.black54)),
 )
-else if (restricted)
+else if (todayOnly)
 const Padding(
 padding: EdgeInsets.only(top: 10),
-child: Text('Class monitor: you can take today\'s attendance.',
+child: Text('You can take today\'s attendance of your classes.',
 style: TextStyle(fontSize: 12, color: Colors.black54)),
 ),
 const SizedBox(height: 12),
@@ -31083,12 +31086,16 @@ final String title;
 
 /// Finance: no class ticked = every class. Class monitor: none = not a monitor.
 final bool allowAll;
+
+/// Text under the chips (null = the default text).
+final String? hint;
 const _FinanceClassesPicker({
 required this.selected,
 required this.enabled,
 required this.onChanged,
 this.title = 'Classes this finance user can manage',
 this.allowAll = true,
+this.hint,
 });
 
 @override
@@ -31153,7 +31160,8 @@ x.id
 ],
 const SizedBox(height: 8),
 Text(
-!allowAll
+hint ??
+(!allowAll
 ? (selected.isEmpty
 ? 'No class ticked: this user is not a class monitor.'
     : 'This user can take the daily attendance of the ticked '
@@ -31161,7 +31169,7 @@ Text(
     : selected.isEmpty
 ? 'No class ticked: this user can open every class.'
     : 'Only the ticked classes are shown in Finance '
-'(fees, payments and reports).',
+'(fees, payments and reports).'),
 style: const TextStyle(fontSize: 12, color: Colors.black54)),
 ],
 );
@@ -31601,6 +31609,9 @@ var access = <String>[
     : appSettings.value.teacherAccess))
 ];
 var accessEdited = false;
+// Daily attendance: the classes this person is limited to (none = all)
+var monitor = <String>[...(up?.monitorSections ?? const <String>[])];
+var monitorEdited = false;
 final name = TextEditingController(text: t?.name ?? presetName);
 final phone = TextEditingController(text: t?.phone ?? '');
 final email = TextEditingController(text: t?.email ?? presetEmail);
@@ -31718,6 +31729,23 @@ if (x == pg ? on : access.contains(x)) x
 }),
 ),
 ]),
+if (access.contains(AppPages.daily)) ...[
+const SizedBox(height: 14),
+_FinanceClassesPicker(
+title: 'Daily attendance: classes this person can take',
+selected: monitor,
+enabled: true,
+hint: monitor.isEmpty
+? 'No class ticked: this person sees every class in Daily '
+'attendance. Tick classes to show only those.'
+    : 'This person sees only the ticked classes in Daily '
+'attendance (today only).',
+onChanged: (v) => setD(() {
+monitor = v;
+monitorEdited = true;
+}),
+),
+],
 ],
 const SizedBox(height: 8),
 SwitchListTile(
@@ -31885,11 +31913,16 @@ await FirebaseFirestore.instance
     .doc(up!.uid)
     .set({'role': acctRole}, SetOptions(merge: true));
 }
-if (showPages && accessEdited) {
+if (showPages && (accessEdited || monitorEdited)) {
 await FirebaseFirestore.instance
     .collection('users')
     .doc(up?.uid ?? savedId)
-    .set({'access': access}, SetOptions(merge: true));
+    .set({
+if (accessEdited) 'access': access,
+// no Daily attendance page = no class limit left behind
+'monitorSections':
+access.contains(AppPages.daily) ? monitor : <String>[],
+}, SetOptions(merge: true));
 }
 toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
 } catch (e) {
