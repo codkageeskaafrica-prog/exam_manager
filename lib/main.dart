@@ -5757,25 +5757,61 @@ class ExamTableScreen extends StatelessWidget {
                         child: table,
                       );
                     }
-                    final side =
-                    _ExamStructureCard(exam: st.currentExam, groups: groups);
+                    // One card per structure (forms that differ get their own
+                    // card); forms of this person with no structure are
+                    // listed in a small note card.
+                    final covered = {for (final g in groups) ...g.$1};
+                    final missing = [
+                      for (final f in sc.formList)
+                        if (!covered.contains(f)) f
+                    ];
+                    final cards = <Widget>[
+                      for (final g in groups)
+                        _ExamStructureCard(exam: st.currentExam, groups: [g]),
+                      if (missing.isNotEmpty) _ExamStructureMissing(forms: missing),
+                    ];
+                    Widget stack(List<Widget> ws) => Column(
+                      children: [
+                        for (var i = 0; i < ws.length; i++) ...[
+                          if (i > 0) const SizedBox(height: 12),
+                          ws[i],
+                        ],
+                      ],
+                    );
                     return LayoutBuilder(builder: (context, box) {
-                      final wide = box.maxWidth >= 900;
-                      return SingleChildScrollView(
-                        padding: const EdgeInsets.all(16),
-                        child: wide
-                            ? Row(
+                      final w = box.maxWidth;
+                      Widget body;
+                      if (w >= 1250 && cards.length > 1) {
+                        // first structure on the left, the others on the
+                        // right blank space of the table
+                        body = Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            SizedBox(width: 320, child: side),
+                            SizedBox(width: 320, child: cards.first),
+                            const SizedBox(width: 16),
+                            Flexible(child: table),
+                            const SizedBox(width: 16),
+                            SizedBox(width: 320, child: stack(cards.sublist(1))),
+                          ],
+                        );
+                      } else if (w >= 900) {
+                        body = Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(width: 320, child: stack(cards)),
                             const SizedBox(width: 16),
                             Flexible(child: table),
                           ],
-                        )
-                            : Column(
+                        );
+                      } else {
+                        body = Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [side, table],
-                        ),
+                          children: [stack(cards), const SizedBox(height: 12), table],
+                        );
+                      }
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.all(16),
+                        child: body,
                       );
                     });
                   },
@@ -6084,7 +6120,7 @@ class _ExamStructureCard extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             for (var g = 0; g < groups.length; g++) ...[
               if (g > 0) const Divider(height: 28),
-              if (groups.length > 1)
+              if (groups[g].$1.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: Wrap(spacing: 6, runSpacing: 4, children: [
@@ -6102,6 +6138,34 @@ class _ExamStructureCard extends StatelessWidget {
           ]),
         ),
       ]),
+    );
+  }
+}
+
+/// Small note for the forms that have no exam structure yet.
+class _ExamStructureMissing extends StatelessWidget {
+  final List<String> forms;
+  const _ExamStructureMissing({required this.forms});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      color: const Color(0xFFFFF8E1),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Icon(Icons.info_outline, size: 20, color: Color(0xFFB26A00)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+                'No exam structure yet for ${forms.join(', ')}. '
+                    'Ask the administrator to set it.',
+                style: const TextStyle(fontSize: 13, height: 1.35)),
+          ),
+        ]),
+      ),
     );
   }
 }
