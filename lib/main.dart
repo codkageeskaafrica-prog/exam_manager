@@ -18202,142 +18202,146 @@ color: Colors.black45)),
 },
 );
 
-// ---------------- one organized profile card ----------------
-Widget _pSection(String title, IconData icon, Color color, List<Widget> items,
-{bool first = false}) =>
-Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-if (!first) const Divider(height: 30, thickness: 0.8),
-Row(children: [
+// ---------------- profile: quick-to-read info tiles ----------------
+/// One small tile: coloured icon, small label, bold value (and a grey line).
+Widget _tile(IconData icon, Color color, String label, Widget value) =>
 Container(
-width: 30,
-height: 30,
+padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
 decoration: BoxDecoration(
-color: color.withOpacity(0.12),
-borderRadius: BorderRadius.circular(9)),
-child: Icon(icon, size: 17, color: color),
+color: color.withOpacity(0.07),
+borderRadius: BorderRadius.circular(14),
+border: Border.all(color: color.withOpacity(0.18)),
 ),
-const SizedBox(width: 10),
-Text(title.toUpperCase(),
-style: TextStyle(
-fontSize: 12,
-fontWeight: FontWeight.w800,
-letterSpacing: 1.1,
-color: color)),
-]),
-const SizedBox(height: 14),
-LayoutBuilder(builder: (context, c) {
-final cols = c.maxWidth >= 520 ? 2 : 1;
-final w = (c.maxWidth - 16 * (cols - 1)) / cols;
-return Wrap(spacing: 16, runSpacing: 14, children: [
-for (final it in items) SizedBox(width: w, child: it),
-]);
-}),
-]);
-
-Widget _pItem(String label, Widget value) => Column(
+child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+Container(
+width: 36,
+height: 36,
+decoration: BoxDecoration(
+color: color.withOpacity(0.16), shape: BoxShape.circle),
+child: Icon(icon, size: 19, color: color),
+),
+const SizedBox(width: 11),
+Expanded(
+child: Column(
 crossAxisAlignment: CrossAxisAlignment.start,
+mainAxisSize: MainAxisSize.min,
 children: [
 Text(label,
 style: const TextStyle(
 fontSize: 11.5,
 fontWeight: FontWeight.w600,
 color: Colors.black45)),
-const SizedBox(height: 3),
+const SizedBox(height: 2),
 value,
+]),
+),
+]),
+);
+
+Widget _tv(String t) => Text(t,
+style: const TextStyle(
+fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF1B2733)));
+
+Widget _tsub(String t) => Padding(
+padding: const EdgeInsets.only(top: 1),
+child: Text(t,
+style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+);
+
+/// Tiles of one group, [cols] per row (fewer on a narrow screen).
+Widget _tiles(List<Widget> tiles, {int cols = 2, int narrow = 2}) =>
+LayoutBuilder(builder: (context, c) {
+final n = c.maxWidth >= 560 ? cols : narrow;
+final w = (c.maxWidth - 10 * (n - 1)) / n;
+return Wrap(spacing: 10, runSpacing: 10, children: [
+for (final t in tiles) SizedBox(width: w, child: t),
 ]);
+});
+
+Widget _groupLabel(String t, Color c) => Padding(
+padding: const EdgeInsets.fromLTRB(2, 0, 0, 8),
+child: Text(t.toUpperCase(),
+style: TextStyle(
+fontSize: 11.5,
+fontWeight: FontWeight.w800,
+letterSpacing: 1.2,
+color: c)),
+);
 
 Widget _profileCard(Map<String, dynamic> m, SectionInfo sec,
 List<String> phones, bool hasPhone, bool linked, bool noId) {
+const blue = kBlue;
+const green = Color(0xFF16A085);
+const orange = Color(0xFFE67E22);
+const purple = Color(0xFF8E44AD);
+final gender = '${m['gender'] ?? ''}'.trim();
+final created = m['createdAt'] as Timestamp?;
+final updated = m['updatedAt'] as Timestamp?;
 return Card(
 margin: const EdgeInsets.only(bottom: 12),
 elevation: 0,
 color: Colors.white,
 shape: _kSettingsCardShape,
 child: Padding(
-padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
+padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-// ---- class & section ----
+// ---- class ----
+_groupLabel('Class', blue),
 FutureBuilder<_RealSection>(
 future: _secFuture,
 builder: (context, s) {
 final r = s.data;
 final real = r?.sec;
-final Widget secVal = s.connectionState != ConnectionState.done
-? _val('…')
+final done = s.connectionState == ConnectionState.done;
+final secName = !done
+? '…'
     : real != null
-? Column(
+? 'Section ${real.subName}'
+    : (r != null && r.classDivided
+? 'Not placed yet'
+    : 'Whole class');
+return _tiles([
+_tile(Icons.school_outlined, blue, 'Form', _tv(sec.form)),
+_tile(Icons.class_outlined, blue, 'Class',
+_tv(SectionInfo.code(sec.form, sec.classKey))),
+_tile(Icons.groups_outlined, blue, 'Section', _tv(secName)),
+_tile(
+Icons.people_outline,
+blue,
+'Students here',
+Column(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
-_val('Section ${real.subName}'),
-Text(real.fullName,
-style: const TextStyle(
-fontSize: 12, color: Colors.black54)),
-])
-    : _val(r != null && r.classDivided
-? 'Not placed in a section yet'
-    : 'Whole class (no sections)');
-return _pSection('Class & section', Icons.groups_outlined, kBlue, [
-_pItem('Form', _val(sec.form)),
-_pItem('Class',
-_val(SectionInfo.code(sec.form, sec.classKey))),
-_pItem('Section', secVal),
-if (r != null && r.size != null)
-_pItem('Students here',
-_val('${r.size} in ${(real ?? sec).fullName}')),
-], first: true);
+_tv(r?.size == null ? '-' : '${r!.size}'),
+if (r?.size != null)
+_tsub('in ${(real ?? sec).fullName}'),
+])),
+], cols: 4, narrow: 2);
 },
 ),
-// ---- contact ----
-_pSection(
-'Personal & contact', Icons.person_outline, const Color(0xFF16A085), [
-_pItem(
+const SizedBox(height: 18),
+// ---- student ----
+_groupLabel('Student', green),
+_tiles([
+_tile(
+gender == 'Female'
+? Icons.female
+    : gender == 'Male'
+? Icons.male
+    : Icons.wc,
+green,
 'Gender',
-_val('${m['gender'] ?? ''}'.trim().isEmpty
-? 'Not set'
-    : '${m['gender']}'.trim())),
-if (phones.isEmpty)
-_pItem('Phone number', _val('Not saved'))
-else
-for (var i = 0; i < phones.length; i++)
-_pItem(phones.length > 1 ? 'Phone ${i + 1}' : 'Phone number',
-_val(phones[i])),
-]),
-// ---- login ----
-_pSection('Login', Icons.key_outlined, const Color(0xFF8E44AD), [
-_pItem(
-'Username / password',
-_val(!hasPhone
-? 'No phone number, cannot log in'
-    : '${m['phone']}  (same for both)')),
-_pItem(
-'Student account',
-Wrap(
-crossAxisAlignment: WrapCrossAlignment.center,
-spacing: 8,
-runSpacing: 4,
-children: [
-linked
-? _tag('Linked', kGreen, icon: Icons.check_circle)
-    : _tag('Not linked', kLate, icon: Icons.link_off),
-if (!linked && hasPhone)
-_smallBtn(Icons.key, 'Create login', () {
-runAccountCreation(context,
-ids: [widget.student.id], quiet: true);
-}),
-]),
-),
-]),
-// ---- record ----
-_pSection('Record', Icons.badge_outlined, const Color(0xFFE67E22), [
-_pItem(
+_tv(gender.isEmpty ? 'Not set' : gender)),
+_tile(
+Icons.badge_outlined,
+green,
 'Student ID',
 noId
 ? Wrap(
 crossAxisAlignment: WrapCrossAlignment.center,
 spacing: 8,
-runSpacing: 4,
 children: [
-_val('Not set yet'),
+_tv('Not set'),
 _smallBtn(Icons.auto_fix_high, 'Generate', () async {
 final messenger = ScaffoldMessenger.of(context);
 try {
@@ -18350,13 +18354,81 @@ Text('Could not generate the ID: $e')));
 }
 }),
 ])
-    : _val('${m['studentNo']}'.trim()),
+    : _tv('${m['studentNo']}'.trim())),
+_tile(
+Icons.phone_outlined,
+green,
+phones.length > 1 ? 'Phone numbers' : 'Phone number',
+phones.isEmpty
+? _tv('Not saved')
+    : Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [for (final p in phones) _tv(p)])),
+_tile(
+Icons.event_available_outlined,
+green,
+'Added',
+Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+_tv(_fmtDate(created)),
+if (updated != null) _tsub('Updated ${_fmtDate(updated)}'),
+])),
+], cols: 2, narrow: 1),
+const SizedBox(height: 18),
+// ---- login ----
+_groupLabel('Login', purple),
+Container(
+padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+decoration: BoxDecoration(
+color: (linked ? kGreen : kLate).withOpacity(0.08),
+borderRadius: BorderRadius.circular(14),
+border: Border.all(color: (linked ? kGreen : kLate).withOpacity(0.3)),
 ),
-_pItem('Added', _val(_fmtDate(m['createdAt'] as Timestamp?))),
-if (m['updatedAt'] != null)
-_pItem('Last updated',
-_val(_fmtDate(m['updatedAt'] as Timestamp?))),
+child: Wrap(
+spacing: 14,
+runSpacing: 10,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [
+Row(mainAxisSize: MainAxisSize.min, children: [
+Container(
+width: 36,
+height: 36,
+decoration: BoxDecoration(
+color: purple.withOpacity(0.15), shape: BoxShape.circle),
+child: const Icon(Icons.key_outlined,
+size: 19, color: purple),
+),
+const SizedBox(width: 11),
+Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+mainAxisSize: MainAxisSize.min,
+children: [
+const Text('Username / password',
+style: TextStyle(
+fontSize: 11.5,
+fontWeight: FontWeight.w600,
+color: Colors.black45)),
+const SizedBox(height: 2),
+_tv(hasPhone ? '${m['phone']}' : 'No phone number'),
+_tsub(hasPhone
+? 'Same for both'
+    : 'The student cannot log in'),
 ]),
+]),
+Row(mainAxisSize: MainAxisSize.min, children: [
+linked
+? _tag('Linked', kGreen, icon: Icons.check_circle)
+    : _tag('Not linked', kLate, icon: Icons.link_off),
+if (!linked && hasPhone) ...[
+const SizedBox(width: 8),
+_smallBtn(Icons.key, 'Create login', () {
+runAccountCreation(context,
+ids: [widget.student.id], quiet: true);
+}),
+],
+]),
+],
+),
+),
 ]),
 ),
 );
