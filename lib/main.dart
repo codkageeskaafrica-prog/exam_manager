@@ -10931,7 +10931,7 @@ const _kSetCats = <_SetCat>[
   _SetCat(0, 'School', 'Letterhead, logo, exam heading, class lists',
       Icons.school),
   _SetCat(7, 'Subjects & classes',
-      'Add, rename or delete subjects and forms', Icons.library_books),
+      'Add, rename or delete subjects, forms and classes', Icons.library_books),
   _SetCat(1, 'Exams & results', 'Exams, grades, mark limits, upload defaults',
       Icons.emoji_events),
   _SetCat(2, 'Attendance', 'Week start and attendance colours',
@@ -11363,7 +11363,7 @@ class _ManageListCardState extends State<_ManageListCard> {
                       'Somali keep their own exam heading language.'
                       : 'The forms (class levels), e.g. Form1, Form2. Name them '
                       'with a number (Form5): the class code (5A) is taken '
-                      'from it. Classes themselves are managed in Students.',
+                      'from it. Classes (1A, 1B...) are managed in the Classes tab.',
                   style: const TextStyle(fontSize: 12, color: Colors.black54)),
               const SizedBox(height: 8),
               ReorderableListView(
@@ -11425,6 +11425,290 @@ class _ManageListCardState extends State<_ManageListCard> {
           ),
         );
       },
+    );
+  }
+}
+
+// ======================= Classes of each form (1A, 1B, ...) =======================
+
+/// Settings tab: every form with its classes. Add, rename and delete a class.
+class _ManageClassesCard extends StatelessWidget {
+  const _ManageClassesCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final service = SchoolService();
+    return ValueListenableBuilder<AppSettings>(
+      valueListenable: appSettings,
+      builder: (context, _, __) => StreamBuilder<List<SectionInfo>>(
+        stream: service.watchSections(),
+        builder: (context, secSnap) => StreamBuilder<Map<String, int>>(
+          stream: service.watchStudentCounts(),
+          builder: (context, cntSnap) {
+            if (secSnap.hasError) {
+              return Text('Classes could not be loaded: ${secSnap.error}');
+            }
+            if (!secSnap.hasData) {
+              return const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            final counts = cntSnap.data ?? const <String, int>{};
+            final all = secSnap.data!;
+            return Column(children: [
+              for (final f in ExamService.forms) ...[
+                _FormClassesBlock(
+                  key: ValueKey('classes-$f'),
+                  form: f,
+                  service: service,
+                  sections: [for (final s in all) if (s.form == f) s],
+                  counts: counts,
+                ),
+                const SizedBox(height: 12),
+              ],
+            ]);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _FormClassesBlock extends StatefulWidget {
+  final String form;
+  final SchoolService service;
+  final List<SectionInfo> sections;
+  final Map<String, int> counts;
+  const _FormClassesBlock({
+    super.key,
+    required this.form,
+    required this.service,
+    required this.sections,
+    required this.counts,
+  });
+
+  @override
+  State<_FormClassesBlock> createState() => _FormClassesBlockState();
+}
+
+class _FormClassesBlockState extends State<_FormClassesBlock> {
+  final _new = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _new.dispose();
+    super.dispose();
+  }
+
+  /// null = fine, else why the class name cannot be used.
+  String? _validate(String raw, {String? ignoreId}) {
+    final t = raw.trim();
+    if (t.isEmpty) return 'Enter the class name, e.g. A.';
+    if (t.length > 10) return 'Use at most 10 characters.';
+    if (!RegExp(r'^[A-Za-z0-9\- ]+$').hasMatch(t)) {
+      return 'Use letters and numbers only (e.g. A, B, C2).';
+    }
+    final norm = SchoolService._normSection(t);
+    for (final s in widget.sections) {
+      if (s.id != ignoreId && s.name.toUpperCase() == norm.toUpperCase()) {
+        return '${s.label} already exists.';
+      }
+    }
+    return null;
+  }
+
+  Future<void> _run(Future<void> Function() job, String ok) async {
+    final m = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await job();
+      m.showSnackBar(SnackBar(content: Text(ok)));
+    } catch (e) {
+      m.showSnackBar(SnackBar(
+          content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final err = _validate(_new.text);
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    final name = _new.text;
+    final label = SectionInfo.code(widget.form, SchoolService._normSection(name));
+    _new.clear();
+    await _run(() => widget.service.saveSection(form: widget.form, name: name),
+        'Class $label added');
+  }
+
+  Future<void> _rename(SectionInfo s) async {
+    final c = TextEditingController(text: s.name);
+    String? error;
+    final neu = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Rename class ${s.label}'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              textCapitalization: TextCapitalization.characters,
+              decoration: InputDecoration(
+                  labelText: 'Class name',
+                  helperText: 'e.g. A, B, C (the code becomes '
+                      '${SectionInfo.code(widget.form, 'X')})',
+                  errorText: error,
+                  border: const OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+                'The students, attendance and marks of the class stay with it.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final e = _validate(c.text, ignoreId: s.id);
+                if (e != null) {
+                  setD(() => error = e);
+                  return;
+                }
+                Navigator.pop(ctx, c.text);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    c.dispose();
+    if (neu == null) return;
+    await _run(
+            () => widget.service.saveSection(id: s.id, form: s.form, name: neu),
+        'Class renamed');
+  }
+
+  Future<void> _delete(SectionInfo s) async {
+    final n = widget.counts[s.id] ?? 0;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete class ${s.label}?'),
+        content: Text(n == 0
+            ? 'The class has no students. It will be deleted.'
+            : 'This also deletes its $n student${n == 1 ? '' : 's'} and all '
+            'their attendance records. This cannot be undone.\n\n'
+            'To keep the students, move them to another class first.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() => widget.service.deleteSection(s.id), 'Class ${s.label} deleted');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = widget.sections
+        .fold<int>(0, (a, s) => a + (widget.counts[s.id] ?? 0));
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE8F2FC),
+                  borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.groups, size: 18, color: kBlue),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(widget.form,
+                  style: const TextStyle(
+                      fontSize: 15.5, fontWeight: FontWeight.w700)),
+            ),
+            Text(
+                '${widget.sections.length} classes · $total students',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          const SizedBox(height: 6),
+          if (widget.sections.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('No classes yet.',
+                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+          for (final s in widget.sections)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              leading: const Icon(Icons.class_outlined, color: Colors.black38),
+              title: Text(s.isSub ? s.fullName : s.label,
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: Text(
+                  '${widget.counts[s.id] ?? 0} student'
+                      '${(widget.counts[s.id] ?? 0) == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 12)),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  tooltip: 'Rename',
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: _busy ? null : () => _rename(s),
+                ),
+                IconButton(
+                  tooltip: 'Delete',
+                  icon: const Icon(Icons.delete_outline, color: kRed),
+                  onPressed: _busy ? null : () => _delete(s),
+                ),
+              ]),
+            ),
+          const Divider(height: 24),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _new,
+                textCapitalization: TextCapitalization.characters,
+                onSubmitted: (_) => _add(),
+                decoration: InputDecoration(
+                  labelText: 'New class in ${widget.form}',
+                  hintText: 'A',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.icon(
+              onPressed: _busy ? null : _add,
+              icon: const Icon(Icons.add),
+              label: const Text('Add class'),
+            ),
+          ]),
+        ]),
+      ),
     );
   }
 }
@@ -12225,6 +12509,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return <(String, List<Widget>)>[
         ('Subjects', <Widget>[const _ManageListCard(kind: _ListKind.subject)]),
         ('Forms', <Widget>[const _ManageListCard(kind: _ListKind.form)]),
+        ('Classes', <Widget>[const _ManageClassesCard()]),
       ];
     }
     if (id == 1) {
