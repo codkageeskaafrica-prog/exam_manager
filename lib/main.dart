@@ -18202,6 +18202,166 @@ color: Colors.black45)),
 },
 );
 
+// ---------------- one organized profile card ----------------
+Widget _pSection(String title, IconData icon, Color color, List<Widget> items,
+{bool first = false}) =>
+Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+if (!first) const Divider(height: 30, thickness: 0.8),
+Row(children: [
+Container(
+width: 30,
+height: 30,
+decoration: BoxDecoration(
+color: color.withOpacity(0.12),
+borderRadius: BorderRadius.circular(9)),
+child: Icon(icon, size: 17, color: color),
+),
+const SizedBox(width: 10),
+Text(title.toUpperCase(),
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w800,
+letterSpacing: 1.1,
+color: color)),
+]),
+const SizedBox(height: 14),
+LayoutBuilder(builder: (context, c) {
+final cols = c.maxWidth >= 520 ? 2 : 1;
+final w = (c.maxWidth - 16 * (cols - 1)) / cols;
+return Wrap(spacing: 16, runSpacing: 14, children: [
+for (final it in items) SizedBox(width: w, child: it),
+]);
+}),
+]);
+
+Widget _pItem(String label, Widget value) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(label,
+style: const TextStyle(
+fontSize: 11.5,
+fontWeight: FontWeight.w600,
+color: Colors.black45)),
+const SizedBox(height: 3),
+value,
+]);
+
+Widget _profileCard(Map<String, dynamic> m, SectionInfo sec,
+List<String> phones, bool hasPhone, bool linked, bool noId) {
+return Card(
+margin: const EdgeInsets.only(bottom: 12),
+elevation: 0,
+color: Colors.white,
+shape: _kSettingsCardShape,
+child: Padding(
+padding: const EdgeInsets.fromLTRB(18, 18, 18, 20),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+// ---- class & section ----
+FutureBuilder<_RealSection>(
+future: _secFuture,
+builder: (context, s) {
+final r = s.data;
+final real = r?.sec;
+final Widget secVal = s.connectionState != ConnectionState.done
+? _val('…')
+    : real != null
+? Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+_val('Section ${real.subName}'),
+Text(real.fullName,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+])
+    : _val(r != null && r.classDivided
+? 'Not placed in a section yet'
+    : 'Whole class (no sections)');
+return _pSection('Class & section', Icons.groups_outlined, kBlue, [
+_pItem('Form', _val(sec.form)),
+_pItem('Class',
+_val(SectionInfo.code(sec.form, sec.classKey))),
+_pItem('Section', secVal),
+if (r != null && r.size != null)
+_pItem('Students here',
+_val('${r.size} in ${(real ?? sec).fullName}')),
+], first: true);
+},
+),
+// ---- contact ----
+_pSection(
+'Personal & contact', Icons.person_outline, const Color(0xFF16A085), [
+_pItem(
+'Gender',
+_val('${m['gender'] ?? ''}'.trim().isEmpty
+? 'Not set'
+    : '${m['gender']}'.trim())),
+if (phones.isEmpty)
+_pItem('Phone number', _val('Not saved'))
+else
+for (var i = 0; i < phones.length; i++)
+_pItem(phones.length > 1 ? 'Phone ${i + 1}' : 'Phone number',
+_val(phones[i])),
+]),
+// ---- login ----
+_pSection('Login', Icons.key_outlined, const Color(0xFF8E44AD), [
+_pItem(
+'Username / password',
+_val(!hasPhone
+? 'No phone number, cannot log in'
+    : '${m['phone']}  (same for both)')),
+_pItem(
+'Student account',
+Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+runSpacing: 4,
+children: [
+linked
+? _tag('Linked', kGreen, icon: Icons.check_circle)
+    : _tag('Not linked', kLate, icon: Icons.link_off),
+if (!linked && hasPhone)
+_smallBtn(Icons.key, 'Create login', () {
+runAccountCreation(context,
+ids: [widget.student.id], quiet: true);
+}),
+]),
+),
+]),
+// ---- record ----
+_pSection('Record', Icons.badge_outlined, const Color(0xFFE67E22), [
+_pItem(
+'Student ID',
+noId
+? Wrap(
+crossAxisAlignment: WrapCrossAlignment.center,
+spacing: 8,
+runSpacing: 4,
+children: [
+_val('Not set yet'),
+_smallBtn(Icons.auto_fix_high, 'Generate', () async {
+final messenger = ScaffoldMessenger.of(context);
+try {
+await SchoolService()
+    .generateStudentNo(widget.student.id);
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content:
+Text('Could not generate the ID: $e')));
+}
+}),
+])
+    : _val('${m['studentNo']}'.trim()),
+),
+_pItem('Added', _val(_fmtDate(m['createdAt'] as Timestamp?))),
+if (m['updatedAt'] != null)
+_pItem('Last updated',
+_val(_fmtDate(m['updatedAt'] as Timestamp?))),
+]),
+]),
+),
+);
+}
+
 // ---------------- overview tab ----------------
 Widget _statsRow() {
 return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -18304,102 +18464,7 @@ label: const Text('Edit student details'),
 ),
 _statsRow(),
 const SizedBox(height: 12),
-_box('Class & section', Icons.groups_outlined, [
-_kv(Icons.school_outlined, 'Form', _val(sec.form)),
-_kv(Icons.class_outlined, 'Class',
-_val(SectionInfo.code(sec.form, sec.classKey))),
-FutureBuilder<_RealSection>(
-future: _secFuture,
-builder: (context, s) {
-final r = s.data;
-final real = r?.sec;
-final Widget secVal = s.connectionState != ConnectionState.done
-? _val('…')
-    : real != null
-? Column(
-crossAxisAlignment: CrossAxisAlignment.start,
-children: [
-_val('Section ${real.subName}'),
-Text(real.fullName,
-style: const TextStyle(
-fontSize: 12, color: Colors.black54)),
-])
-    : _val(r != null && r.classDivided
-? 'Not placed in a section yet'
-    : 'Whole class (no sections)');
-return Column(children: [
-_kv(Icons.groups_outlined, 'Section', secVal),
-if (r != null && r.size != null)
-_kv(Icons.people_outline, 'Students here',
-_val('${r.size} in ${(real ?? sec).fullName}')),
-]);
-},
-),
-]),
-_box('Contact', Icons.phone_outlined, [
-if (phones.isEmpty)
-_kv(Icons.phone_outlined, 'Phone number', _val('Not saved'))
-else
-for (var i = 0; i < phones.length; i++)
-_kv(Icons.phone_outlined, i == 0 ? 'Phone number(s)' : '',
-_val(phones[i])),
-]),
-_box('Login', Icons.key_outlined, [
-_kv(
-Icons.person_outline,
-'Username / password',
-_val(!hasPhone
-? 'No phone number, cannot log in'
-    : '${m['phone']}  (same for both)')),
-_kv(
-Icons.link,
-'Student account',
-Wrap(
-crossAxisAlignment: WrapCrossAlignment.center,
-spacing: 8,
-runSpacing: 4,
-children: [
-linked
-? _tag('Linked', kGreen, icon: Icons.check_circle)
-    : _tag('Not linked', kLate, icon: Icons.link_off),
-if (!linked && hasPhone)
-_smallBtn(Icons.key, 'Create login', () {
-runAccountCreation(context,
-ids: [widget.student.id], quiet: true);
-}),
-]),
-),
-]),
-_box('Record', Icons.badge_outlined, [
-_kv(
-Icons.tag,
-'Student ID',
-noId
-? Wrap(
-crossAxisAlignment: WrapCrossAlignment.center,
-spacing: 8,
-runSpacing: 4,
-children: [
-_val('Not set yet'),
-_smallBtn(Icons.auto_fix_high, 'Generate', () async {
-final messenger = ScaffoldMessenger.of(context);
-try {
-await SchoolService()
-    .generateStudentNo(widget.student.id);
-} catch (e) {
-messenger.showSnackBar(SnackBar(
-content:
-Text('Could not generate the ID: $e')));
-}
-}),
-])
-    : _val('${m['studentNo']}'.trim())),
-_kv(Icons.event_available_outlined, 'Added',
-_val(_fmtDate(m['createdAt'] as Timestamp?))),
-if (m['updatedAt'] != null)
-_kv(Icons.update, 'Last updated',
-_val(_fmtDate(m['updatedAt'] as Timestamp?))),
-]),
+_profileCard(m, sec, phones, hasPhone, linked, noId),
 ],
 );
 },
@@ -19253,9 +19318,12 @@ final oldNo = '${m['studentNo'] ?? ''}'.trim();
 final nameC = TextEditingController(text: oldName);
 final phoneC = TextEditingController(text: oldPhones.join(', '));
 final noC = TextEditingController(text: oldNo);
+final oldGender = '${m['gender'] ?? ''}'.trim();
+var gender = oldGender; // '' = not set
 final ok = await showDialog<bool>(
 context: context,
-builder: (ctx) => AlertDialog(
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
 title: const Text('Edit student details'),
 content: SingleChildScrollView(
 child: SizedBox(
@@ -19290,6 +19358,24 @@ labelText: 'Student ID',
 border: OutlineInputBorder(),
 ),
 ),
+const SizedBox(height: 14),
+Align(
+alignment: Alignment.centerLeft,
+child: Text('Gender',
+style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+),
+const SizedBox(height: 6),
+Align(
+alignment: Alignment.centerLeft,
+child: Wrap(spacing: 8, children: [
+for (final g in const ['Male', 'Female'])
+ChoiceChip(
+label: Text(g),
+selected: gender == g,
+onSelected: (on) => setD(() => gender = on ? g : ''),
+),
+]),
+),
 ]),
 ),
 ),
@@ -19301,6 +19387,7 @@ FilledButton(
 onPressed: () => Navigator.pop(ctx, true),
 child: const Text('Save')),
 ],
+),
 ),
 );
 final name = nameC.text.trim();
@@ -19321,7 +19408,12 @@ return;
 }
 final newFirst = phones.isEmpty ? '' : phones.first;
 final oldFirst = oldPhones.isEmpty ? '' : oldPhones.first;
-if (name == oldName && no == oldNo && '$phones' == '$oldPhones') return;
+if (name == oldName &&
+no == oldNo &&
+'$phones' == '$oldPhones' &&
+gender == oldGender) {
+return;
+}
 try {
 final col = FirebaseFirestore.instance.collection('students');
 final twin = (await ResultService().twinMap())[widget.student.id];
@@ -19338,6 +19430,7 @@ final upd = <String, Object?>{
 'phones': phones,
 'username': newFirst,
 'studentNo': no,
+'gender': gender,
 if (no != oldNo) 'studentNoAuto': false,
 'updatedBy': FirebaseAuth.instance.currentUser?.uid,
 'updatedAt': FieldValue.serverTimestamp(),
