@@ -11462,7 +11462,8 @@ class _ManageClassesCard extends StatelessWidget {
                   key: ValueKey('classes-$f'),
                   form: f,
                   service: service,
-                  sections: [for (final s in all) if (s.form == f) s],
+                  // divided parts (1A-A, 1A-B...) are not listed here
+                  sections: [for (final s in all) if (s.form == f && !s.isSub) s],
                   counts: counts,
                 ),
                 const SizedBox(height: 12),
