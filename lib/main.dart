@@ -6103,11 +6103,17 @@ class _ExamStructureCard extends StatelessWidget {
               child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Exam structure',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w800)),
+                    Text.rich(TextSpan(children: [
+                      const TextSpan(
+                          text: 'Exam structure',
+                          style: TextStyle(color: Colors.white)),
+                      if (groups.length == 1 && groups[0].$1.isNotEmpty)
+                        TextSpan(
+                            text: '  ${groups[0].$1.join(', ')}',
+                            style: const TextStyle(color: Color(0xFFFFE082))),
+                    ]),
+                        style: const TextStyle(
+                            fontSize: 17, fontWeight: FontWeight.w800)),
                     Text(exam,
                         style: const TextStyle(
                             color: Colors.white70, fontSize: 12.5)),
@@ -6120,7 +6126,7 @@ class _ExamStructureCard extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             for (var g = 0; g < groups.length; g++) ...[
               if (g > 0) const Divider(height: 28),
-              if (groups[g].$1.isNotEmpty)
+              if (groups.length > 1 && groups[g].$1.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: Wrap(spacing: 6, runSpacing: 4, children: [
