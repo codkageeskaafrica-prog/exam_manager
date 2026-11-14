@@ -357,11 +357,38 @@ class ZipImportPlan {
 }
 
 class ExamService {
-  static const subjects = [
+  static const defaultSubjects = [
     'English', 'Somali', 'Arabic', 'Islamic', 'Maths',
     'Chemistry', 'Biology', 'Physics', 'History', 'Geography',
   ];
-  static const forms = ['Form1', 'Form2', 'Form3', 'Form4'];
+  static const defaultForms = ['Form1', 'Form2', 'Form3', 'Form4'];
+
+  /// The subjects and forms (classes) of the school. The administrator edits
+  /// them in Settings > Subjects & classes; they are saved in settings/app
+  /// (`subjectList`, `formList`). Until something is saved the defaults apply.
+  static List<String> subjects = List.of(defaultSubjects);
+  static List<String> forms = List.of(defaultForms);
+
+  static List<String> _readNames(Object? v, List<String> def) {
+    if (v is! List) return List.of(def);
+    final seen = <String>{};
+    final l = <String>[
+      for (final e in v)
+        if (e is String && e.trim().isNotEmpty && seen.add(e.trim())) e.trim()
+    ];
+    return l.isEmpty ? List.of(def) : l;
+  }
+
+  /// Reads the saved lists out of the raw settings document.
+  static void applyLists(Map<String, dynamic> m) {
+    subjects = _readNames(m['subjectList'], defaultSubjects);
+    forms = _readNames(m['formList'], defaultForms);
+  }
+
+  static void resetLists() {
+    subjects = List.of(defaultSubjects);
+    forms = List.of(defaultForms);
+  }
 
   final _db = FirebaseFirestore.instance;
   CollectionReference<Map<String, dynamic>> get _files => _db.collection('files');
@@ -10855,7 +10882,11 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
   /// Starts listening to the saved settings (called when somebody signs in).
   void start() {
     _sub ??= _doc.snapshots().listen(
-          (d) => value = AppSettings.fromMap(d.data() ?? {}),
+          (d) {
+        final m = d.data() ?? <String, dynamic>{};
+        ExamService.applyLists(m); // before parsing: sectionSubjects uses it
+        value = AppSettings.fromMap(m);
+      },
       onError: (e) => debugPrint('Settings could not be loaded: $e'),
     );
   }
@@ -10864,6 +10895,7 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
   void stop() {
     _sub?.cancel();
     _sub = null;
+    ExamService.resetLists();
     value = const AppSettings();
   }
 
@@ -10898,6 +10930,8 @@ class _SetCat {
 const _kSetCats = <_SetCat>[
   _SetCat(0, 'School', 'Letterhead, logo, exam heading, class lists',
       Icons.school),
+  _SetCat(7, 'Subjects & classes',
+      'Add, rename or delete subjects and forms', Icons.library_books),
   _SetCat(1, 'Exams & results', 'Exams, grades, mark limits, upload defaults',
       Icons.emoji_events),
   _SetCat(2, 'Attendance', 'Week start and attendance colours',
@@ -10910,6 +10944,490 @@ const _kSetCats = <_SetCat>[
   _SetCat(6, 'Activity log', 'Who logged in or out, and who is online',
       Icons.history),
 ];
+
+// ======================= Subjects & classes (forms) =======================
+
+enum _ListKind { subject, form }
+
+/// Saves and migrates the school's subject list and form list.
+/// Stored in settings/app: `subjectList`, `formList` (see ExamService).
+class SchoolListsService {
+  static final _db = FirebaseFirestore.instance;
+  static DocumentReference<Map<String, dynamic>> get _settings =>
+      _db.collection('settings').doc('app');
+
+  /// Subjects whose exam heading / language is chosen by NAME
+  /// (see ExamHeading.langFor), so they cannot be renamed.
+  static const _fixedNames = {'arabic', 'islamic', 'somali'};
+
+  /// null = fine, otherwise the reason the name cannot be used.
+  static String? validate(String raw, List<String> existing, {String? ignore}) {
+    final n = raw.trim();
+    if (n.isEmpty) return 'Enter a name.';
+    if (n.length > 30) return 'Use at most 30 characters.';
+    final key = SchoolService.subjectKey(n).replaceAll('_', '');
+    if (key.isEmpty) return 'Use letters and numbers (A-Z, 0-9).';
+    for (final e in existing) {
+      if (e == ignore) continue;
+      if (e.toLowerCase() == n.toLowerCase() ||
+          SchoolService.subjectKey(e).toLowerCase() ==
+              SchoolService.subjectKey(n).toLowerCase()) {
+        return '"$e" already exists.';
+      }
+    }
+    return null;
+  }
+
+  static String _field(_ListKind k) =>
+      k == _ListKind.subject ? 'subjectList' : 'formList';
+
+  /// Saves a whole list (add / reorder). Ticked section subjects that no
+  /// longer exist are dropped.
+  static Future<void> save(_ListKind k, List<String> list,
+      {Map<String, Object?> extra = const {}}) =>
+      appSettings.update({_field(k): list, ...extra});
+
+  static Future<bool> _hasExams(String field, String value) async {
+    final q = await _db
+        .collection('exams')
+        .where(field, isEqualTo: value)
+        .limit(1)
+        .get();
+    return q.docs.isNotEmpty;
+  }
+
+  /// Renames [key] inside a map field of settings/app. Keys are either the
+  /// name itself or end with / contain "__<key>".
+  static Map<String, Object?> _renameKeys(
+      Object? raw, String oldKey, String newKey, {bool plain = false}) {
+    final out = <String, Object?>{};
+    if (raw is! Map) return out;
+    for (final e in raw.entries) {
+      final k = '${e.key}';
+      String? nk;
+      if (plain) {
+        if (k == oldKey) nk = newKey;
+      } else if (k == oldKey) {
+        nk = newKey;
+      } else if (k.endsWith('__$oldKey')) {
+        nk = '${k.substring(0, k.length - oldKey.length)}$newKey';
+      } else if (k.contains('__${oldKey}__')) {
+        nk = k.replaceFirst('__${oldKey}__', '__${newKey}__');
+      }
+      if (nk != null && nk != k) {
+        out[nk] = e.value;
+        out[k] = FieldValue.delete();
+      }
+    }
+    return out;
+  }
+
+  /// Teachers' (and user) records: subjects / forms / assignments.
+  static Future<void> _migratePeople(
+      {String? oldSubject, String? newSubject, String? oldForm, String? newForm}) async {
+    for (final col in ['teachers', 'users']) {
+      QuerySnapshot<Map<String, dynamic>> snap;
+      try {
+        snap = await _db.collection(col).get();
+      } catch (_) {
+        if (col == 'teachers') rethrow;
+        continue;
+      }
+      var batch = _db.batch();
+      var n = 0;
+      List swap(List l, String o, String nw) =>
+          [for (final e in l) e == o ? nw : e];
+      for (final d in snap.docs) {
+        final m = d.data();
+        final upd = <String, Object?>{};
+        final subs = m['subjects'], fms = m['forms'], a = m['assignments'];
+        if (oldSubject != null && subs is List && subs.contains(oldSubject)) {
+          upd['subjects'] = swap(subs, oldSubject, newSubject!);
+        }
+        if (oldForm != null && fms is List && fms.contains(oldForm)) {
+          upd['forms'] = swap(fms, oldForm, newForm!);
+        }
+        if (a is Map) {
+          final out = <String, Object?>{};
+          var changed = false;
+          for (final e in a.entries) {
+            var k = '${e.key}';
+            Object? v = e.value;
+            if (oldSubject != null && k == oldSubject) {
+              k = newSubject!;
+              changed = true;
+            }
+            if (oldForm != null && v is List && v.contains(oldForm)) {
+              v = swap(v, oldForm, newForm!);
+              changed = true;
+            }
+            out[k] = v;
+          }
+          if (changed) upd['assignments'] = out;
+        }
+        if (upd.isEmpty) continue;
+        batch.update(d.reference, upd);
+        if (++n >= 400) {
+          await batch.commit();
+          batch = _db.batch();
+          n = 0;
+        }
+      }
+      if (n > 0) {
+        try {
+          await batch.commit();
+        } catch (_) {
+          if (col == 'teachers') rethrow;
+        }
+      }
+    }
+  }
+
+  static Future<void> renameSubject(
+      String old, String neu, List<String> list) async {
+    if (_fixedNames.contains(old.trim().toLowerCase())) {
+      throw Exception('"$old" cannot be renamed: its exam heading language '
+          'is chosen by this name.');
+    }
+    if (_fixedNames.contains(neu.trim().toLowerCase())) {
+      throw Exception('"$neu" is a reserved name (it changes the exam '
+          'heading language). Choose another name.');
+    }
+    if (await _hasExams('subject', old)) {
+      throw Exception('Exam files already exist for $old, so it cannot be '
+          'renamed. Add a new subject instead and delete this one if it is '
+          'no longer taught.');
+    }
+    final raw = (await _settings.get()).data() ?? {};
+    final oldKey = SchoolService.subjectKey(old);
+    final newKey = SchoolService.subjectKey(neu);
+    final ss = raw['sectionSubjects'];
+    await _settings.set({
+      'subjectList': list,
+      if (ss is List) 'sectionSubjects': [for (final e in ss) e == old ? neu : e],
+      if (oldKey != newKey) ...{
+        'subjectDates': _renameKeys(raw['subjectDates'], oldKey, newKey),
+      },
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    await _migratePeople(oldSubject: old, newSubject: neu);
+  }
+
+  static Future<void> deleteSubject(String name, List<String> list) async {
+    if (list.isEmpty) throw Exception('At least one subject must remain.');
+    final ss = appSettings.value.sectionSubjects;
+    await appSettings.update({
+      'subjectList': list,
+      'sectionSubjects': [for (final e in ss) if (e != name) e],
+    });
+  }
+
+  static Future<int> _sectionCount(String form) async =>
+      (await _db.collection('sections').where('form', isEqualTo: form).get())
+          .docs
+          .length;
+
+  static Future<void> renameForm(
+      String old, String neu, List<String> list) async {
+    if (await _hasExams('form', old)) {
+      throw Exception('Exam files already exist for $old, so it cannot be '
+          'renamed. Add a new form instead.');
+    }
+    final raw = (await _settings.get()).data() ?? {};
+    final oldKey = SchoolService.subjectKey(old);
+    final newKey = SchoolService.subjectKey(neu);
+    final fees = raw['monthlyFees'];
+    await _settings.set({
+      'formList': list,
+      if (fees is Map && fees.containsKey(old))
+        'monthlyFees': {neu: fees[old], old: FieldValue.delete()},
+      if (oldKey != newKey)
+        'examLimits': _renameKeys(raw['examLimits'], oldKey, newKey),
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    final secs = await _db.collection('sections').where('form', isEqualTo: old).get();
+    var batch = _db.batch();
+    var n = 0;
+    for (final d in secs.docs) {
+      batch.update(d.reference, {'form': neu});
+      if (++n >= 400) {
+        await batch.commit();
+        batch = _db.batch();
+        n = 0;
+      }
+    }
+    if (n > 0) await batch.commit();
+    await _migratePeople(oldForm: old, newForm: neu);
+  }
+
+  static Future<void> deleteForm(String name, List<String> list) async {
+    if (list.isEmpty) throw Exception('At least one form must remain.');
+    final c = await _sectionCount(name);
+    if (c > 0) {
+      throw Exception('$name still has $c class${c == 1 ? '' : 'es'}. '
+          'Delete or move its classes in Students first.');
+    }
+    await appSettings.update({'formList': list});
+  }
+}
+
+/// Settings card: the list of subjects (or forms) with add / rename /
+/// delete / reorder.
+class _ManageListCard extends StatefulWidget {
+  final _ListKind kind;
+  const _ManageListCard({required this.kind});
+
+  @override
+  State<_ManageListCard> createState() => _ManageListCardState();
+}
+
+class _ManageListCardState extends State<_ManageListCard> {
+  final _new = TextEditingController();
+  bool _busy = false;
+
+  bool get _isSub => widget.kind == _ListKind.subject;
+  String get _noun => _isSub ? 'subject' : 'form';
+  List<String> get _items => List.of(_isSub ? ExamService.subjects : ExamService.forms);
+
+  @override
+  void dispose() {
+    _new.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() job, String ok) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await job();
+      messenger.showSnackBar(SnackBar(content: Text(ok)));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final name = _new.text.trim();
+    final err = SchoolListsService.validate(name, _items);
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    _new.clear();
+    await _run(() => SchoolListsService.save(widget.kind, [..._items, name]),
+        '$name added');
+  }
+
+  Future<void> _reorder(int from, int to) async {
+    final l = _items;
+    if (to > from) to -= 1;
+    l.insert(to, l.removeAt(from));
+    await _run(() => SchoolListsService.save(widget.kind, l), 'Order saved');
+  }
+
+  Future<void> _rename(String old) async {
+    final c = TextEditingController(text: old);
+    String? error;
+    final neu = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Rename $_noun'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              decoration: InputDecoration(
+                  labelText: 'New name',
+                  errorText: error,
+                  border: const OutlineInputBorder()),
+              onSubmitted: (_) => ctx.mounted
+                  ? Navigator.pop(ctx, c.text.trim())
+                  : null,
+            ),
+            const SizedBox(height: 10),
+            Text(
+                'Teachers, class lists${_isSub ? '' : ', classes, fees'} and '
+                    'settings are updated. Marks and exam files already saved '
+                    'under the old name are not moved, so a $_noun that has '
+                    'exam files cannot be renamed.',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final e = SchoolListsService.validate(c.text, _items, ignore: old);
+                if (e != null) {
+                  setD(() => error = e);
+                  return;
+                }
+                Navigator.pop(ctx, c.text.trim());
+              },
+              child: const Text('Rename'),
+            ),
+          ],
+        ),
+      ),
+    );
+    c.dispose();
+    if (neu == null || neu == old) return;
+    final l = [for (final e in _items) e == old ? neu : e];
+    await _run(
+            () => _isSub
+            ? SchoolListsService.renameSubject(old, neu, l)
+            : SchoolListsService.renameForm(old, neu, l),
+        '$old renamed to $neu');
+  }
+
+  Future<void> _delete(String name) async {
+    if (_items.length <= 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('At least one $_noun must remain.')));
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete $name?'),
+        content: Text(_isSub
+            ? '$name will disappear from exams, results, class lists and '
+            'teacher assignments. Marks and files already saved are kept '
+            'in the database but are no longer shown.'
+            : '$name will disappear from every list. It can only be deleted '
+            'when it has no classes.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final l = [for (final e in _items) if (e != name) e];
+    await _run(
+            () => _isSub
+            ? SchoolListsService.deleteSubject(name, l)
+            : SchoolListsService.deleteForm(name, l),
+        '$name deleted');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<AppSettings>(
+      valueListenable: appSettings,
+      builder: (context, _, __) {
+        final items = _items;
+        return Card(
+          margin: EdgeInsets.zero,
+          elevation: 0,
+          color: Colors.white,
+          shape: _kSettingsCardShape,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFE8F2FC),
+                      borderRadius: BorderRadius.circular(10)),
+                  child: Icon(_isSub ? Icons.menu_book : Icons.class_,
+                      size: 18, color: kBlue),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(_isSub ? 'Subjects' : 'Forms (classes)',
+                      style: const TextStyle(
+                          fontSize: 15.5, fontWeight: FontWeight.w700)),
+                ),
+                Text('${items.length}',
+                    style: const TextStyle(color: Colors.black54)),
+              ]),
+              const SizedBox(height: 6),
+              Text(
+                  _isSub
+                      ? 'The subjects taught in the school. Drag to change the '
+                      'order used in lists and reports. Arabic, Islamic and '
+                      'Somali keep their own exam heading language.'
+                      : 'The forms (class levels), e.g. Form1, Form2. Name them '
+                      'with a number (Form5): the class code (5A) is taken '
+                      'from it. Classes themselves are managed in Students.',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              const SizedBox(height: 8),
+              ReorderableListView(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                buildDefaultDragHandles: false,
+                onReorder: _busy ? (_, __) {} : _reorder,
+                children: [
+                  for (var i = 0; i < items.length; i++)
+                    ListTile(
+                      key: ValueKey('${widget.kind.name}-${items[i]}'),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      leading: ReorderableDragStartListener(
+                        index: i,
+                        child: const Icon(Icons.drag_indicator,
+                            color: Colors.black38),
+                      ),
+                      title: Text(items[i],
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                          tooltip: 'Rename',
+                          icon: const Icon(Icons.edit_outlined),
+                          onPressed: _busy ? null : () => _rename(items[i]),
+                        ),
+                        IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline, color: kRed),
+                          onPressed: _busy ? null : () => _delete(items[i]),
+                        ),
+                      ]),
+                    ),
+                ],
+              ),
+              const Divider(height: 24),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _new,
+                    textCapitalization: TextCapitalization.words,
+                    onSubmitted: (_) => _add(),
+                    decoration: InputDecoration(
+                      labelText: 'New $_noun',
+                      hintText: _isSub ? 'Computer' : 'Form5',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.icon(
+                  onPressed: _busy ? null : _add,
+                  icon: const Icon(Icons.add),
+                  label: Text('Add $_noun'),
+                ),
+              ]),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+}
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -11398,7 +11916,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _saveFinance() async {
     final fees = <String, double>{};
-    for (final e in _fee.entries) {
+    for (final e in _fee.entries.where((x) => ExamService.forms.contains(x.key))) {
       if (e.value.text.trim().isEmpty) {
         fees[e.key] = 0;
         continue;
@@ -11448,7 +11966,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 12),
         Wrap(spacing: 10, runSpacing: 10, children: [
           for (final f in ExamService.forms)
-            SizedBox(width: 150, child: _moneyField(_fee[f]!, '$f fee')),
+            SizedBox(
+                width: 150,
+                child: _moneyField(
+                    _fee.putIfAbsent(f, () => TextEditingController()),
+                    '$f fee')),
         ]),
         const Divider(height: 28),
         const Text('Payment methods',
@@ -11699,6 +12221,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ('School', <Widget>[_schoolCard(), _subjectsCard(s)]),
       ];
     }
+    if (id == 7) {
+      return <(String, List<Widget>)>[
+        ('Subjects', <Widget>[const _ManageListCard(kind: _ListKind.subject)]),
+        ('Forms', <Widget>[const _ManageListCard(kind: _ListKind.form)]),
+      ];
+    }
     if (id == 1) {
       return <(String, List<Widget>)>[
         ('Exams', <Widget>[_examsCard(s)]),
@@ -11877,7 +12405,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
-            if ((c.id != 3 || admin) &&
+            if (((c.id != 3 && c.id != 7) || admin) &&
                 (c.id != 6 || me.data?.isAdmin == true))
               c
         ];
