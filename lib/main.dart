@@ -20309,6 +20309,46 @@ child: const Text('Save')),
 );
 }
 
+/// Fixed roll numbers of a class.
+///  - a student keeps the number he / she has
+///  - a removed student leaves that number vacant (nobody takes it)
+///  - a NEW student always gets the number after the last one, in the order
+///    the students were added
+///  - the very first time (nothing saved yet) the students are numbered
+///    1, 2, 3 ... by name
+/// [students] are maps with 'id', 'name' and 'created' (milliseconds).
+Map<String, int> _assignRollNumbers(
+Map<String, int> saved, List<Map<String, String>> students) {
+final now = {for (final r in students) r['id']!};
+final keep = {
+for (final e in saved.entries)
+if (now.contains(e.key)) e.key: e.value
+};
+if (saved.isEmpty) {
+final byName = [...students]..sort((a, b) =>
+a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+for (var i = 0; i < byName.length; i++) {
+keep[byName[i]['id']!] = i + 1;
+}
+return keep;
+}
+var next = keep.isEmpty ? 0 : keep.values.reduce((a, b) => a > b ? a : b);
+final fresh = [
+for (final r in students)
+if (!keep.containsKey(r['id'])) r
+]..sort((a, b) {
+final c = (int.tryParse(a['created'] ?? '') ?? 0)
+    .compareTo(int.tryParse(b['created'] ?? '') ?? 0);
+return c != 0
+? c
+    : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+});
+for (final r in fresh) {
+keep[r['id']!] = ++next;
+}
+return keep;
+}
+
 // ======================= DAILY ATTENDANCE REPORT (admin) =======================
 /// One table of the daily attendance report (one class).
 class _DrTable {
@@ -20417,6 +20457,8 @@ final row = {
 'name': '${m['name'] ?? ''}'.trim(),
 'no': '${m['studentNo'] ?? ''}'.trim(),
 'phone': phone.trim(),
+'created':
+'${(m['createdAt'] is Timestamp ? (m['createdAt'] as Timestamp).millisecondsSinceEpoch : 0)}',
 };
 if (sid == cls.id) {
 inClass.add(row);
@@ -20446,12 +20488,7 @@ if (e.value is num) nm['${e.key}'] = (e.value as num).toInt();
 }
 }
 } catch (_) {}
-var after = nm.isEmpty ? 0 : nm.values.reduce((a, b) => a > b ? a : b);
-final noOf = <String, int>{};
-for (var i = 0; i < students.length; i++) {
-final id = students[i]['id']!;
-noOf[id] = nm.isEmpty ? i + 1 : (nm[id] ?? ++after);
-}
+final noOf = _assignRollNumbers(nm, students);
 students.sort((a, b) {
 final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
 return c != 0
@@ -21049,11 +21086,10 @@ final Map<String, Map<String, int>> _nums = {};
 final Map<String, String> _numSig = {};
 final Set<String> _numBusy = {};
 
-/// A student keeps the same number. A removed student leaves a vacant
-/// number. A new student takes the first vacant number, or the next number
-/// after the last one when nothing is vacant.
-Future<void> _ensureNumbers(String cid, List<String> idsByName) async {
-final sig = (List<String>.from(idsByName)..sort()).join(',');
+/// Saves the fixed numbers of the class (see _assignRollNumbers).
+Future<void> _ensureNumbers(
+String cid, List<Map<String, String>> students) async {
+final sig = ([for (final r in students) r['id']!]..sort()).join(',');
 if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
 _numBusy.add(cid);
 try {
@@ -21069,23 +21105,9 @@ if (v is num) saved['${e.key}'] = v.toInt();
 }
 }
 } catch (_) {}
-final now = idsByName.toSet();
-final keep = {
-for (final e in saved.entries)
-if (now.contains(e.key)) e.key: e.value
-};
-final used = keep.values.toSet();
-var changed = keep.length != saved.length;
-for (final id in idsByName) {
-if (keep.containsKey(id)) continue;
-var n = 1;
-while (used.contains(n)) {
-n++;
-}
-keep[id] = n;
-used.add(n);
-changed = true;
-}
+final keep = _assignRollNumbers(saved, students);
+final changed = keep.length != saved.length ||
+keep.entries.any((e) => saved[e.key] != e.value);
 if (changed) {
 try {
 await ref.set(
@@ -21101,37 +21123,6 @@ _numSig[cid] = sig;
 _numBusy.remove(cid);
 }
 }
-QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
-late DateTime _date = _lastWeekday(DateTime.now());
-// 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
-// stay valid)
-String _session = 'am';
-// studentId -> 'a' (absent). Everybody else counts as present (ticked).
-Map<String, String> _marks = {};
-List<String> _current = const []; // ids of the students shown
-bool _exists = false; // a register is already saved for this day / session
-String _loadedKey = '';
-bool _loading = false, _saving = false, _dirty = false;
-String? _error;
-
-static DateTime _lastWeekday(DateTime d) {
-var x = DateTime(d.year, d.month, d.day);
-while (x.weekday > DateTime.friday) {
-x = x.subtract(const Duration(days: 1));
-}
-return x;
-}
-
-static DateTime _monday(DateTime d) {
-final x = DateTime(d.year, d.month, d.day);
-return x.subtract(Duration(days: x.weekday - 1));
-}
-
-static bool _sameDay(DateTime a, DateTime b) =>
-a.year == b.year && a.month == b.month && a.day == b.day;
-
-String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
-String get _docId => '${_classId}_${_dateKey}_$_session';
 
 Future<void> _load() async {
 final id = _classId;
@@ -21442,6 +21433,8 @@ final row = {
 'id': d.id,
 'name': '${m['name'] ?? ''}'.trim(),
 'no': '${m['studentNo'] ?? ''}'.trim(),
+'created':
+'${(m['createdAt'] is Timestamp ? (m['createdAt'] as Timestamp).millisecondsSinceEpoch : 0)}',
 };
 if (sid == cid) {
 inClass.add(row);
@@ -21464,25 +21457,11 @@ _current = [for (final r in students) r['id']!];
 
 // fixed numbers: saved ones first; a student without a number yet goes
 // after the last number until it is saved
-final idsByName = [for (final r in students) r['id']!];
-final savedNums = _nums[cid];
+final studentsNow = [...students];
 WidgetsBinding.instance.addPostFrameCallback((_) {
-if (mounted) _ensureNumbers(cid, idsByName);
+if (mounted) _ensureNumbers(cid, studentsNow);
 });
-final noOf = <String, int>{};
-var nextNo = (savedNums == null || savedNums.isEmpty)
-? 0
-    : savedNums.values.reduce((a, b) => a > b ? a : b);
-for (var i = 0; i < idsByName.length; i++) {
-final id = idsByName[i];
-if (savedNums == null) {
-noOf[id] = i + 1;
-} else if (savedNums.containsKey(id)) {
-noOf[id] = savedNums[id]!;
-} else {
-noOf[id] = ++nextNo;
-}
-}
+final noOf = _assignRollNumbers(_nums[cid] ?? const {}, students);
 students.sort((a, b) {
 final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
 return c != 0
