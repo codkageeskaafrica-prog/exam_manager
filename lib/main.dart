@@ -20311,19 +20311,24 @@ child: const Text('Save')),
 
 /// Fixed roll numbers of a class.
 ///  - a student keeps the number he / she has
-///  - a removed student leaves that number vacant (nobody takes it)
+///  - a student who is really removed (deleted / moved to another class)
+///    leaves that number vacant
 ///  - a NEW student always gets the number after the last one, in the order
 ///    the students were added
 ///  - the very first time (nothing saved yet) the students are numbered
 ///    1, 2, 3 ... by name
+/// The number belongs to the student's record id. When the same person comes
+/// back under a new record id (the whole-class copy and the section copy of a
+/// student can swap), the saved NAME finds the person again, so no false
+/// vacant number appears.
 /// [students] are maps with 'id', 'name' and 'created' (milliseconds).
+String _rollName(String n) =>
+n.toLowerCase().trim().replaceAll(RegExp(r'\s+'), ' ');
+
 Map<String, int> _assignRollNumbers(
-Map<String, int> saved, List<Map<String, String>> students) {
-final now = {for (final r in students) r['id']!};
-final keep = {
-for (final e in saved.entries)
-if (now.contains(e.key)) e.key: e.value
-};
+Map<String, int> saved, List<Map<String, String>> students,
+[Map<String, String> savedNames = const {}]) {
+final keep = <String, int>{};
 if (saved.isEmpty) {
 final byName = [...students]..sort((a, b) =>
 a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
@@ -20332,6 +20337,29 @@ keep[byName[i]['id']!] = i + 1;
 }
 return keep;
 }
+// 1) same record id
+final matched = <String>{};
+for (final r in students) {
+final n = saved[r['id']];
+if (n != null) {
+keep[r['id']!] = n;
+matched.add(r['id']!);
+}
+}
+// 2) the same person under a new record id: found by the saved name
+for (final e in saved.entries) {
+if (matched.contains(e.key)) continue;
+final nk = savedNames[e.key];
+if (nk == null || nk.isEmpty) continue;
+for (final r in students) {
+if (keep.containsKey(r['id'])) continue;
+if (_rollName(r['name']!) == nk) {
+keep[r['id']!] = e.value;
+break;
+}
+}
+}
+// 3) really new students: after the last number, in the order added
 var next = keep.isEmpty ? 0 : keep.values.reduce((a, b) => a > b ? a : b);
 final fresh = [
 for (final r in students)
@@ -20348,6 +20376,14 @@ keep[r['id']!] = ++next;
 }
 return keep;
 }
+
+/// name of every numbered student (to find the person again later)
+Map<String, String> _rollNames(
+Map<String, int> nums, List<Map<String, String>> students) =>
+{
+for (final r in students)
+if (nums.containsKey(r['id'])) r['id']!: _rollName(r['name']!)
+};
 
 // ======================= DAILY ATTENDANCE REPORT (admin) =======================
 /// One table of the daily attendance report (one class).
@@ -20476,6 +20512,7 @@ a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
 // the fixed numbers of the class (a removed student leaves a gap)
 final nm = <String, int>{};
+final nmNames = <String, String>{};
 try {
 final nd = await FirebaseFirestore.instance
     .collection('classNumbers')
@@ -20487,8 +20524,14 @@ for (final e in raw.entries) {
 if (e.value is num) nm['${e.key}'] = (e.value as num).toInt();
 }
 }
+final rn = nd.data()?['names'];
+if (rn is Map) {
+for (final e in rn.entries) {
+nmNames['${e.key}'] = '${e.value}';
+}
+}
 } catch (_) {}
-final noOf = _assignRollNumbers(nm, students);
+final noOf = _assignRollNumbers(nm, students, nmNames);
 students.sort((a, b) {
 final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
 return c != 0
@@ -21083,13 +21126,63 @@ String _show = 'all'; // list filter: all | p (present) | a (absent)
 
 // ---- fixed roll numbers of a class (stored in classNumbers/{classId}) ----
 final Map<String, Map<String, int>> _nums = {};
+final Map<String, Map<String, String>> _numNames = {};
 final Map<String, String> _numSig = {};
 final Set<String> _numBusy = {};
 
-/// Removes a vacant number: the students after it move up by one number,
-/// so the numbering has no gap there any more.
-Future<void> _removeVacant(
-String cid, int n, Map<String, int> noOf) async {
+/// Saves the fixed numbers of the class (see _assignRollNumbers).
+Future<void> _ensureNumbers(
+String cid, List<Map<String, String>> students) async {
+final sig = ([for (final r in students) r['id']!]..sort()).join(',');
+if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
+_numBusy.add(cid);
+try {
+final ref = _db.collection('classNumbers').doc(cid);
+final saved = <String, int>{};
+final savedNames = <String, String>{};
+try {
+final d = await ref.get();
+final m = d.data()?['nums'];
+if (m is Map) {
+for (final e in m.entries) {
+final v = e.value;
+if (v is num) saved['${e.key}'] = v.toInt();
+}
+}
+final nmz = d.data()?['names'];
+if (nmz is Map) {
+for (final e in nmz.entries) {
+savedNames['${e.key}'] = '${e.value}';
+}
+}
+} catch (_) {}
+final keep = _assignRollNumbers(saved, students, savedNames);
+final names = _rollNames(keep, students);
+final changed = keep.length != saved.length ||
+keep.entries.any((e) => saved[e.key] != e.value);
+if (changed) {
+try {
+await ref.set({
+'nums': keep,
+'names': names,
+'updatedAt': FieldValue.serverTimestamp()
+});
+} catch (_) {}
+}
+if (!mounted) return;
+setState(() {
+_nums[cid] = keep;
+_numNames[cid] = names;
+_numSig[cid] = sig;
+});
+} finally {
+_numBusy.remove(cid);
+}
+}
+
+/// Closes ONE vacant number: the students after it move up by one.
+Future<void> _removeVacant(String cid, int n, Map<String, int> noOf,
+List<Map<String, String>> students) async {
 final ok = await showDialog<bool>(
 context: context,
 builder: (ctx) => AlertDialog(
@@ -21108,59 +21201,63 @@ child: const Text('Remove')),
 ),
 );
 if (ok != true || !mounted) return;
-final next = {
+await _saveNumbers(cid, {
 for (final e in noOf.entries) e.key: e.value > n ? e.value - 1 : e.value
-};
+}, students);
+}
+
+/// Closes EVERY vacant number: the students are numbered 1, 2, 3 ... in the
+/// order they have now.
+Future<void> _removeAllVacant(String cid, Map<String, int> noOf,
+List<Map<String, String>> students, int vacant) async {
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Remove all vacant numbers?'),
+content: Text('$vacant vacant number${vacant == 1 ? '' : 's'} will be '
+'removed. The students keep their order and are numbered 1, 2, '
+'3 ... without gaps.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Remove all')),
+],
+),
+);
+if (ok != true || !mounted) return;
+final ordered = [...students]..sort((a, b) {
+final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+return c != 0
+? c
+    : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+});
+await _saveNumbers(cid, {
+for (var i = 0; i < ordered.length; i++) ordered[i]['id']!: i + 1
+}, students);
+}
+
+Future<void> _saveNumbers(String cid, Map<String, int> nums,
+List<Map<String, String>> students) async {
+final names = _rollNames(nums, students);
 try {
-await _db
-    .collection('classNumbers')
-    .doc(cid)
-    .set({'nums': next, 'updatedAt': FieldValue.serverTimestamp()});
+await _db.collection('classNumbers').doc(cid).set({
+'nums': nums,
+'names': names,
+'updatedAt': FieldValue.serverTimestamp()
+});
 if (!mounted) return;
-setState(() => _nums[cid] = next);
+setState(() {
+_nums[cid] = nums;
+_numNames[cid] = names;
+});
 } catch (e) {
 if (!mounted) return;
 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-content: Text('Could not remove the number: '
+content: Text('Could not save the numbers: '
 '${'$e'.replaceFirst('Exception: ', '')}')));
-}
-}
-
-/// Saves the fixed numbers of the class (see _assignRollNumbers).
-Future<void> _ensureNumbers(
-String cid, List<Map<String, String>> students) async {
-final sig = ([for (final r in students) r['id']!]..sort()).join(',');
-if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
-_numBusy.add(cid);
-try {
-final ref = _db.collection('classNumbers').doc(cid);
-final saved = <String, int>{};
-try {
-final d = await ref.get();
-final m = d.data()?['nums'];
-if (m is Map) {
-for (final e in m.entries) {
-final v = e.value;
-if (v is num) saved['${e.key}'] = v.toInt();
-}
-}
-} catch (_) {}
-final keep = _assignRollNumbers(saved, students);
-final changed = keep.length != saved.length ||
-keep.entries.any((e) => saved[e.key] != e.value);
-if (changed) {
-try {
-await ref.set(
-{'nums': keep, 'updatedAt': FieldValue.serverTimestamp()});
-} catch (_) {}
-}
-if (!mounted) return;
-setState(() {
-_nums[cid] = keep;
-_numSig[cid] = sig;
-});
-} finally {
-_numBusy.remove(cid);
 }
 }
 
@@ -21533,7 +21630,8 @@ final studentsNow = [...students];
 WidgetsBinding.instance.addPostFrameCallback((_) {
 if (mounted) _ensureNumbers(cid, studentsNow);
 });
-final noOf = _assignRollNumbers(_nums[cid] ?? const {}, students);
+final noOf = _assignRollNumbers(
+_nums[cid] ?? const {}, students, _numNames[cid] ?? const {});
 students.sort((a, b) {
 final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
 return c != 0
@@ -21542,6 +21640,11 @@ return c != 0
 });
 final absent = students.where((r) => _marks[r['id']] == 'a').length;
 final present = students.length - absent;
+// how many numbers are vacant (a removed student)
+final usedNos = {for (final r in students) noOf[r['id']]!};
+final vacantTotal = usedNos.isEmpty
+? 0
+    : usedNos.reduce((a, b) => a > b ? a : b) - usedNos.length;
 // rows shown, in number order. A vacant number (a removed student) is
 // shown as an empty slot (negative number) when the whole list is shown.
 final items = <int>[];
@@ -21671,6 +21774,15 @@ const Chip(
 visualDensity: VisualDensity.compact,
 label: Text('Register saved', style: TextStyle(fontSize: 12)),
 ),
+if (!restricted && vacantTotal > 0)
+ActionChip(
+visualDensity: VisualDensity.compact,
+avatar: const Icon(Icons.delete_sweep_outlined, size: 16),
+label: Text('Remove $vacantTotal vacant',
+style: const TextStyle(fontSize: 12)),
+onPressed: () =>
+_removeAllVacant(cid, noOf, students, vacantTotal),
+),
 ]),
 const SizedBox(height: 10),
 Row(children: [
@@ -21755,7 +21867,8 @@ visualDensity: VisualDensity.compact,
 iconSize: 19,
 color: Colors.black45,
 icon: const Icon(Icons.delete_outline),
-onPressed: () => _removeVacant(cid, -i, noOf),
+onPressed: () =>
+_removeVacant(cid, -i, noOf, students),
 ),
 ]),
 )
