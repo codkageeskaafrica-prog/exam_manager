@@ -10622,6 +10622,10 @@ class AppSettings {
   /// hidden in Result for teachers and students. At least one exam stays open.
   final List<String> closedExams;
 
+  /// The exam the administrator made active in Settings > Exams ("" = none
+  /// chosen: the default current exam is used).
+  final String activeExam;
+
   /// Subjects ticked in Settings. They are shown in the header of every
   /// section (class list). Attendance does not use them.
   final List<String> sectionSubjects;
@@ -10664,6 +10668,7 @@ class AppSettings {
     this.rateWarn = 75.0,
     this.exams = const [],
     this.closedExams = const [],
+    this.activeExam = '',
     this.sectionSubjects = const [],
     this.teacherAccess = const [
       AppPages.attendance,
@@ -10705,10 +10710,11 @@ class AppSettings {
   /// The exams to show (never empty).
   List<String> get examOptions => exams.isEmpty ? defaultExams() : exams;
 
-  /// The current exam: "Mid-term <year>" or, when that is not in the list,
-  /// the first exam. It is the one Result opens on (when it is open).
+  /// The current exam: the one made active in Settings; if none, "Mid-term
+  /// <year>" or, when that is not in the list, the first exam. It is the one Result opens on (when it is open).
   String get currentExam {
     final o = examOptions;
+    if (activeExam.isNotEmpty && o.contains(activeExam)) return activeExam;
     final pref = 'Mid-term ${DateTime.now().year}';
     return o.contains(pref) ? pref : o.first;
   }
@@ -10820,6 +10826,9 @@ class AppSettings {
           if (e is String && e.trim().isNotEmpty) e.trim(),
       ]
           : d.exams,
+      activeExam: m['activeExam'] is String
+          ? (m['activeExam'] as String).trim()
+          : d.activeExam,
       closedExams: ce is List
           ? [
         for (final e in ce)
@@ -12343,12 +12352,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }, open ? '\"$exam\" opened' : '\"$exam\" closed');
   }
 
+  /// Makes [exam] the active exam: it is opened and every other exam is
+  /// closed, so teachers and students only work on it. Other exams can still
+  /// be opened again with their tick box.
+  Future<void> _makeActive(AppSettings s, String exam) async {
+    await _save({
+      'activeExam': exam,
+      'closedExams': [for (final e in s.examOptions) if (e != exam) e],
+    }, '"$exam" is now the active exam (the others are closed)');
+  }
+
   Widget _examsCard(AppSettings s) {
     final list = s.examOptions;
     return _card('Exams', Icons.event_note, [
       const Text(
-          'Tick an exam to open it in Result, untick it to close it (teachers '
-              'and students no longer see it). At least one exam stays open. '
+          'Use "Make active" to switch to an exam (e.g. Monthly1, Mid-term, '
+              'Monthly2, Final): it is opened and the others are closed. You can '
+              'also tick an exam to open it in Result, untick it to close it '
+              '(teachers and students no longer see it). At least one exam stays open. '
               'Removing an exam only hides it; its saved marks are kept. Use the '
               'sliders button of an exam to set its own mark limits (lowest '
               'and highest subject mark, lowest and highest exam total).',
@@ -12363,11 +12384,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onChanged: _busy ? null : (v) => _toggleExam(s, e, v ?? true),
           title: Text(e),
           subtitle: Text(
-              '${e == s.currentExam ? 'Current exam - ' : ''}'
+              '${e == s.currentExam ? 'ACTIVE - ' : ''}'
                   '${s.isExamOpen(e) ? 'Open' : 'Closed'}\n'
                   '${s.limitsSummary(e)}'),
           isThreeLine: true,
           secondary: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (e == s.currentExam)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Chip(
+                  visualDensity: VisualDensity.compact,
+                  avatar: Icon(Icons.check_circle, size: 16, color: Colors.green),
+                  label: Text('Active'),
+                ),
+              )
+            else
+              TextButton(
+                onPressed: _busy ? null : () => _makeActive(s, e),
+                child: const Text('Make active'),
+              ),
             IconButton(
               tooltip: 'Mark limits',
               icon: const Icon(Icons.tune),
@@ -12406,7 +12441,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: TextButton(
           onPressed: _busy
               ? null
-              : () => _save({'exams': <String>[], 'closedExams': <String>[]},
+              : () => _save({
+            'exams': <String>[],
+            'closedExams': <String>[],
+            'activeExam': ''
+          },
               'Exam list reset'),
           child: const Text('Reset to default list'),
         ),
