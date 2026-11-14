@@ -67,7 +67,28 @@ class ExamRecord {
     this.allowedTime = '',
   });
 
-  static String idFor(String subject, String form) => '${subject}_$form';
+  /// Papers are kept PER EXAM. The papers saved before this existed belong to
+  /// AppSettings.paperBaseExam and keep their old id; the other exams use
+  /// their own ids (and an `exam` field) so they never mix.
+  static String get _scopeKey {
+    final st = appSettings.value;
+    final cur = st.currentExam;
+    return (st.paperBaseExam.isEmpty || cur == st.paperBaseExam)
+        ? ''
+        : SchoolService.subjectKey(cur);
+  }
+
+  /// True when the table shows an exam other than the base one.
+  static bool get isScoped => _scopeKey.isNotEmpty;
+
+  /// Extra fields every saved record of the current exam carries.
+  static Map<String, Object?> get scopeFields =>
+      isScoped ? {'exam': appSettings.value.currentExam} : const {};
+
+  static String idFor(String subject, String form) {
+    final k = _scopeKey;
+    return k.isEmpty ? '${subject}_$form' : '${subject}_${form}__$k';
+  }
 
   factory ExamRecord.empty(String subject, String form) =>
       ExamRecord(subject: subject, form: form);
@@ -398,8 +419,16 @@ class ExamService {
   CollectionReference<Map<String, dynamic>> get _col => _db.collection('exams');
 
   /// Live map of docId -> record. Missing docs mean "Pending".
-  Stream<Map<String, ExamRecord>> watchAll() => _col.snapshots().map((s) => {
-    for (final d in s.docs) d.id: ExamRecord.fromMap(d.data()),
+  /// Only the records of the active exam (the base exam owns the records
+  /// that have no `exam` field).
+  Stream<Map<String, ExamRecord>> watchAll() => _col.snapshots().map((s) {
+    final cur = appSettings.value.currentExam;
+    final scoped = ExamRecord.isScoped;
+    return {
+      for (final d in s.docs)
+        if (scoped ? d.data()['exam'] == cur : d.data()['exam'] == null)
+          d.id: ExamRecord.fromMap(d.data()),
+    };
   });
 
   // ---------------- General school letterhead (one for all) ----------------
@@ -2455,6 +2484,7 @@ class ExamService {
       String subject, String form, String footer, String teacher,
       {String marks = '', String allowedTime = '', String teacherId = ''}) {
     return _col.doc(ExamRecord.idFor(subject, form)).set({
+      ...ExamRecord.scopeFields,
       'subject': subject,
       'form': form,
       'footer': footer.replaceAll('Teacher: ', '').replaceAll('Teacher:', ''),
@@ -2535,6 +2565,7 @@ class ExamService {
     onProgress?.call(1);
 
     await _col.doc(id).set({
+      ...ExamRecord.scopeFields,
       'subject': current.subject,
       'form': current.form,
       'status': 'received',
@@ -3254,6 +3285,7 @@ class ExamService {
           'updatedAt': FieldValue.serverTimestamp(),
         }).timeout(const Duration(seconds: 40));
         await _col.doc(id).set({
+          ...ExamRecord.scopeFields,
           'subject': it.subject,
           'form': it.form,
           'status': 'received',
@@ -3278,6 +3310,7 @@ class ExamService {
       await _files.doc(ExamRecord.idFor(r.subject, r.form)).delete();
     } catch (_) {}
     await _col.doc(ExamRecord.idFor(r.subject, r.form)).set({
+      ...ExamRecord.scopeFields,
       'status': 'pending',
       'receivedAt': FieldValue.delete(),
       'hasFile': FieldValue.delete(),
@@ -5445,6 +5478,111 @@ class _UploadAllButtonState extends State<_UploadAllButton> {
   }
 }
 
+
+/// Makes [exam] the active exam (asks first). It is opened, the other exams
+/// are closed, and the Exam Manager table shows the papers and exam dates of
+/// that exam. The first time, the admin says which exam the papers saved so
+/// far belong to.
+Future<void> switchActiveExam(BuildContext context, String exam) async {
+  final s = appSettings.value;
+  if (exam == s.currentExam && s.activeExam == exam) return;
+  final messenger = ScaffoldMessenger.of(context);
+  final needBase = s.paperBaseExam.isEmpty && exam != s.currentExam;
+  var base = s.currentExam;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: Text('Make "$exam" the active exam?'),
+        content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('"$exam" is opened for teachers and students and the other '
+                  'exams are closed. The Exam Manager table (papers received, '
+                  'exam dates) is kept separately for each exam.'),
+              if (needBase) ...[
+                const SizedBox(height: 14),
+                const Text('The papers saved in Exam Manager so far belong to:',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                DropdownButton<String>(
+                  isExpanded: true,
+                  value: s.examOptions.contains(base) ? base : null,
+                  items: [
+                    for (final e in s.examOptions)
+                      DropdownMenuItem(value: e, child: Text(e)),
+                  ],
+                  onChanged: (v) => setD(() => base = v ?? base),
+                ),
+              ],
+            ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Make active')),
+        ],
+      ),
+    ),
+  );
+  if (ok != true) return;
+  try {
+    await appSettings.update({
+      'activeExam': exam,
+      'closedExams': [for (final e in s.examOptions) if (e != exam) e],
+      if (needBase) 'paperBaseExam': base,
+    });
+    messenger.showSnackBar(
+        SnackBar(content: Text('"$exam" is now the active exam')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+  }
+}
+
+/// Bar above the Exam Manager table: the exams, the active one highlighted.
+/// An administrator taps another exam to make it active.
+class _ExamSwitchBar extends StatelessWidget {
+  final AppSettings settings;
+  const _ExamSwitchBar({required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final cur = settings.currentExam;
+    return ValueListenableBuilder<TeacherScope>(
+      valueListenable: teacherScope,
+      builder: (context, sc, _) {
+        final canSwitch = !sc.scoped && !sc.isStudent;
+        return Container(
+          width: double.infinity,
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Icon(Icons.event_note, size: 20, color: kBlue),
+              Text(canSwitch ? 'Active exam:' : 'Exam:',
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              for (final e in settings.examOptions)
+                ChoiceChip(
+                  label: Text(e),
+                  selected: e == cur,
+                  onSelected: canSwitch && e != cur
+                      ? (_) => switchActiveExam(context, e)
+                      : null,
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 class ExamTableScreen extends StatelessWidget {
   const ExamTableScreen({super.key});
 
@@ -5536,47 +5674,55 @@ class ExamTableScreen extends StatelessWidget {
           const SizedBox(width: 8),
         ],
       ),
-      body: StreamBuilder<Map<String, ExamRecord>>(
-        stream: service.watchAll(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final data = snap.data!;
-          return ValueListenableBuilder<TeacherScope>(
-            valueListenable: teacherScope,
-            builder: (context, sc, _) {
-              if (sc.subjectList.isEmpty || sc.formList.isEmpty) {
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text(
-                        'No subjects or forms are set on your account.\n'
-                            'Ask the administrator to add them in Teachers.',
-                        textAlign: TextAlign.center),
-                  ),
+      body: ValueListenableBuilder<AppSettings>(
+        valueListenable: appSettings,
+        builder: (context, st, _) => Column(children: [
+          _ExamSwitchBar(settings: st),
+          Expanded(
+            child: StreamBuilder<Map<String, ExamRecord>>(
+              stream: service.watchAll(),
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(child: Text('Error: ${snap.error}'));
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final data = snap.data!;
+                return ValueListenableBuilder<TeacherScope>(
+                  valueListenable: teacherScope,
+                  builder: (context, sc, _) {
+                    if (sc.subjectList.isEmpty || sc.formList.isEmpty) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text(
+                              'No subjects or forms are set on your account.\n'
+                                  'Ask the administrator to add them in Teachers.',
+                              textAlign: TextAlign.center),
+                        ),
+                      );
+                    }
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: ValueListenableBuilder<AppSettings>(
+                            valueListenable: appSettings,
+                            builder: (_, __, ___) =>
+                                _buildTable(context, service, data, sc),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 );
-              }
-              return SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Card(
-                    clipBehavior: Clip.antiAlias,
-                    child: ValueListenableBuilder<AppSettings>(
-                      valueListenable: appSettings,
-                      builder: (_, __, ___) =>
-                          _buildTable(context, service, data, sc),
-                    ),
-                  ),
-                ),
-              );
-            },
-          );
-        },
+              },
+            ),
+          ),
+        ]),
       ),
     );
   }
@@ -5681,7 +5827,7 @@ class _SubjectDateCell extends StatelessWidget {
     try {
       await appSettings.update({
         'subjectDates': {
-          SchoolService.subjectKey(subject):
+          appSettings.value.dateKey(subject):
           DateFormat('yyyy-MM-dd').format(picked)
         }
       });
@@ -5695,7 +5841,7 @@ class _SubjectDateCell extends StatelessWidget {
     final messenger = ScaffoldMessenger.of(context);
     try {
       await appSettings.update({
-        'subjectDates': {SchoolService.subjectKey(subject): FieldValue.delete()}
+        'subjectDates': {appSettings.value.dateKey(subject): FieldValue.delete()}
       });
     } catch (e) {
       messenger.showSnackBar(SnackBar(
@@ -10626,6 +10772,10 @@ class AppSettings {
   /// chosen: the default current exam is used).
   final String activeExam;
 
+  /// The exam that owns the papers saved before papers were kept per exam
+  /// ("" = not decided yet: one shared set).
+  final String paperBaseExam;
+
   /// Subjects ticked in Settings. They are shown in the header of every
   /// section (class list). Attendance does not use them.
   final List<String> sectionSubjects;
@@ -10669,6 +10819,7 @@ class AppSettings {
     this.exams = const [],
     this.closedExams = const [],
     this.activeExam = '',
+    this.paperBaseExam = '',
     this.sectionSubjects = const [],
     this.teacherAccess = const [
       AppPages.attendance,
@@ -10753,8 +10904,18 @@ class AppSettings {
   bool isExamOpen(String e) => !closedExams.contains(e);
 
   /// The exam date of [subject], or null when it was not set.
+  /// Key of a subject's exam date in [subjectDates]: the exam dates are kept
+  /// per exam (the base exam keeps the plain subject key).
+  String dateKey(String subject) {
+    final k = SchoolService.subjectKey(subject);
+    final cur = currentExam;
+    return (paperBaseExam.isEmpty || cur == paperBaseExam)
+        ? k
+        : '${k}__${SchoolService.subjectKey(cur)}';
+  }
+
   DateTime? subjectDateOf(String subject) {
-    final v = subjectDates[SchoolService.subjectKey(subject)];
+    final v = subjectDates[dateKey(subject)];
     final d = v == null ? null : DateTime.tryParse(v);
     return d == null ? null : DateTime(d.year, d.month, d.day);
   }
@@ -10826,6 +10987,9 @@ class AppSettings {
           if (e is String && e.trim().isNotEmpty) e.trim(),
       ]
           : d.exams,
+      paperBaseExam: m['paperBaseExam'] is String
+          ? (m['paperBaseExam'] as String).trim()
+          : d.paperBaseExam,
       activeExam: m['activeExam'] is String
           ? (m['activeExam'] as String).trim()
           : d.activeExam,
@@ -11008,7 +11172,8 @@ class SchoolListsService {
   /// Renames [key] inside a map field of settings/app. Keys are either the
   /// name itself or end with / contain "__<key>".
   static Map<String, Object?> _renameKeys(
-      Object? raw, String oldKey, String newKey, {bool plain = false}) {
+      Object? raw, String oldKey, String newKey,
+      {bool plain = false, bool prefixed = false}) {
     final out = <String, Object?>{};
     if (raw is! Map) return out;
     for (final e in raw.entries) {
@@ -11018,6 +11183,8 @@ class SchoolListsService {
         if (k == oldKey) nk = newKey;
       } else if (k == oldKey) {
         nk = newKey;
+      } else if (prefixed && k.startsWith('${oldKey}__')) {
+        nk = '$newKey${k.substring(oldKey.length)}';
       } else if (k.endsWith('__$oldKey')) {
         nk = '${k.substring(0, k.length - oldKey.length)}$newKey';
       } else if (k.contains('__${oldKey}__')) {
@@ -11115,7 +11282,8 @@ class SchoolListsService {
       'subjectList': list,
       if (ss is List) 'sectionSubjects': [for (final e in ss) e == old ? neu : e],
       if (oldKey != newKey) ...{
-        'subjectDates': _renameKeys(raw['subjectDates'], oldKey, newKey),
+        'subjectDates':
+        _renameKeys(raw['subjectDates'], oldKey, newKey, prefixed: true),
       },
       'updatedBy': FirebaseAuth.instance.currentUser?.uid,
       'updatedAt': FieldValue.serverTimestamp(),
@@ -12356,10 +12524,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// closed, so teachers and students only work on it. Other exams can still
   /// be opened again with their tick box.
   Future<void> _makeActive(AppSettings s, String exam) async {
-    await _save({
-      'activeExam': exam,
-      'closedExams': [for (final e in s.examOptions) if (e != exam) e],
-    }, '"$exam" is now the active exam (the others are closed)');
+    setState(() => _busy = true);
+    try {
+      await switchActiveExam(context, exam);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   Widget _examsCard(AppSettings s) {
