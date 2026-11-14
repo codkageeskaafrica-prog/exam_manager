@@ -20432,6 +20432,33 @@ if (!names.contains(r['name']!.toLowerCase())) r
 ]..sort((a, b) =>
 a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
+// the fixed numbers of the class (a removed student leaves a gap)
+final nm = <String, int>{};
+try {
+final nd = await FirebaseFirestore.instance
+    .collection('classNumbers')
+    .doc(cls.id)
+    .get();
+final raw = nd.data()?['nums'];
+if (raw is Map) {
+for (final e in raw.entries) {
+if (e.value is num) nm['${e.key}'] = (e.value as num).toInt();
+}
+}
+} catch (_) {}
+var after = nm.isEmpty ? 0 : nm.values.reduce((a, b) => a > b ? a : b);
+final noOf = <String, int>{};
+for (var i = 0; i < students.length; i++) {
+final id = students[i]['id']!;
+noOf[id] = nm.isEmpty ? i + 1 : (nm[id] ?? ++after);
+}
+students.sort((a, b) {
+final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+return c != 0
+? c
+    : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+});
+
 Map<String, dynamic> marksOf(Map<String, dynamic> r) =>
 r['marks'] is Map ? Map<String, dynamic>.from(r['marks'] as Map) : {};
 
@@ -20453,7 +20480,7 @@ pr++;
 }
 if (!keep(pr, ab)) continue;
 rows.add([
-'${rows.length + 1}',
+'${noOf[s['id']]}',
 s['name']!,
 s['no']!.isEmpty ? '-' : s['no']!,
 s['phone']!.isEmpty ? '-' : s['phone']!,
@@ -20522,7 +20549,7 @@ tp += pr;
 tn += pr + ab;
 if (!keep(pr, ab)) continue;
 rows.add([
-'${rows.length + 1}',
+'${noOf[s['id']]}',
 s['name']!,
 s['no']!.isEmpty ? '-' : s['no']!,
 s['phone']!.isEmpty ? '-' : s['phone']!,
@@ -21016,6 +21043,64 @@ String _rClass = ''; // '' = every class
 String _rShift = ''; // '' = Shift A + Shift B
 String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
 String _show = 'all'; // list filter: all | p (present) | a (absent)
+
+// ---- fixed roll numbers of a class (stored in classNumbers/{classId}) ----
+final Map<String, Map<String, int>> _nums = {};
+final Map<String, String> _numSig = {};
+final Set<String> _numBusy = {};
+
+/// A student keeps the same number. A removed student leaves a vacant
+/// number. A new student takes the first vacant number, or the next number
+/// after the last one when nothing is vacant.
+Future<void> _ensureNumbers(String cid, List<String> idsByName) async {
+final sig = (List<String>.from(idsByName)..sort()).join(',');
+if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
+_numBusy.add(cid);
+try {
+final ref = _db.collection('classNumbers').doc(cid);
+final saved = <String, int>{};
+try {
+final d = await ref.get();
+final m = d.data()?['nums'];
+if (m is Map) {
+for (final e in m.entries) {
+final v = e.value;
+if (v is num) saved['${e.key}'] = v.toInt();
+}
+}
+} catch (_) {}
+final now = idsByName.toSet();
+final keep = {
+for (final e in saved.entries)
+if (now.contains(e.key)) e.key: e.value
+};
+final used = keep.values.toSet();
+var changed = keep.length != saved.length;
+for (final id in idsByName) {
+if (keep.containsKey(id)) continue;
+var n = 1;
+while (used.contains(n)) {
+n++;
+}
+keep[id] = n;
+used.add(n);
+changed = true;
+}
+if (changed) {
+try {
+await ref.set(
+{'nums': keep, 'updatedAt': FieldValue.serverTimestamp()});
+} catch (_) {}
+}
+if (!mounted) return;
+setState(() {
+_nums[cid] = keep;
+_numSig[cid] = sig;
+});
+} finally {
+_numBusy.remove(cid);
+}
+}
 QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
 late DateTime _date = _lastWeekday(DateTime.now());
 // 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
@@ -21376,15 +21461,53 @@ final today = DateTime.now();
 final canEdit = !todayOnly || _sameDay(_date, today);
 final isWeekend = today.weekday > DateTime.friday;
 _current = [for (final r in students) r['id']!];
+
+// fixed numbers: saved ones first; a student without a number yet goes
+// after the last number until it is saved
+final idsByName = [for (final r in students) r['id']!];
+final savedNums = _nums[cid];
+WidgetsBinding.instance.addPostFrameCallback((_) {
+if (mounted) _ensureNumbers(cid, idsByName);
+});
+final noOf = <String, int>{};
+var nextNo = (savedNums == null || savedNums.isEmpty)
+? 0
+    : savedNums.values.reduce((a, b) => a > b ? a : b);
+for (var i = 0; i < idsByName.length; i++) {
+final id = idsByName[i];
+if (savedNums == null) {
+noOf[id] = i + 1;
+} else if (savedNums.containsKey(id)) {
+noOf[id] = savedNums[id]!;
+} else {
+noOf[id] = ++nextNo;
+}
+}
+students.sort((a, b) {
+final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+return c != 0
+? c
+    : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+});
 final absent = students.where((r) => _marks[r['id']] == 'a').length;
 final present = students.length - absent;
-// rows shown (keeps the number of the full list)
-final shownIdx = [
-for (var i = 0; i < students.length; i++)
+// rows shown, in number order. A vacant number (a removed student) is
+// shown as an empty slot (negative number) when the whole list is shown.
+final items = <int>[];
+var prevNo = 0;
+for (var i = 0; i < students.length; i++) {
+final n = noOf[students[i]['id']]!;
+if (_show == 'all') {
+for (var g = prevNo + 1; g < n; g++) {
+items.add(-g);
+}
+}
 if (_show == 'all' ||
-(_show == 'a') == (_marks[students[i]['id']] == 'a'))
-i
-];
+(_show == 'a') == (_marks[students[i]['id']] == 'a')) {
+items.add(i);
+}
+if (n > prevNo) prevNo = n;
+}
 
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
@@ -21545,12 +21668,36 @@ else if (_error != null)
 _msg('Could not load this register.\n$_error', error: true)
 else if (students.isEmpty)
 _msg('This class has no students yet.')
-else if (shownIdx.isEmpty)
+else if (items.isEmpty)
 _msg(_show == 'a'
 ? 'No student is absent.'
     : 'No student is present.')
 else
-for (final i in shownIdx)
+for (final i in items)
+if (i < 0)
+// vacant number: the student was removed
+Container(
+margin: const EdgeInsets.symmetric(vertical: 3),
+padding:
+const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+decoration: BoxDecoration(
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: Colors.black12),
+),
+child: Row(children: [
+SizedBox(
+width: 34,
+child: Text('${-i}',
+style: const TextStyle(
+fontSize: 12, color: Colors.black38))),
+const Text('Vacant',
+style: TextStyle(
+fontSize: 12.5,
+fontStyle: FontStyle.italic,
+color: Colors.black38)),
+]),
+)
+else
 Card(
 margin: const EdgeInsets.symmetric(vertical: 3),
 child: Padding(
@@ -21558,10 +21705,12 @@ padding:
 const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
 child: Row(children: [
 SizedBox(
-width: 26,
-child: Text('${i + 1}',
+width: 34,
+child: Text('${noOf[students[i]['id']]}',
 style: const TextStyle(
-fontSize: 12, color: Colors.black45))),
+fontSize: 12.5,
+fontWeight: FontWeight.w700,
+color: Colors.black54))),
 Expanded(
 child: Column(
 crossAxisAlignment: CrossAxisAlignment.start,
