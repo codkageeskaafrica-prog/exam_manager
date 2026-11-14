@@ -12535,6 +12535,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// Changes which exam owns the papers saved before papers were kept per
+  /// exam (the ones that show under the base exam in Exam Manager).
+  Future<void> _setPaperBase(AppSettings s, String exam) async {
+    if (exam == s.paperBaseExam) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Change the owner of the saved papers?'),
+        content: Text('The papers now shown under "${s.paperBaseExam}" will '
+            'show under "$exam" instead, and "${s.paperBaseExam}" will start '
+            'empty. Nothing is deleted.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Change')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busy = true);
+    try {
+      final db = FirebaseFirestore.instance;
+      final q = await db.collection('exams').where('exam', isEqualTo: exam).get();
+      if (q.docs.any((d) => d.data()['hasFile'] == true)) {
+        throw Exception('"$exam" already has uploaded papers of its own. '
+            'Remove them first (set them back to Pending), then try again.');
+      }
+      // only empty placeholders (e.g. a teacher name): remove them
+      for (final d in q.docs) {
+        await d.reference.delete();
+      }
+      await appSettings.update({'paperBaseExam': exam});
+      _toast('The saved papers now belong to "$exam"');
+    } catch (e) {
+      _toast('Failed: ${'$e'.replaceFirst('Exception: ', '')}');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Widget _examsCard(AppSettings s) {
     final list = s.examOptions;
     return _card('Exams', Icons.event_note, [
@@ -12588,6 +12631,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ]),
         ),
+      if (s.paperBaseExam.isNotEmpty) ...[
+        const Divider(height: 24),
+        const Text('Papers saved before the exams were separated belong to:',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        DropdownButton<String>(
+          isExpanded: true,
+          value: list.contains(s.paperBaseExam) ? s.paperBaseExam : null,
+          items: [
+            for (final e in list) DropdownMenuItem(value: e, child: Text(e)),
+          ],
+          onChanged: _busy ? null : (v) => v == null ? null : _setPaperBase(s, v),
+        ),
+        const Text(
+            'Use this if the old papers show under the wrong exam in Exam Manager.',
+            style: _hint),
+      ],
       const SizedBox(height: 12),
       Row(children: [
         Expanded(
