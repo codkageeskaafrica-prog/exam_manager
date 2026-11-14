@@ -21086,6 +21086,46 @@ final Map<String, Map<String, int>> _nums = {};
 final Map<String, String> _numSig = {};
 final Set<String> _numBusy = {};
 
+/// Removes a vacant number: the students after it move up by one number,
+/// so the numbering has no gap there any more.
+Future<void> _removeVacant(
+String cid, int n, Map<String, int> noOf) async {
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: Text('Remove number $n?'),
+content: Text('The students after number $n move up by one number '
+'(number ${n + 1} becomes $n, and so on). This is used in the '
+'daily attendance and in its reports.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Remove')),
+],
+),
+);
+if (ok != true || !mounted) return;
+final next = {
+for (final e in noOf.entries) e.key: e.value > n ? e.value - 1 : e.value
+};
+try {
+await _db
+    .collection('classNumbers')
+    .doc(cid)
+    .set({'nums': next, 'updatedAt': FieldValue.serverTimestamp()});
+if (!mounted) return;
+setState(() => _nums[cid] = next);
+} catch (e) {
+if (!mounted) return;
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('Could not remove the number: '
+'${'$e'.replaceFirst('Exception: ', '')}')));
+}
+}
+
 /// Saves the fixed numbers of the class (see _assignRollNumbers).
 Future<void> _ensureNumbers(
 String cid, List<Map<String, String>> students) async {
@@ -21690,7 +21730,7 @@ if (i < 0)
 Container(
 margin: const EdgeInsets.symmetric(vertical: 3),
 padding:
-const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
 decoration: BoxDecoration(
 borderRadius: BorderRadius.circular(12),
 border: Border.all(color: Colors.black12),
@@ -21706,6 +21746,17 @@ style: TextStyle(
 fontSize: 12.5,
 fontStyle: FontStyle.italic,
 color: Colors.black38)),
+const Spacer(),
+// removing the number moves the next students up by one
+if (!restricted)
+IconButton(
+tooltip: 'Remove this number',
+visualDensity: VisualDensity.compact,
+iconSize: 19,
+color: Colors.black45,
+icon: const Icon(Icons.delete_outline),
+onPressed: () => _removeVacant(cid, -i, noOf),
+),
 ]),
 )
 else
