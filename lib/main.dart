@@ -21124,6 +21124,38 @@ _numBusy.remove(cid);
 }
 }
 
+QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
+late DateTime _date = _lastWeekday(DateTime.now());
+// 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
+// stay valid)
+String _session = 'am';
+// studentId -> 'a' (absent). Everybody else counts as present (ticked).
+Map<String, String> _marks = {};
+List<String> _current = const []; // ids of the students shown
+bool _exists = false; // a register is already saved for this day / session
+String _loadedKey = '';
+bool _loading = false, _saving = false, _dirty = false;
+String? _error;
+
+static DateTime _lastWeekday(DateTime d) {
+var x = DateTime(d.year, d.month, d.day);
+while (x.weekday > DateTime.friday) {
+x = x.subtract(const Duration(days: 1));
+}
+return x;
+}
+
+static DateTime _monday(DateTime d) {
+final x = DateTime(d.year, d.month, d.day);
+return x.subtract(Duration(days: x.weekday - 1));
+}
+
+static bool _sameDay(DateTime a, DateTime b) =>
+a.year == b.year && a.month == b.month && a.day == b.day;
+
+String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
+String get _docId => '${_classId}_${_dateKey}_$_session';
+
 Future<void> _load() async {
 final id = _classId;
 if (id == null) return;
