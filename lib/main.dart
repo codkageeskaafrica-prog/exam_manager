@@ -67,7 +67,28 @@ class ExamRecord {
     this.allowedTime = '',
   });
 
-  static String idFor(String subject, String form) => '${subject}_$form';
+  /// Papers are kept PER EXAM. The papers saved before this existed belong to
+  /// AppSettings.paperBaseExam and keep their old id; the other exams use
+  /// their own ids (and an `exam` field) so they never mix.
+  static String get _scopeKey {
+    final st = appSettings.value;
+    final cur = st.currentExam;
+    return (st.paperBaseExam.isEmpty || cur == st.paperBaseExam)
+        ? ''
+        : SchoolService.subjectKey(cur);
+  }
+
+  /// True when the table shows an exam other than the base one.
+  static bool get isScoped => _scopeKey.isNotEmpty;
+
+  /// Extra fields every saved record of the current exam carries.
+  static Map<String, Object?> get scopeFields =>
+      isScoped ? {'exam': appSettings.value.currentExam} : const {};
+
+  static String idFor(String subject, String form) {
+    final k = _scopeKey;
+    return k.isEmpty ? '${subject}_$form' : '${subject}_${form}__$k';
+  }
 
   factory ExamRecord.empty(String subject, String form) =>
       ExamRecord(subject: subject, form: form);
@@ -357,11 +378,38 @@ class ZipImportPlan {
 }
 
 class ExamService {
-  static const subjects = [
+  static const defaultSubjects = [
     'English', 'Somali', 'Arabic', 'Islamic', 'Maths',
     'Chemistry', 'Biology', 'Physics', 'History', 'Geography',
   ];
-  static const forms = ['Form1', 'Form2', 'Form3', 'Form4'];
+  static const defaultForms = ['Form1', 'Form2', 'Form3', 'Form4'];
+
+  /// The subjects and forms (classes) of the school. The administrator edits
+  /// them in Settings > Subjects & classes; they are saved in settings/app
+  /// (`subjectList`, `formList`). Until something is saved the defaults apply.
+  static List<String> subjects = List.of(defaultSubjects);
+  static List<String> forms = List.of(defaultForms);
+
+  static List<String> _readNames(Object? v, List<String> def) {
+    if (v is! List) return List.of(def);
+    final seen = <String>{};
+    final l = <String>[
+      for (final e in v)
+        if (e is String && e.trim().isNotEmpty && seen.add(e.trim())) e.trim()
+    ];
+    return l.isEmpty ? List.of(def) : l;
+  }
+
+  /// Reads the saved lists out of the raw settings document.
+  static void applyLists(Map<String, dynamic> m) {
+    subjects = _readNames(m['subjectList'], defaultSubjects);
+    forms = _readNames(m['formList'], defaultForms);
+  }
+
+  static void resetLists() {
+    subjects = List.of(defaultSubjects);
+    forms = List.of(defaultForms);
+  }
 
   final _db = FirebaseFirestore.instance;
   CollectionReference<Map<String, dynamic>> get _files => _db.collection('files');
@@ -371,8 +419,16 @@ class ExamService {
   CollectionReference<Map<String, dynamic>> get _col => _db.collection('exams');
 
   /// Live map of docId -> record. Missing docs mean "Pending".
-  Stream<Map<String, ExamRecord>> watchAll() => _col.snapshots().map((s) => {
-    for (final d in s.docs) d.id: ExamRecord.fromMap(d.data()),
+  /// Only the records of the active exam (the base exam owns the records
+  /// that have no `exam` field).
+  Stream<Map<String, ExamRecord>> watchAll() => _col.snapshots().map((s) {
+    final cur = appSettings.value.currentExam;
+    final scoped = ExamRecord.isScoped;
+    return {
+      for (final d in s.docs)
+        if (scoped ? d.data()['exam'] == cur : d.data()['exam'] == null)
+          d.id: ExamRecord.fromMap(d.data()),
+    };
   });
 
   // ---------------- General school letterhead (one for all) ----------------
@@ -388,6 +444,17 @@ class ExamService {
   Future<Uint8List?> getLetterhead() async {
     final b64 = (await _settings.get()).data()?['letterheadBase64'] as String?;
     return b64 == null ? null : base64Decode(b64);
+  }
+
+  /// The school letterhead as a PDF image (null = none saved or unreadable).
+  Future<pw.MemoryImage?> letterheadPdfImage() async {
+    final b = await getLetterhead();
+    if (b == null) return null;
+    try {
+      return pw.MemoryImage(_sniff(b) != null ? b : await _toPng(b));
+    } catch (_) {
+      return null;
+    }
   }
 
   // ---------------- General exam heading ----------------
@@ -977,7 +1044,8 @@ class ExamService {
           scored.length;
       final gradeCount = <String, int>{};
       for (final x in scored) {
-        final gr = _gradeOf(g.results[x.id]!.average!);
+        final gr = _gradeOf(g.results[x.id]!.average!,
+            max: _gradeMax(exam, SchoolService.formOf(x)));
         gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
       }
 
@@ -1034,7 +1102,10 @@ class ExamService {
               final x = ordered[i];
               final r = g.results[x.id];
               final avg = r?.average;
-              final gr = avg == null ? null : _gradeOf(avg);
+              final gr = avg == null
+                  ? null
+                  : _gradeOf(avg,
+                  max: _gradeMax(exam, SchoolService.formOf(x)));
               return [
                 cell('${i + 1}'),
                 cell(x.name, left: true),
@@ -1120,6 +1191,318 @@ class ExamService {
                 pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
           pw.Text(safe('Grading (average mark): $key'),
               style: const pw.TextStyle(fontSize: 8.5)),
+        ],
+      ));
+    }
+    return doc.save();
+  }
+
+  // ---------------- Combined result report (PDF) ----------------
+  /// One table per group (form / class): a row per student and a column per
+  /// SUBJECT. Total mode: each subject shows the marks of the picked exams
+  /// ADDED, then Total, Out of, %, Grade, Rank. Weighted mode: each subject
+  /// shows the weighted %, then Average %, Grade, Rank. With [detail] the
+  /// value of every exam is printed small under the subject.
+  Future<Uint8List> buildCombinedPdf({
+    required List<String> exams,
+    required Map<String, double> weights,
+    required List<CombinedGroup> groups,
+    required bool missingAsZero,
+    bool detail = false,
+    bool extras = false, // Total mode: Out of, %, Grade, Rank
+  }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
+    final usable = [for (final g in groups) if (g.rows.isNotEmpty) g];
+    if (usable.isEmpty) {
+      throw Exception('There are no students to put in the report.');
+    }
+
+    pw.MemoryImage? headerImg;
+    final letterhead = await getLetterhead();
+    if (letterhead != null) {
+      try {
+        headerImg = pw.MemoryImage(
+            _sniff(letterhead) != null ? letterhead : await _toPng(letterhead));
+      } catch (_) {}
+    }
+    final topImg = headerImg;
+    final stampImg = pw.MemoryImage(base64Decode(_footerStampBase64));
+    final logoImg = pdfLogoImage(LogoPlace.result);
+    final wmBg = pdfWatermark(LogoPlace.result);
+    final heading = await getHeading();
+    final st = appSettings.value;
+
+    String safe(String t) => String.fromCharCodes([
+      for (final r in t.runes)
+        r == 0x2018 || r == 0x2019
+            ? 0x27
+            : r == 0x2013 || r == 0x2014
+            ? 0x2D
+            : r > 255
+            ? 0x3F
+            : r
+    ]);
+    const grey = PdfColor(0.85, 0.85, 0.85);
+    const zebra = PdfColor(0.96, 0.96, 0.96);
+    PdfColor gradeColor(String g) => g == 'A' || g == 'B'
+        ? PdfColors.green800
+        : g == 'C' || g == 'D'
+        ? PdfColors.orange800
+        : PdfColors.red800;
+    pw.Widget bar(String t, {bool boxed = false, double size = 11}) =>
+        pw.Container(
+          width: double.infinity,
+          alignment: pw.Alignment.center,
+          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 4),
+          decoration: pw.BoxDecoration(
+              color: grey, border: boxed ? pw.Border.all(width: 1) : null),
+          child: pw.Text(safe(t),
+              style: pw.TextStyle(fontSize: size, fontWeight: pw.FontWeight.bold)),
+        );
+
+    final theme = pw.ThemeData.withFont(
+        base: pw.Font.times(), bold: pw.Font.timesBold());
+    final doc = pw.Document();
+    final total = exams.fold(0.0, (a, e) => a + (weights[e] ?? 0));
+    final orderLine = exams.join(' / ');
+
+    for (final g in usable) {
+      final sum = g.sumMode;
+      final full = !sum || extras; // show Out of / % / Grade / Rank / *
+      final multi = {for (final r in g.rows) r.classLabel}.length > 1;
+      final subjects = g.subjects;
+      final fs = subjects.length > 8 ? 7.5 : subjects.length > 6 ? 8.5 : 9.5;
+      pw.Widget cell(String t,
+          {bool bold = false, bool left = false, PdfColor? color}) =>
+          pw.Padding(
+            padding: const pw.EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+            child: pw.Align(
+              alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
+              child: pw.Text(safe(t),
+                  style: pw.TextStyle(
+                      fontSize: fs,
+                      color: color,
+                      fontWeight:
+                      bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+            ),
+          );
+      // subject value + (optional) the value of each exam under it
+      pw.Widget subjCell(CombinedRow r, String sub) {
+        final c = r.subjectCombined[sub];
+        if (c == null) return cell('-');
+        final star =
+        full && r.partial.contains(sub) && !missingAsZero ? '*' : '';
+        final small = detail
+            ? exams.map((e) {
+          if (sum) {
+            final v = r.subjectRaw[sub]?[e];
+            return v == null ? '-' : _n1(v);
+          }
+          final v = r.subjectPct[sub]?[e];
+          return v == null ? '-' : '${v.round()}';
+        }).join('/')
+            : '';
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(vertical: 2, horizontal: 1),
+          child: pw.Column(
+            mainAxisSize: pw.MainAxisSize.min,
+            children: [
+              pw.Text(safe('${sum ? _n1(c) : _pct1(c)}$star'),
+                  style: pw.TextStyle(
+                      fontSize: fs, fontWeight: pw.FontWeight.bold)),
+              if (small.isNotEmpty)
+                pw.Text(safe(small),
+                    style: pw.TextStyle(
+                        fontSize: fs - 2.5, color: PdfColors.grey700)),
+            ],
+          ),
+        );
+      }
+
+      final widths = <int, pw.TableColumnWidth>{
+        0: const pw.FixedColumnWidth(26),
+        1: const pw.FlexColumnWidth(4.0),
+        2: const pw.FixedColumnWidth(44),
+      };
+      var col = 3;
+      if (multi) widths[col++] = const pw.FixedColumnWidth(32);
+      for (final _ in subjects) {
+        widths[col++] = pw.FlexColumnWidth(detail ? 1.7 : 1.25);
+      }
+      if (sum) {
+        widths[col++] = const pw.FlexColumnWidth(1.2); // total
+        if (extras) {
+          widths[col++] = const pw.FixedColumnWidth(38); // out of
+          widths[col++] = const pw.FixedColumnWidth(38); // percent
+        }
+      } else {
+        widths[col++] = const pw.FlexColumnWidth(1.3); // average
+      }
+      if (full) {
+        widths[col++] = const pw.FixedColumnWidth(32); // grade
+        widths[col++] = const pw.FixedColumnWidth(32); // rank
+      }
+
+      var anyPartial = false;
+      final rows = <pw.TableRow>[
+        pw.TableRow(
+          repeat: true,
+          decoration: const pw.BoxDecoration(color: grey),
+          children: [
+            cell('No.', bold: true),
+            cell('Student name', bold: true, left: true),
+            cell('ID', bold: true),
+            if (multi) cell('Class', bold: true),
+            for (final sub in subjects) cell(sub, bold: true),
+            if (sum) ...[
+              cell('Total', bold: true),
+              if (extras) ...[
+                cell('Out of', bold: true),
+                cell('%', bold: true),
+              ],
+            ] else
+              cell('Average %', bold: true),
+            if (full) ...[
+              cell('Grade', bold: true),
+              cell('Rank', bold: true),
+            ],
+          ],
+        ),
+        for (var i = 0; i < g.rows.length; i++)
+          pw.TableRow(
+            decoration: i.isOdd ? const pw.BoxDecoration(color: zebra) : null,
+            children: () {
+              final r = g.rows[i];
+              final c = r.combined;
+              final p = r.percent;
+              final gr = p == null ? null : _gradeOf(p);
+              if (r.partial.isNotEmpty) anyPartial = true;
+              return [
+                cell('${i + 1}'),
+                cell(r.student.name, left: true),
+                cell(r.student.studentNo.isEmpty ? '-' : r.student.studentNo),
+                if (multi) cell(r.classLabel),
+                for (final sub in subjects) subjCell(r, sub),
+                if (sum) ...[
+                  cell(c == null ? '-' : _n1(c), bold: true),
+                  if (extras) ...[
+                    cell(c == null ? '-' : _n1(r.totalMax)),
+                    cell(p == null ? '-' : _pct1(p)),
+                  ],
+                ] else
+                  cell(c == null ? '-' : _pct1(c), bold: true),
+                if (full) ...[
+                  cell(gr ?? '-',
+                      bold: true, color: gr == null ? null : gradeColor(gr)),
+                  cell(c == null ? '-' : '${r.rank}', bold: true),
+                ],
+              ];
+            }(),
+          ),
+      ];
+
+      final scored = [for (final r in g.rows) if (r.percent != null) r];
+      final groupAvg = scored.isEmpty
+          ? null
+          : scored.fold(0.0, (a, r) => a + r.percent!) / scored.length;
+      final gradeCount = <String, int>{};
+      for (final r in scored) {
+        final gr = _gradeOf(r.percent!);
+        gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
+      }
+      final totals = [for (final r in g.rows) if (r.combined != null) r.combined!];
+      final totalAvg = totals.isEmpty
+          ? null
+          : totals.fold(0.0, (a, b) => a + b) / totals.length;
+      final stats = '${g.rows.length} students | ${scored.length} with '
+          'results${full ? (groupAvg == null ? '' : ' | average ${_pct1(groupAvg)}%') : (totalAvg == null ? '' : ' | average total ${_n1(totalAvg)}')}';
+      final key = [
+        for (var i = 0; i < AppSettings.gradeLetters.length; i++)
+          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
+        'F below ${_fmtMark(st.grades.last)}',
+      ].join('   ');
+      final counts = [
+        for (final l in [...AppSettings.gradeLetters, 'F'])
+          if ((gradeCount[l] ?? 0) > 0) '$l: ${gradeCount[l]}'
+      ].join('   ');
+      final infoLine = sum
+          ? 'Total of: ${exams.join(' + ')}'
+          : 'Weights: ${exams.map((e) => '$e ${_n1((weights[e] ?? 0) / total * 100)}%').join('  |  ')}';
+
+      doc.addPage(pw.MultiPage(
+        maxPages: 100000,
+        pageTheme: pw.PageTheme(
+          pageFormat: PdfPageFormat.a4.landscape,
+          margin: const pw.EdgeInsets.fromLTRB(28, 20, 28, 20),
+          theme: theme,
+          buildBackground: wmBg,
+        ),
+        footer: (ctx) => pw.Column(
+          mainAxisSize: pw.MainAxisSize.min,
+          children: [
+            pw.Divider(thickness: 0.5),
+            pw.Text(
+                safe('Combined report | ${g.title} | '
+                    'Page ${ctx.pageNumber} of ${ctx.pagesCount}'),
+                textAlign: pw.TextAlign.center,
+                style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 3),
+            pw.Center(child: pw.Image(stampImg, height: 36, fit: pw.BoxFit.contain)),
+          ],
+        ),
+        build: (ctx) => [
+          if (logoImg != null) pdfLogoBlock(logoImg),
+          if (topImg != null)
+            pw.Image(topImg,
+                width: double.infinity, height: 80, fit: pw.BoxFit.contain),
+          pw.SizedBox(height: 6),
+          bar(sum ? 'COMBINED RESULTS - TOTAL MARKS' : 'COMBINED RESULTS - WEIGHTED %',
+              boxed: true, size: 13),
+          bar(g.title.toUpperCase(), size: 15),
+          bar('ACADEMIC YEAR ${heading.academicYear}   |   $stats', size: 10),
+          bar(infoLine, size: 9),
+          pw.SizedBox(height: 8),
+          pw.Table(
+            border: pw.TableBorder.all(width: 0.5),
+            columnWidths: widths,
+            children: rows,
+          ),
+          pw.SizedBox(height: 8),
+          if (full && counts.isNotEmpty)
+            pw.Text(safe('Grades: $counts'),
+                style: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold)),
+          if (full)
+            pw.Text(safe('Grading (${sum ? 'total as a %' : 'average %'}): $key'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (!full)
+            pw.Text(
+                safe('Each subject = the marks of the ticked exams added together. '
+                    'Total = all the subject totals added together.'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (detail)
+            pw.Text(
+                safe(sum
+                    ? 'Bold = the marks of the subject added over the exams. '
+                    'Small numbers under it = the mark in each exam in this '
+                    'order: $orderLine ("-" = no mark).'
+                    : 'Bold = the subject combined over the exams. Small numbers '
+                    'under it = the % of each exam in this order: $orderLine '
+                    '("-" = no mark).'),
+                style: const pw.TextStyle(fontSize: 8.5)),
+          if (full)
+            pw.Text(
+                safe(missingAsZero
+                    ? 'A missing exam counts as 0 (it stays in "Out of").'
+                    : anyPartial
+                    ? (sum
+                    ? '* The subject has no mark in one or more of the exams; only '
+                    'the exams with a mark are added and counted in "Out of".'
+                    : '* The subject has no mark in one or more of the exams; those '
+                    'exams are left out and the other weights re-scaled.')
+                    : 'A missing exam is left out.'),
+                style: const pw.TextStyle(fontSize: 8.5)),
         ],
       ));
     }
@@ -1446,7 +1829,7 @@ class ExamService {
   int scoredCount,
   Map<String, int> gradeCount,
   bool multi,
-  }) _rankResultGroup(ResultReportGroup g) {
+  }) _rankResultGroup(ResultReportGroup g, String exam) {
     final multi =
         {for (final x in g.students) g.sectionLabels[x.id] ?? ''}.length > 1;
     final subjects = [
@@ -1481,7 +1864,8 @@ class ExamService {
         scored.length;
     final gradeCount = <String, int>{};
     for (final x in scored) {
-      final gr = _gradeOf(g.results[x.id]!.average!);
+      final gr = _gradeOf(g.results[x.id]!.average!,
+          max: _gradeMax(exam, SchoolService.formOf(x)));
       gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
     }
     return (
@@ -1567,7 +1951,7 @@ class ExamService {
     final names = <String>[];
 
     for (final g in usable) {
-      final d = _rankResultGroup(g);
+      final d = _rankResultGroup(g, exam);
       final cols = 3 + (d.multi ? 1 : 0) + d.subjects.length + 3;
       final rows = StringBuffer();
       final merges = <String>[];
@@ -1611,7 +1995,9 @@ class ExamService {
       for (final x in d.ordered) {
         final res = g.results[x.id];
         final avg = res?.average;
-        final gr = avg == null ? null : _gradeOf(avg);
+        final gr = avg == null
+            ? null
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(x)));
         final line = StringBuffer('<row r="$r">');
         var k = 0;
         line.write(nc(k++, r, r - 5, 2)); // serial number 1, 2, 3...
@@ -1840,7 +2226,7 @@ class ExamService {
     final body = StringBuffer();
     for (var gi = 0; gi < usable.length; gi++) {
       final g = usable[gi];
-      final d = _rankResultGroup(g);
+      final d = _rankResultGroup(g, exam);
 
       // column widths (twips) that always add up to the page width
       const posW = 650, idW = 1000, totW = 1100, avgW = 1100, gradeW = 850, clsW = 900;
@@ -1896,7 +2282,9 @@ class ExamService {
         final s = d.ordered[i];
         final res = g.results[s.id];
         final avg = res?.average;
-        final gr = avg == null ? null : _gradeOf(avg);
+        final gr = avg == null
+            ? null
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(s)));
         final z = i.isOdd;
         rows.write(tr([
           tc(posW, '${i + 1}', sz: sz, zebraRow: z),
@@ -2096,6 +2484,7 @@ class ExamService {
       String subject, String form, String footer, String teacher,
       {String marks = '', String allowedTime = '', String teacherId = ''}) {
     return _col.doc(ExamRecord.idFor(subject, form)).set({
+      ...ExamRecord.scopeFields,
       'subject': subject,
       'form': form,
       'footer': footer.replaceAll('Teacher: ', '').replaceAll('Teacher:', ''),
@@ -2176,6 +2565,7 @@ class ExamService {
     onProgress?.call(1);
 
     await _col.doc(id).set({
+      ...ExamRecord.scopeFields,
       'subject': current.subject,
       'form': current.form,
       'status': 'received',
@@ -2895,6 +3285,7 @@ class ExamService {
           'updatedAt': FieldValue.serverTimestamp(),
         }).timeout(const Duration(seconds: 40));
         await _col.doc(id).set({
+          ...ExamRecord.scopeFields,
           'subject': it.subject,
           'form': it.form,
           'status': 'received',
@@ -2919,6 +3310,7 @@ class ExamService {
       await _files.doc(ExamRecord.idFor(r.subject, r.form)).delete();
     } catch (_) {}
     await _col.doc(ExamRecord.idFor(r.subject, r.form)).set({
+      ...ExamRecord.scopeFields,
       'status': 'pending',
       'receivedAt': FieldValue.delete(),
       'hasFile': FieldValue.delete(),
@@ -3124,6 +3516,90 @@ class _UploadDialogState extends State<UploadDialog> {
         width: 420,
         child: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (r.received && r.fileName != null)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.description),
+                title: Text(r.fileName!, overflow: TextOverflow.ellipsis),
+                subtitle: const Text('Currently uploaded'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (r.fileName?.toLowerCase().endsWith('.docx') == true)
+                      IconButton(
+                        icon: const Icon(Icons.edit),
+                        tooltip: 'Open and edit document',
+                        onPressed: _busy
+                            ? null
+                            : () => showDialog(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (_) => DocxTextEditorDialog(
+                              record: r, service: widget.service),
+                        ),
+                      ),
+                    IconButton(
+                      icon: const Icon(Icons.download),
+                      tooltip: 'Download',
+                      onPressed: _busy
+                          ? null
+                          : () async {
+                        try {
+                          await widget.service.openFile(r);
+                        } catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context)
+                              .showSnackBar(SnackBar(content: Text('$e')));
+                        }
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Delete file',
+                      color: Theme.of(context).colorScheme.error,
+                      onPressed: _busy ? null : _confirmDelete,
+                    ),
+                  ],
+                ),
+              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: OutlinedButton.icon(
+                    onPressed: _busy ? null : _pick,
+                    icon: const Icon(Icons.attach_file),
+                    label: Text(
+                      _file?.name ??
+                          (r.received ? 'Choose replacement file' : 'Choose file'),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+                if (_file != null)
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: 'Remove selected file',
+                    onPressed: _busy ? null : () => setState(() => _file = null),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Word (.docx) recommended; PDF and images also work. The school '
+                  'letterhead and the footer are added automatically to every page.',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+            if (_status != null) ...[
+              const SizedBox(height: 10),
+              Text(_status!, style: const TextStyle(fontSize: 12)),
+            ],
+            if (_busy) ...[
+              const SizedBox(height: 6),
+              LinearProgressIndicator(value: _progress),
+            ],
+            const Divider(height: 24),
             StreamBuilder<List<TeacherInfo>>(
               stream: _teachers,
               builder: (context, snap) {
@@ -3273,90 +3749,6 @@ class _UploadDialogState extends State<UploadDialog> {
               title: const Text('Number the questions 1. 2. 3. in each part'),
             ),
             if (_addHeading && preview != null) _headingPreview(preview),
-            const SizedBox(height: 16),
-            if (r.received && r.fileName != null)
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.description),
-                title: Text(r.fileName!, overflow: TextOverflow.ellipsis),
-                subtitle: const Text('Currently uploaded'),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (r.fileName?.toLowerCase().endsWith('.docx') == true)
-                      IconButton(
-                        icon: const Icon(Icons.edit),
-                        tooltip: 'Open and edit document',
-                        onPressed: _busy
-                            ? null
-                            : () => showDialog(
-                          context: context,
-                          barrierDismissible: false,
-                          builder: (_) => DocxTextEditorDialog(
-                              record: r, service: widget.service),
-                        ),
-                      ),
-                    IconButton(
-                      icon: const Icon(Icons.download),
-                      tooltip: 'Download',
-                      onPressed: _busy
-                          ? null
-                          : () async {
-                        try {
-                          await widget.service.openFile(r);
-                        } catch (e) {
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context)
-                              .showSnackBar(SnackBar(content: Text('$e')));
-                        }
-                      },
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      tooltip: 'Delete file',
-                      color: Theme.of(context).colorScheme.error,
-                      onPressed: _busy ? null : _confirmDelete,
-                    ),
-                  ],
-                ),
-              ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: OutlinedButton.icon(
-                    onPressed: _busy ? null : _pick,
-                    icon: const Icon(Icons.attach_file),
-                    label: Text(
-                      _file?.name ??
-                          (r.received ? 'Choose replacement file' : 'Choose file'),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
-                if (_file != null)
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    tooltip: 'Remove selected file',
-                    onPressed: _busy ? null : () => setState(() => _file = null),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Word (.docx) recommended; PDF and images also work. The school '
-                  'letterhead and the footer are added automatically to every page.',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
-            ),
-            if (_status != null) ...[
-              const SizedBox(height: 10),
-              Text(_status!, style: const TextStyle(fontSize: 12)),
-            ],
-            if (_busy) ...[
-              const SizedBox(height: 6),
-              LinearProgressIndicator(value: _progress),
-            ],
           ]),
         ),
       ),
@@ -5086,6 +5478,111 @@ class _UploadAllButtonState extends State<_UploadAllButton> {
   }
 }
 
+
+/// Makes [exam] the active exam (asks first). It is opened, the other exams
+/// are closed, and the Exam Manager table shows the papers and exam dates of
+/// that exam. The first time, the admin says which exam the papers saved so
+/// far belong to.
+Future<void> switchActiveExam(BuildContext context, String exam) async {
+  final s = appSettings.value;
+  if (exam == s.currentExam && s.activeExam == exam) return;
+  final messenger = ScaffoldMessenger.of(context);
+  final needBase = s.paperBaseExam.isEmpty && exam != s.currentExam;
+  var base = s.currentExam;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: Text('Make "$exam" the active exam?'),
+        content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('"$exam" is opened for teachers and students and the other '
+                  'exams are closed. The Exam Manager table (papers received, '
+                  'exam dates) is kept separately for each exam.'),
+              if (needBase) ...[
+                const SizedBox(height: 14),
+                const Text('The papers saved in Exam Manager so far belong to:',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                DropdownButton<String>(
+                  isExpanded: true,
+                  value: s.examOptions.contains(base) ? base : null,
+                  items: [
+                    for (final e in s.examOptions)
+                      DropdownMenuItem(value: e, child: Text(e)),
+                  ],
+                  onChanged: (v) => setD(() => base = v ?? base),
+                ),
+              ],
+            ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Make active')),
+        ],
+      ),
+    ),
+  );
+  if (ok != true) return;
+  try {
+    await appSettings.update({
+      'activeExam': exam,
+      'closedExams': [for (final e in s.examOptions) if (e != exam) e],
+      if (needBase) 'paperBaseExam': base,
+    });
+    messenger.showSnackBar(
+        SnackBar(content: Text('"$exam" is now the active exam')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+  }
+}
+
+/// Bar above the Exam Manager table: the exams, the active one highlighted.
+/// An administrator taps another exam to make it active.
+class _ExamSwitchBar extends StatelessWidget {
+  final AppSettings settings;
+  const _ExamSwitchBar({required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final cur = settings.currentExam;
+    return ValueListenableBuilder<TeacherScope>(
+      valueListenable: teacherScope,
+      builder: (context, sc, _) {
+        final canSwitch = !sc.scoped && !sc.isStudent;
+        return Container(
+          width: double.infinity,
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Icon(Icons.event_note, size: 20, color: kBlue),
+              Text(canSwitch ? 'Active exam:' : 'Exam:',
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              for (final e in settings.examOptions)
+                ChoiceChip(
+                  label: Text(e),
+                  selected: e == cur,
+                  onSelected: canSwitch && e != cur
+                      ? (_) => switchActiveExam(context, e)
+                      : null,
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 class ExamTableScreen extends StatelessWidget {
   const ExamTableScreen({super.key});
 
@@ -5177,47 +5674,55 @@ class ExamTableScreen extends StatelessWidget {
           const SizedBox(width: 8),
         ],
       ),
-      body: StreamBuilder<Map<String, ExamRecord>>(
-        stream: service.watchAll(),
-        builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final data = snap.data!;
-          return ValueListenableBuilder<TeacherScope>(
-            valueListenable: teacherScope,
-            builder: (context, sc, _) {
-              if (sc.subjectList.isEmpty || sc.formList.isEmpty) {
-                return const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text(
-                        'No subjects or forms are set on your account.\n'
-                            'Ask the administrator to add them in Teachers.',
-                        textAlign: TextAlign.center),
-                  ),
+      body: ValueListenableBuilder<AppSettings>(
+        valueListenable: appSettings,
+        builder: (context, st, _) => Column(children: [
+          _ExamSwitchBar(settings: st),
+          Expanded(
+            child: StreamBuilder<Map<String, ExamRecord>>(
+              stream: service.watchAll(),
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(child: Text('Error: ${snap.error}'));
+                }
+                if (!snap.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final data = snap.data!;
+                return ValueListenableBuilder<TeacherScope>(
+                  valueListenable: teacherScope,
+                  builder: (context, sc, _) {
+                    if (sc.subjectList.isEmpty || sc.formList.isEmpty) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text(
+                              'No subjects or forms are set on your account.\n'
+                                  'Ask the administrator to add them in Teachers.',
+                              textAlign: TextAlign.center),
+                        ),
+                      );
+                    }
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: ValueListenableBuilder<AppSettings>(
+                            valueListenable: appSettings,
+                            builder: (_, __, ___) =>
+                                _buildTable(context, service, data, sc),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
                 );
-              }
-              return SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Card(
-                    clipBehavior: Clip.antiAlias,
-                    child: ValueListenableBuilder<AppSettings>(
-                      valueListenable: appSettings,
-                      builder: (_, __, ___) =>
-                          _buildTable(context, service, data, sc),
-                    ),
-                  ),
-                ),
-              );
-            },
-          );
-        },
+              },
+            ),
+          ),
+        ]),
       ),
     );
   }
@@ -5322,7 +5827,7 @@ class _SubjectDateCell extends StatelessWidget {
     try {
       await appSettings.update({
         'subjectDates': {
-          SchoolService.subjectKey(subject):
+          appSettings.value.dateKey(subject):
           DateFormat('yyyy-MM-dd').format(picked)
         }
       });
@@ -5336,7 +5841,7 @@ class _SubjectDateCell extends StatelessWidget {
     final messenger = ScaffoldMessenger.of(context);
     try {
       await appSettings.update({
-        'subjectDates': {SchoolService.subjectKey(subject): FieldValue.delete()}
+        'subjectDates': {appSettings.value.dateKey(subject): FieldValue.delete()}
       });
     } catch (e) {
       messenger.showSnackBar(SnackBar(
@@ -6553,8 +7058,433 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
 /// login page) and then signs out.
 Future<void> _signOut(BuildContext context) async {
   Navigator.of(context).popUntil((r) => r.isFirst);
+  try {
+    // must be written while still signed in; never block the sign out
+    await logActivity('logout').timeout(const Duration(seconds: 4));
+  } catch (_) {}
+  stopPresence();
   await FirebaseAuth.instance.signOut();
 }
+
+// ======================= ACTIVITY LOG (Settings > Activity log) =======================
+//
+// Firestore:
+//   activityLog/{auto}  uid, name, email, role, type ('login'|'logout'), time
+//   presence/{uid}      name, role, online (bool), lastSeen
+// A person counts as online while presence.online is true and lastSeen is
+// less than 5 minutes old (the app refreshes it every 2 minutes), so someone
+// who closes the app without signing out drops off the list by itself.
+
+Timer? _presenceTimer;
+
+/// Writes one login / logout event and updates the online marker.
+/// Never throws: the activity log must not stop anybody from signing in.
+Future<void> logActivity(String type, {User? user}) async {
+  final u = user ?? FirebaseAuth.instance.currentUser;
+  if (u == null) return;
+  try {
+    final db = FirebaseFirestore.instance;
+    var name = u.displayName ?? '';
+    var role = '';
+    try {
+      final m = (await db.collection('users').doc(u.uid).get()).data();
+      if (m != null) {
+        if ('${m['name'] ?? ''}'.trim().isNotEmpty) name = '${m['name']}';
+        role = '${m['role'] ?? ''}';
+      }
+    } catch (_) {}
+    if (name.trim().isEmpty) name = u.email ?? u.uid;
+    await db.collection('activityLog').add({
+      'uid': u.uid,
+      'name': name,
+      'email': u.email ?? '',
+      'role': role,
+      'type': type,
+      'time': FieldValue.serverTimestamp(),
+    });
+    await db.collection('presence').doc(u.uid).set({
+      'name': name,
+      'role': role,
+      'online': type == 'login',
+      'lastSeen': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  } catch (_) {}
+}
+
+/// Student events shown in Settings > Activity log:
+///   studentLog/{auto}  type ('added'|'moved'|'deleted'), studentId,
+///   studentName, from, to (class labels), byUid, byName, time
+/// Never throws: logging must not stop a student change from working.
+Future<void> logStudentEvents(List<Map<String, dynamic>> events) async {
+  if (events.isEmpty) return;
+  try {
+    final db = FirebaseFirestore.instance;
+    final u = FirebaseAuth.instance.currentUser;
+    var by = u?.displayName ?? '';
+    if (u != null) {
+      try {
+        final m = (await db.collection('users').doc(u.uid).get()).data();
+        if (m != null && '${m['name'] ?? ''}'.trim().isNotEmpty) {
+          by = '${m['name']}';
+        }
+      } catch (_) {}
+      if (by.trim().isEmpty) by = u.email ?? u.uid;
+    }
+    for (var i = 0; i < events.length; i += 400) {
+      final batch = db.batch();
+      for (final e in events.skip(i).take(400)) {
+        batch.set(db.collection('studentLog').doc(), {
+          'studentId': '',
+          'studentName': '',
+          'from': '',
+          'to': '',
+          ...e,
+          'byUid': u?.uid ?? '',
+          'byName': by,
+          'time': FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+    }
+  } catch (_) {}
+}
+
+/// section id -> readable class label (3C, 3C - Section B ...).
+Future<Map<String, String>> _sectionLabels() async {
+  try {
+    final snap = await FirebaseFirestore.instance.collection('sections').get();
+    return {
+      for (final d in snap.docs) d.id: SectionInfo.fromDoc(d).fullName
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
+/// Refreshes "lastSeen" every 2 minutes while somebody is signed in.
+void startPresence() {
+  _presenceTimer?.cancel();
+  _presenceTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+    final u = FirebaseAuth.instance.currentUser;
+    if (u == null) return;
+    FirebaseFirestore.instance.collection('presence').doc(u.uid).set({
+      'online': true,
+      'lastSeen': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError((_) {});
+  });
+}
+
+void stopPresence() {
+  _presenceTimer?.cancel();
+  _presenceTimer = null;
+}
+
+/// Two cards in Settings > Activity log: the users' logins
+/// (students: false) and the students' changes (students: true).
+class _ActivityLogCard extends StatefulWidget {
+  final bool students;
+  const _ActivityLogCard({this.students = false});
+
+  @override
+  State<_ActivityLogCard> createState() => _ActivityLogCardState();
+}
+
+class _ActivityLogCardState extends State<_ActivityLogCard> {
+  static const _hint = TextStyle(fontSize: 12, color: Colors.black54);
+  static const _onlineFor = Duration(minutes: 5);
+
+  DateTimeRange _range = DateTimeRange(
+    start: DateUtils.dateOnly(DateTime.now()),
+    end: DateUtils.dateOnly(DateTime.now()),
+  );
+  // users card: in = online now | out = last logged out
+  // students card: added | moved | deleted
+  late String _filter = widget.students ? 'added' : 'in';
+  // one document per user: their current state (see logActivity)
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _people =
+  FirebaseFirestore.instance.collection('presence').snapshots();
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    // re-check who is still online once a minute
+    _tick = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _pickRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDateRange: _range,
+    );
+    if (picked != null) setState(() => _range = picked);
+  }
+
+  String _rangeLabel() {
+    final f = DateFormat('d MMM yyyy');
+    return DateUtils.isSameDay(_range.start, _range.end)
+        ? f.format(_range.start)
+        : '${f.format(_range.start)} - ${f.format(_range.end)}';
+  }
+
+  String _role(String r) => r.isEmpty ? '' : UserProfile.roleLabel(r);
+
+  DateTime? _time(Object? v) => v is Timestamp ? v.toDate() : null;
+
+  Widget _row(Map<String, dynamic> m, bool online, DateTime? seen) {
+    final tf = DateFormat('d MMM yyyy, HH:mm');
+    final role = _role('${m['role'] ?? ''}');
+    final signedOut = m['online'] != true;
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 18,
+        backgroundColor: online ? Colors.green.shade50 : Colors.grey.shade200,
+        child: Icon(online ? Icons.circle : Icons.logout,
+            size: online ? 12 : 18,
+            color: online ? Colors.green.shade700 : Colors.black54),
+      ),
+      title: Text('${m['name'] ?? ''}',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: Text(online
+          ? 'Online${role.isEmpty ? '' : ' - $role'}'
+          : '${signedOut ? 'Logged out' : 'Last seen'}'
+          '${role.isEmpty ? '' : ' - $role'}'),
+      trailing: Text(seen == null ? '...' : tf.format(seen), style: _hint),
+    );
+  }
+
+  // ---- student activity (added / transferred / deleted) ----
+  static const _studentTabs = [
+    ('added', 'New students', Icons.person_add_alt_1),
+    ('moved', 'Transferred', Icons.swap_horiz),
+    ('deleted', 'Deleted', Icons.person_remove_alt_1),
+  ];
+
+  Widget _studentRow(Map<String, dynamic> m) {
+    final tf = DateFormat('d MMM yyyy, HH:mm');
+    final type = '${m['type'] ?? ''}';
+    final from = '${m['from'] ?? ''}';
+    final to = '${m['to'] ?? ''}';
+    final by = '${m['byName'] ?? ''}';
+    final color = type == 'added'
+        ? Colors.green.shade700
+        : type == 'moved'
+        ? Colors.blue.shade700
+        : Colors.red.shade700;
+    final icon = _studentTabs.firstWhere((t) => t.$1 == type).$3;
+    final what = type == 'added'
+        ? (to.isEmpty ? 'Added' : 'Added to $to')
+        : type == 'moved'
+        ? '${from.isEmpty ? '?' : from}  ->  ${to.isEmpty ? '?' : to}'
+        : (from.isEmpty ? 'Deleted' : 'Deleted from $from');
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        radius: 18,
+        backgroundColor: color.withOpacity(0.12),
+        child: Icon(icon, size: 18, color: color),
+      ),
+      title: Text('${m['studentName'] ?? ''}',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      subtitle: Text('$what${by.isEmpty ? '' : ' - by $by'}'),
+      trailing: Text(
+          _time(m['time']) == null ? '...' : tf.format(_time(m['time'])!),
+          style: _hint),
+    );
+  }
+
+  Widget _studentLog(String type) {
+    final end = _range.end.add(const Duration(days: 1));
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      // one range on one field: needs no composite index
+      stream: FirebaseFirestore.instance
+          .collection('studentLog')
+          .where('time',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
+          .where('time', isLessThan: Timestamp.fromDate(end))
+          .snapshots(),
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Text(
+              'Could not load the student activity. Check that the '
+                  'Firestore rules allow reading studentLog.\n${snap.error}',
+              style: const TextStyle(color: Colors.red));
+        }
+        if (!snap.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final rows = [
+          for (final d in snap.data!.docs)
+            if (d.data()['type'] == type) d.data()
+        ]..sort((a, b) {
+          final x = _time(a['time']), y = _time(b['time']);
+          if (x == null || y == null) return 0;
+          return y.compareTo(x);
+        });
+        final label = _studentTabs.firstWhere((t) => t.$1 == type).$2;
+        final empty = type == 'added'
+            ? 'No new students on this date.'
+            : type == 'moved'
+            ? 'No students were transferred on this date.'
+            : 'No students were deleted on this date.';
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 12),
+            Text('$label (${rows.length})',
+                style:
+                const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _pickRange,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(_rangeLabel()),
+            ),
+            if (rows.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(empty, style: _hint),
+              )
+            else
+              for (final m in rows) _studentRow(m),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _loginLog() {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _people,
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Text(
+              'Could not load the activity log. Check that the '
+                  'Firestore rules allow the administrator to read '
+                  'presence.\n${snap.error}',
+              style: const TextStyle(color: Colors.red));
+        }
+        if (!snap.hasData) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final cutoff = DateTime.now().subtract(_onlineFor);
+        final end = _range.end.add(const Duration(days: 1));
+        final online = <(Map<String, dynamic>, DateTime?)>[];
+        final out = <(Map<String, dynamic>, DateTime?)>[];
+        for (final d in snap.data!.docs) {
+          final m = d.data();
+          final seen = _time(m['lastSeen']);
+          if (m['online'] == true && seen != null && seen.isAfter(cutoff)) {
+            online.add((m, seen));
+          } else if (seen != null &&
+              !seen.isBefore(_range.start) &&
+              seen.isBefore(end)) {
+            out.add((m, seen));
+          }
+        }
+        online.sort((a, b) => '${a.$1['name']}'.compareTo('${b.$1['name']}'));
+        out.sort((a, b) => b.$2!.compareTo(a.$2!));
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_filter == 'in') ...[
+              const SizedBox(height: 12),
+              Text('Online now (${online.length})',
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w700)),
+              if (online.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('Nobody is online right now.', style: _hint),
+                )
+              else
+                for (final p in online) _row(p.$1, true, p.$2),
+            ],
+            if (_filter == 'out') ...[
+              const Divider(height: 28),
+              const Text('Last logged out',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _pickRange,
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(_rangeLabel()),
+              ),
+              if (out.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text('Nobody logged out on this date.', style: _hint),
+                )
+              else
+                for (final p in out) _row(p.$1, false, p.$2),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.students ? 'Students activity' : 'Users activity',
+                style:
+                const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text(
+                widget.students
+                    ? 'New, transferred and deleted students'
+                    : 'Who logged in or out, and who is online',
+                style: _hint),
+            const SizedBox(height: 10),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final f in widget.students
+                  ? [for (final t in _studentTabs) (t.$1, t.$2)]
+                  : [('in', 'Logged in'), ('out', 'Logged out')])
+                ChoiceChip(
+                  label: Text(f.$2),
+                  selected: _filter == f.$1,
+                  onSelected: (_) => setState(() => _filter = f.$1),
+                ),
+            ]),
+            if (_filter == 'in' || _filter == 'out')
+              _loginLog()
+            else
+              _studentLog(_filter),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 
 /// Lets the signed-in person (teacher, student, administrator) change their
 /// own password: the current password is asked first.
@@ -6730,10 +7660,12 @@ class AppPages {
   static const sections = 'sections';
   static const students = 'students';
   static const attendance = 'attendance';
+  static const daily = 'daily';
   static const result = 'result';
   static const schedule = 'schedule';
   static const teachers = 'teachers';
   static const finance = 'finance';
+  static const discipline = 'discipline';
   static const settings = 'settings';
 
   static const all = [
@@ -6742,10 +7674,12 @@ class AppPages {
     sections,
     students,
     attendance,
+    daily,
     result,
     schedule,
     teachers,
     finance,
+    discipline,
     settings,
   ];
   static const labels = {
@@ -6754,10 +7688,12 @@ class AppPages {
     sections: 'Sections',
     students: 'Students',
     attendance: 'Attendance',
+    daily: 'Daily attendance',
     result: 'Result',
     schedule: 'Schedule',
     teachers: 'Teachers',
     finance: 'Finance',
+    discipline: 'Discipline',
     settings: 'Settings',
   };
 }
@@ -6765,8 +7701,11 @@ class AppPages {
 /// Who the signed-in person is and which pages they may open
 /// (Firestore: users/{uid}).
 ///  - role 'admin'   : sees every page and manages the permissions.
-///  - role 'affairs' (student affairs): sees only the pages in `access`;
-///    when `access` is not set, the default of that role.
+///  - role 'affairs' (student affairs): NOT full access. Sees only the pages
+///    in `access` (default: Settings > Users > Default access).
+///  - role 'finance': sees the pages in `access` (default: Finance only) and,
+///    when the administrator ticked classes (`financeSections`), only those
+///    classes. No class ticked = every class.
 ///  - role 'teacher' / 'student': sees the
 ///    pages in `access`; when `access`
 ///    is not set, the default of that role (Settings > Users & permissions).
@@ -6788,6 +7727,14 @@ class UserProfile {
 
   /// The administrator refused this sign up.
   final bool rejected;
+
+  /// Finance role: the classes (whole classes like 1A) this person may manage.
+  /// Empty = every class.
+  final List<String> financeSections;
+
+  /// Class monitor: the classes (whole classes like 1A) this person takes the
+  /// DAILY attendance of. Set by the administrator in Settings > Users.
+  final List<String> monitorSections;
   const UserProfile({
     required this.uid,
     required this.role,
@@ -6800,24 +7747,37 @@ class UserProfile {
     this.pending = false,
     this.approved = true,
     this.rejected = false,
+    this.financeSections = const [],
+    this.monitorSections = const [],
   });
 
-  static const roles = ['admin', 'teacher', 'affairs', 'student'];
+  static const roles = ['admin', 'teacher', 'affairs', 'finance', 'student'];
   static String roleLabel(String r) => r == 'affairs'
       ? 'Student affairs'
       : (r.isEmpty ? r : r[0].toUpperCase() + r.substring(1));
 
   bool get isAdmin => role == 'admin';
 
-  /// Only administrators can open everything.
+  /// Only administrators can open everything. Full access can only be
+  /// given by assigning the Admin account type.
   bool get fullAccess => role == 'admin';
 
   List<String> effectiveAccess(AppSettings st) {
     if (fullAccess) return AppPages.all;
+    final base = _baseAccess(st);
+    // a class monitor always gets the Daily attendance page
+    if (monitorSections.isNotEmpty && !base.contains(AppPages.daily)) {
+      return [...base, AppPages.daily];
+    }
+    return base;
+  }
+
+  List<String> _baseAccess(AppSettings st) {
     final a = access;
     if (a != null) return a;
     if (role == 'student') return st.studentAccess;
     if (role == 'affairs') return st.affairsAccess;
+    if (role == 'finance') return st.financeAccess;
     return st.teacherAccess;
   }
 
@@ -6836,6 +7796,18 @@ class UserProfile {
       pending: m['pendingLogin'] == true,
       approved: m['approved'] != false,
       rejected: m['rejected'] == true,
+      financeSections: m['financeSections'] is List
+          ? [
+        for (final e in (m['financeSections'] as List))
+          if (e is String) e
+      ]
+          : const <String>[],
+      monitorSections: m['monitorSections'] is List
+          ? [
+        for (final e in (m['monitorSections'] as List))
+          if (e is String) e
+      ]
+          : const <String>[],
       access: a is List
           ? [
         for (final e in a)
@@ -6957,6 +7929,10 @@ class TeacherScope {
   /// A student account: sees only the own record (see [_LinkStudentBody]).
   final bool isStudent;
   final String studentId, sectionId;
+
+  /// A Finance account: limited to these classes (empty = every class).
+  final bool isFinance;
+  final List<String> financeSectionIds;
   const TeacherScope({
     this.restricted = false,
     this.allSections = false,
@@ -6966,6 +7942,8 @@ class TeacherScope {
     this.isStudent = false,
     this.studentId = '',
     this.sectionId = '',
+    this.isFinance = false,
+    this.financeSectionIds = const [],
   });
 
   /// Limited to a part of the data (a teacher or a student).
@@ -6997,6 +7975,14 @@ class TeacherScope {
 
   List<SectionInfo> filterSections(List<SectionInfo> l) {
     if (isStudent) return [for (final s in l) if (s.id == sectionId) s];
+    if (isFinance && financeSectionIds.isNotEmpty) {
+      // the ticked classes and the sections they were divided into
+      final keys = {
+        for (final s in l)
+          if (financeSectionIds.contains(s.id)) '${s.form}|${s.classKey}'
+      };
+      return [for (final s in l) if (keys.contains('${s.form}|${s.classKey}')) s];
+    }
     if (allSections) return l;
     return restricted ? [for (final s in l) if (forms.contains(s.form)) s] : l;
   }
@@ -7113,6 +8099,12 @@ class _ScopeGateState extends State<_ScopeGate> {
         isStudent: true,
         studentId: _stuWatched,
         sectionId: '${_stu?['sectionId'] ?? ''}',
+      );
+    } else if (role == 'finance') {
+      final fs = _user?['financeSections'];
+      teacherScope.value = TeacherScope(
+        isFinance: true,
+        financeSectionIds: fs is List ? [for (final e in fs) if (e is String) e] : const <String>[],
       );
     } else if (role == 'teacher') {
       final asg = parseTeacherAssignments(_teacher);
@@ -7249,7 +8241,7 @@ class _WaitingApprovalScreen extends StatelessWidget {
                   ],
                   const SizedBox(height: 16),
                   OutlinedButton.icon(
-                    onPressed: () => FirebaseAuth.instance.signOut(),
+                    onPressed: () => _signOut(context),
                     icon: const Icon(Icons.logout, size: 18),
                     label: const Text('Sign out'),
                   ),
@@ -7539,6 +8531,14 @@ class HomeScreen extends StatelessWidget {
       builder: (_) => const AttendanceScreen(),
     ),
     _HomeItem(
+      page: AppPages.daily,
+      title: 'Daily attendance',
+      subtitle: 'Shift A and Shift B attendance, Monday to Friday',
+      icon: Icons.how_to_reg,
+      color: const Color(0xFF16A085),
+      builder: (_) => const DailyAttendanceScreen(),
+    ),
+    _HomeItem(
       page: AppPages.result,
       title: 'Result',
       subtitle: 'Enter and view exam results by form, class and section',
@@ -7569,6 +8569,14 @@ class HomeScreen extends StatelessWidget {
       icon: Icons.account_balance_wallet,
       color: const Color(0xFFB7950B),
       builder: (_) => const FinanceScreen(),
+    ),
+    _HomeItem(
+      page: AppPages.discipline,
+      title: 'Discipline',
+      subtitle: 'Record and review student incidents school-wide',
+      icon: Icons.gavel,
+      color: const Color(0xFFC0392B),
+      builder: (_) => const DisciplineScreen(),
     ),
     _HomeItem(
       page: AppPages.settings,
@@ -7718,6 +8726,1608 @@ class _HomeCard extends StatelessWidget {
     );
   }
 }
+
+// ======================= DISCIPLINE =======================
+//
+// Firestore: discipline/{auto}
+//   date (Timestamp, midnight), type, severity, action, note,
+//   studentId, studentName, sectionId, classLabel,
+//   createdBy, createdByName, createdByRole, createdAt,
+//   updatedBy, updatedByName, updatedAt
+//
+// Who may do what (also enforce this in firestore.rules):
+//   create : admin, affairs (Student affairs), teacher
+//   edit   : admin, affairs
+//   delete : admin
+
+class DisciplineRules {
+  static const defaultTypes = [
+    'Late arrival',
+    'Skipping class',
+    'Disrespect',
+    'Disrupting class',
+    'Fighting',
+    'Bullying',
+    'Cheating',
+    'Uniform violation',
+    'Phone misuse',
+    'Damage to property',
+    'Other',
+  ];
+  static const defaultSeverities = ['Minor', 'Moderate', 'Severe'];
+  static const defaultActions = [
+    'Verbal warning',
+    'Written warning',
+    'Parent contacted',
+    'Detention',
+    'Referred to counselor',
+    'Suspension',
+    'No action',
+    'Other',
+  ];
+
+  /// The lists shown in the form. The administrator can change them
+  /// (Firestore: settings/discipline = {types, severities, actions}).
+  static List<String> types = List.of(defaultTypes);
+  static List<String> severities = List.of(defaultSeverities);
+  static List<String> actions = List.of(defaultActions);
+
+  static DocumentReference<Map<String, dynamic>> get _doc =>
+      FirebaseFirestore.instance.collection('settings').doc('discipline');
+
+  /// Live copy of the saved lists (a list that was never saved keeps its
+  /// default).
+  static StreamSubscription<DocumentSnapshot<Map<String, dynamic>>> watch(
+      void Function() changed) {
+    return _doc.snapshots().listen((d) {
+      final m = d.data() ?? {};
+      List<String> read(String k, List<String> def) {
+        final v = m[k];
+        if (v is! List) return List.of(def);
+        final l = [
+          for (final e in v)
+            if (e is String && e.trim().isNotEmpty) e.trim()
+        ];
+        return l.isEmpty ? List.of(def) : l;
+      }
+
+      types = read('types', defaultTypes);
+      severities = read('severities', defaultSeverities);
+      actions = read('actions', defaultActions);
+      changed();
+    }, onError: (_) {});
+  }
+
+  /// Saves one list ('types', 'severities' or 'actions').
+  static Future<void> saveList(String field, List<String> list) async {
+    await _doc.set({
+      field: list,
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    switch (field) {
+      case 'types':
+        types = List.of(list);
+      case 'severities':
+        severities = List.of(list);
+      case 'actions':
+        actions = List.of(list);
+    }
+  }
+
+  static const _palette = [
+    Color(0xFFF1C40F),
+    Color(0xFFE67E22),
+    kRed,
+    Color(0xFF8E44AD),
+    Color(0xFF795548),
+  ];
+
+  /// Colour by position in the list: lightest first, most serious last.
+  static Color severityColor(String s) {
+    final i = severities.indexOf(s);
+    final n = severities.length;
+    if (i < 0) return const Color(0xFF90A4AE);
+    if (n == 1) return _palette[0];
+    if (n == 2) return i == 0 ? _palette[0] : _palette[2];
+    return _palette[i % _palette.length];
+  }
+
+  static bool canCreate(UserProfile? p) =>
+      p != null && (p.role == 'admin' || p.role == 'affairs' || p.role == 'teacher');
+  static bool canEdit(UserProfile? p) =>
+      p != null && (p.role == 'admin' || p.role == 'affairs');
+  static bool canDelete(UserProfile? p) => p != null && p.role == 'admin';
+}
+
+class DisciplineRecord {
+  final String id, studentId, studentName, sectionId, classLabel;
+  final String type, severity, action, note;
+  final String createdByName, updatedByName;
+  final DateTime date;
+  const DisciplineRecord({
+    required this.id,
+    required this.date,
+    required this.studentId,
+    required this.studentName,
+    required this.sectionId,
+    required this.classLabel,
+    required this.type,
+    required this.severity,
+    required this.action,
+    required this.note,
+    this.createdByName = '',
+    this.updatedByName = '',
+  });
+
+  factory DisciplineRecord.fromDoc(QueryDocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data();
+    String s(String k) => '${m[k] ?? ''}';
+    return DisciplineRecord(
+      id: d.id,
+      date: (m['date'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      studentId: s('studentId'),
+      studentName: s('studentName'),
+      sectionId: s('sectionId'),
+      classLabel: s('classLabel'),
+      type: s('type'),
+      severity: s('severity'),
+      action: s('action'),
+      note: s('note'),
+      createdByName: s('createdByName'),
+      updatedByName: s('updatedByName'),
+    );
+  }
+}
+
+/// School-wide discipline page (main menu > Discipline).
+class DisciplineScreen extends StatefulWidget {
+  const DisciplineScreen({super.key});
+
+  @override
+  State<DisciplineScreen> createState() => _DisciplineScreenState();
+}
+
+class _DisciplineScreenState extends State<DisciplineScreen> {
+  final _db = FirebaseFirestore.instance;
+  final _me = UserProfile.watchMine();
+  final _fmt = DateFormat('d MMM y');
+
+  DateTimeRange? _range; // null = all time
+  String _sectionId = ''; // '' = all classes
+  String _severity = ''; // '' = all severities
+  String _query = ''; // student name search
+
+  List<SectionInfo> _sections = [];
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _secSub;
+  late Stream<List<DisciplineRecord>> _records;
+  final _searchCtl = TextEditingController();
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _optSub;
+  List<DisciplineRecord> _shown = const [];
+
+  List<DisciplineRecord> _apply(List<DisciplineRecord> all) {
+    final q = _query.trim().toLowerCase();
+    return [
+      for (final r in all)
+        if ((_sectionId.isEmpty || r.sectionId == _sectionId) &&
+            (_severity.isEmpty || r.severity == _severity) &&
+            (q.isEmpty || r.studentName.toLowerCase().contains(q)))
+          r
+    ];
+  }
+
+  DisciplineReport _buildReport() {
+    final r = _range;
+    final cls = _sections.where((x) => x.id == _sectionId).toList();
+    return DisciplineReport(
+      items: _shown,
+      period: r == null
+          ? 'All dates'
+          : '${_fmt.format(r.start)} - ${_fmt.format(r.end)}',
+      filters: [
+        if (cls.isNotEmpty) 'Class: ${cls.first.fullName}',
+        if (_severity.isNotEmpty) 'Severity: $_severity',
+        if (_query.trim().isNotEmpty) 'Student: ${_query.trim()}',
+      ].join('  |  '),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final t = DateTime.now();
+    final today = DateTime(t.year, t.month, t.day);
+    _range = DateTimeRange(
+        start: today.subtract(const Duration(days: 29)), end: today);
+    _records = _buildStream();
+    _optSub = DisciplineRules.watch(() {
+      if (mounted) setState(() {});
+    });
+    // every section of the school (the page is school-wide, so a teacher's
+    // form restriction is not applied here)
+    _secSub = _db.collection('sections').snapshots().listen((s) {
+      final l = s.docs.map(SectionInfo.fromDoc).toList()
+        ..sort((a, b) =>
+            a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+      if (mounted) setState(() => _sections = l);
+    }, onError: (_) {});
+  }
+
+  @override
+  void dispose() {
+    _secSub?.cancel();
+    _optSub?.cancel();
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
+  /// The date range is filtered by Firestore; class and severity are filtered
+  /// on the device (no composite indexes needed).
+  Stream<List<DisciplineRecord>> _buildStream() {
+    Query<Map<String, dynamic>> q = _db.collection('discipline');
+    final r = _range;
+    if (r != null) {
+      q = q
+          .where('date',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(r.start))
+          .where('date',
+          isLessThan:
+          Timestamp.fromDate(r.end.add(const Duration(days: 1))));
+    }
+    q = q.orderBy('date', descending: true).limit(1000);
+    return q
+        .snapshots()
+        .map((s) => s.docs.map(DisciplineRecord.fromDoc).toList());
+  }
+
+  void _snack(String t) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+  }
+
+  Future<void> _pickRange() async {
+    final now = DateTime.now();
+    final r = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year, now.month, now.day),
+      initialDateRange: _range,
+    );
+    if (r == null) return;
+    setState(() {
+      _range = r;
+      _records = _buildStream();
+    });
+  }
+
+  void _allTime() => setState(() {
+    _range = null;
+    _records = _buildStream();
+  });
+
+  void _reset() {
+    final t = DateTime.now();
+    final today = DateTime(t.year, t.month, t.day);
+    setState(() {
+      _range = DateTimeRange(
+          start: today.subtract(const Duration(days: 29)), end: today);
+      _sectionId = '';
+      _severity = '';
+      _query = '';
+      _searchCtl.clear();
+      _records = _buildStream();
+    });
+  }
+
+  Future<void> _openEditor(UserProfile me, {DisciplineRecord? rec}) async {
+    if (rec == null && !DisciplineRules.canCreate(me)) return;
+    if (rec != null && !DisciplineRules.canEdit(me)) return;
+    final data = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (_) => _IncidentDialog(
+          sections: _sections, record: rec, canManage: me.role == 'admin'),
+    );
+    if (data == null) return;
+    final who = me.name.trim().isNotEmpty ? me.name.trim() : me.email;
+    try {
+      final col = _db.collection('discipline');
+      if (rec == null) {
+        await col.add({
+          ...data,
+          'createdBy': me.uid,
+          'createdByName': who,
+          'createdByRole': me.role,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+        _snack('Incident saved.');
+      } else {
+        await col.doc(rec.id).update({
+          ...data,
+          'updatedBy': me.uid,
+          'updatedByName': who,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+        _snack('Incident updated.');
+      }
+    } catch (e) {
+      _snack('Could not save: $e');
+    }
+  }
+
+  Future<void> _delete(UserProfile me, DisciplineRecord r) async {
+    if (!DisciplineRules.canDelete(me)) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete incident?'),
+        content: Text(
+            '${r.studentName} - ${r.type} (${_fmt.format(r.date)}) will be '
+                'deleted permanently.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _db.collection('discipline').doc(r.id).delete();
+      _snack('Incident deleted.');
+    } catch (e) {
+      _snack('Could not delete: $e');
+    }
+  }
+
+  Widget _filters() {
+    final r = _range;
+    final sectionValue =
+    _sections.any((s) => s.id == _sectionId) ? _sectionId : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          OutlinedButton.icon(
+            icon: const Icon(Icons.date_range),
+            label: Text(r == null
+                ? 'All dates'
+                : '${_fmt.format(r.start)} - ${_fmt.format(r.end)}'),
+            onPressed: _pickRange,
+          ),
+          if (r != null)
+            TextButton(onPressed: _allTime, child: const Text('All dates')),
+          SizedBox(
+            width: 220,
+            child: TextField(
+              controller: _searchCtl,
+              onChanged: (v) => setState(() => _query = v),
+              decoration: InputDecoration(
+                labelText: 'Search student',
+                isDense: true,
+                border: const OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () => setState(() {
+                      _query = '';
+                      _searchCtl.clear();
+                    })),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 190,
+            child: DropdownButtonFormField<String>(
+              value: sectionValue,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                  labelText: 'Class',
+                  isDense: true,
+                  border: OutlineInputBorder()),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('All classes')),
+                for (final s in _sections)
+                  DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+              ],
+              onChanged: (v) => setState(() => _sectionId = v ?? ''),
+            ),
+          ),
+          Wrap(spacing: 6, children: [
+            ChoiceChip(
+              label: const Text('All severities'),
+              selected: _severity.isEmpty,
+              onSelected: (_) => setState(() => _severity = ''),
+            ),
+            for (final s in DisciplineRules.severities)
+              ChoiceChip(
+                label: Text(s),
+                selected: _severity == s,
+                selectedColor:
+                DisciplineRules.severityColor(s).withOpacity(0.35),
+                onSelected: (_) => setState(() => _severity = s),
+              ),
+          ]),
+          IconButton(
+              tooltip: 'Reset filters',
+              icon: const Icon(Icons.filter_alt_off),
+              onPressed: _reset),
+        ],
+      ),
+    );
+  }
+
+  Widget _card(UserProfile? me, DisciplineRecord r) {
+    final c = DisciplineRules.severityColor(r.severity);
+    final canEdit = DisciplineRules.canEdit(me);
+    final canDelete = DisciplineRules.canDelete(me);
+    final by = [
+      if (r.createdByName.isNotEmpty) 'Recorded by ${r.createdByName}',
+      if (r.updatedByName.isNotEmpty) 'edited by ${r.updatedByName}',
+    ].join(' · ');
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      clipBehavior: Clip.antiAlias,
+      child: IntrinsicHeight(
+        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Container(width: 6, color: c),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Expanded(
+                      child: Text(
+                          r.classLabel.isEmpty
+                              ? r.studentName
+                              : '${r.studentName}  (${r.classLabel})',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                    Chip(
+                      visualDensity: VisualDensity.compact,
+                      side: BorderSide(color: c),
+                      backgroundColor: c.withOpacity(0.15),
+                      label: Text(r.severity,
+                          style: TextStyle(
+                              fontWeight: FontWeight.w600, color: c)),
+                    ),
+                    if (canEdit || canDelete)
+                      PopupMenuButton<String>(
+                        tooltip: 'More',
+                        onSelected: (v) {
+                          if (v == 'edit' && me != null) {
+                            _openEditor(me, rec: r);
+                          }
+                          if (v == 'delete' && me != null) _delete(me, r);
+                        },
+                        itemBuilder: (_) => [
+                          if (canEdit)
+                            const PopupMenuItem(
+                                value: 'edit',
+                                child: ListTile(
+                                    leading: Icon(Icons.edit),
+                                    title: Text('Edit'))),
+                          if (canDelete)
+                            const PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                    leading:
+                                    Icon(Icons.delete, color: kRed),
+                                    title: Text('Delete'))),
+                        ],
+                      )
+                    else
+                      const SizedBox(width: 12),
+                  ]),
+                  const SizedBox(height: 2),
+                  Text('${r.type}  ·  ${_fmt.format(r.date)}',
+                      style: const TextStyle(color: Colors.black54)),
+                  const SizedBox(height: 6),
+                  Text.rich(TextSpan(children: [
+                    const TextSpan(
+                        text: 'Action taken: ',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    TextSpan(text: r.action),
+                  ])),
+                  if (r.note.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(r.note),
+                  ],
+                  if (by.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(by,
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.black45)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _me,
+      builder: (context, ps) {
+        final me = ps.data;
+        return Scaffold(
+          appBar: AppBar(title: const Text('Discipline'), actions: [
+            _DisciplineReportButton(report: _buildReport),
+            const SizedBox(width: 8),
+          ]),
+          floatingActionButton: DisciplineRules.canCreate(me)
+              ? FloatingActionButton.extended(
+            onPressed: () => _openEditor(me!),
+            icon: const Icon(Icons.add),
+            label: const Text('New incident'),
+          )
+              : null,
+          body: Column(children: [
+            _filters(),
+            Expanded(
+              child: StreamBuilder<List<DisciplineRecord>>(
+                stream: _records,
+                builder: (context, s) {
+                  if (s.hasError) {
+                    return Center(
+                        child: Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Text(
+                                'Could not load the incidents.\n${s.error}',
+                                textAlign: TextAlign.center)));
+                  }
+                  if (!s.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final list = _apply(s.data!);
+                  _shown = list;
+                  if (list.isEmpty) {
+                    return const Center(
+                        child: Text('No incidents match these filters.'));
+                  }
+                  return Column(children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                            '${list.length} incident${list.length == 1 ? '' : 's'}',
+                            style: const TextStyle(color: Colors.black54)),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 90),
+                        itemCount: list.length,
+                        itemBuilder: (_, i) => _card(me, list[i]),
+                      ),
+                    ),
+                  ]);
+                },
+              ),
+            ),
+          ]),
+        );
+      },
+    );
+  }
+}
+
+/// Add / edit one incident. Returns the fields to save, or null.
+/// - Class (optional) then Student: type a name to search. With no class
+///   chosen the search covers every student; with a class chosen it only
+///   covers that class.
+/// - Incident type / Action taken: tick one or more checkboxes.
+/// - Severity: tick one checkbox (ticking another replaces it).
+/// - An administrator can add / delete the options of every list.
+/// Several ticked values are saved as "A, B" in the same text field the old
+/// dropdown used, so existing records, cards and filters keep working.
+class _IncidentDialog extends StatefulWidget {
+  final List<SectionInfo> sections;
+  final DisciplineRecord? record;
+  final bool canManage; // administrator: can edit the option lists
+  const _IncidentDialog(
+      {required this.sections, this.record, this.canManage = false});
+
+  @override
+  State<_IncidentDialog> createState() => _IncidentDialogState();
+}
+
+typedef _Stu = ({String id, String name, String sectionId});
+
+class _IncidentDialogState extends State<_IncidentDialog> {
+  final _note = TextEditingController();
+  final _search = TextEditingController();
+  final _searchFocus = FocusNode();
+  late DateTime _date;
+  String _classId = ''; // '' = all classes
+  _Stu? _student;
+  final Set<String> _types = {}, _actions = {};
+  String _severity = '';
+  List<_Stu> _all = [];
+  bool _loading = false;
+  String? _err;
+
+  bool get _editing => widget.record != null;
+
+  /// Only whole classes (1A, 3C ...) are offered, not their sections.
+  List<SectionInfo> get _classes =>
+      widget.sections.where((s) => !s.isSub).toList();
+
+  static Set<String> _split(String s) =>
+      {for (final p in s.split(',')) if (p.trim().isNotEmpty) p.trim()};
+
+  @override
+  void initState() {
+    super.initState();
+    final r = widget.record;
+    final t = DateTime.now();
+    _date = r?.date ?? DateTime(t.year, t.month, t.day);
+    if (r != null) {
+      _classId = r.sectionId;
+      _student =
+      (id: r.studentId, name: r.studentName, sectionId: r.sectionId);
+      _search.text = r.studentName;
+      _types.addAll(_split(r.type));
+      _severity = r.severity;
+      _actions.addAll(_split(r.action));
+      _note.text = r.note;
+    } else {
+      _loadStudents();
+    }
+  }
+
+  @override
+  void dispose() {
+    _note.dispose();
+    _search.dispose();
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  /// Loads every student once; the search then runs on the device.
+  Future<void> _loadStudents() async {
+    setState(() => _loading = true);
+    try {
+      final snap =
+      await FirebaseFirestore.instance.collection('students').get();
+      final l = [
+        for (final d in snap.docs)
+          (
+          id: d.id,
+          name: '${d.data()['name'] ?? ''}'.trim(),
+          sectionId: '${d.data()['sectionId'] ?? ''}',
+          )
+      ]
+        ..removeWhere((s) => s.name.isEmpty)
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      // A student of a section ("3C - Section B") is also listed in the
+      // whole class (3C): keep only the class record, so the search shows
+      // classes only. A section-only student is kept.
+      final subIds = {
+        for (final c in widget.sections)
+          if (c.isSub) c.id: c
+      };
+      final classIdOf = <String, String>{}; // sub section id -> class id
+      for (final sub in subIds.values) {
+        for (final c in widget.sections) {
+          if (!c.isSub &&
+              c.form == sub.form &&
+              c.name.toUpperCase() == sub.classKey) {
+            classIdOf[sub.id] = c.id;
+          }
+        }
+      }
+      final inClass = {for (final x in l) '${x.sectionId}|${x.name.toLowerCase()}'};
+      l.removeWhere((x) {
+        final cid = classIdOf[x.sectionId];
+        return cid != null && inClass.contains('$cid|${x.name.toLowerCase()}');
+      });
+      if (!mounted) return;
+      setState(() {
+        _all = l;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _err = 'Could not load the students: $e';
+      });
+    }
+  }
+
+  String _classOf(String sectionId) {
+    for (final s in widget.sections) {
+      if (s.id == sectionId) return s.fullName;
+    }
+    return widget.record?.sectionId == sectionId
+        ? widget.record!.classLabel
+        : '';
+  }
+
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(now.year, now.month, now.day),
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  void _save() {
+    final stu = _student;
+    if (stu == null) {
+      setState(() => _err = 'Search and choose the student.');
+      return;
+    }
+    if (_types.isEmpty) {
+      setState(() => _err = 'Tick at least one incident type.');
+      return;
+    }
+    if (_severity.isEmpty) {
+      setState(() => _err = 'Tick the severity level.');
+      return;
+    }
+    if (_actions.isEmpty) {
+      setState(() => _err = 'Tick at least one action taken.');
+      return;
+    }
+    if (_note.text.trim().isEmpty) {
+      setState(() => _err = 'Write a short note explaining what happened.');
+      return;
+    }
+    // keep the order of the lists, not the order of ticking
+    String join(List<String> order, Set<String> s) => order
+        .where(s.contains)
+        .followedBy(s.where((e) => !order.contains(e)))
+        .join(', ');
+    Navigator.pop(context, {
+      'date': Timestamp.fromDate(DateTime(_date.year, _date.month, _date.day)),
+      'type': join(DisciplineRules.types, _types),
+      'severity': _severity,
+      'action': join(DisciplineRules.actions, _actions),
+      'note': _note.text.trim(),
+      'studentId': stu.id,
+      'studentName': stu.name,
+      'sectionId': stu.sectionId,
+      'classLabel': _classOf(stu.sectionId).isNotEmpty
+          ? _classOf(stu.sectionId)
+          : (widget.record?.classLabel ?? ''),
+    });
+  }
+
+  /// Opens the list editor (administrator) and saves the new list.
+  Future<void> _manage(String title, String field, List<String> current,
+      {bool ordered = false}) async {
+    final res = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _OptionsEditorDialog(
+          title: title, items: current, showOrderHint: ordered),
+    );
+    if (res == null) return;
+    try {
+      await DisciplineRules.saveList(field, res);
+      if (mounted) setState(() => _err = null);
+    } catch (e) {
+      if (mounted) setState(() => _err = 'Could not save the list: $e');
+    }
+  }
+
+  // ---------- pieces ----------
+
+  Widget _label(String t, {VoidCallback? onEdit}) => Padding(
+    padding: const EdgeInsets.only(top: 14, bottom: 4),
+    child: Row(children: [
+      Expanded(
+        child: Text(t,
+            style:
+            const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+      ),
+      if (onEdit != null)
+        TextButton.icon(
+          style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8)),
+          onPressed: onEdit,
+          icon: const Icon(Icons.edit, size: 16),
+          label: const Text('Edit list'),
+        ),
+    ]),
+  );
+
+  Widget _classField() {
+    final value = _classes.any((s) => s.id == _classId) ? _classId : '';
+    return DropdownButtonFormField<String>(
+      value: value,
+      isExpanded: true,
+      decoration: const InputDecoration(
+          isDense: true,
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.groups)),
+      items: [
+        const DropdownMenuItem(value: '', child: Text('All classes')),
+        for (final s in _classes)
+          DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+      ],
+      onChanged: _editing
+          ? null
+          : (v) => setState(() {
+        _classId = v ?? '';
+        // a new class starts a new search
+        _student = null;
+        _search.clear();
+        _err = null;
+      }),
+    );
+  }
+
+  /// Student search box: type part of the name, tap the match.
+  Widget _studentField() {
+    if (_editing) {
+      // the student of a saved incident cannot be changed
+      return InputDecorator(
+        decoration: const InputDecoration(
+            isDense: true,
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(Icons.person)),
+        child: Text(_student!.name),
+      );
+    }
+    return RawAutocomplete<_Stu>(
+      key: ValueKey('stu-$_classId'),
+      textEditingController: _search,
+      focusNode: _searchFocus,
+      displayStringForOption: (s) => s.name,
+      optionsBuilder: (v) {
+        final pool = _classId.isEmpty
+            ? _all
+            : _all.where((s) => s.sectionId == _classId).toList();
+        final q = v.text.trim().toLowerCase();
+        if (q.isEmpty) {
+          // with a class chosen, tapping the box lists the whole class
+          return _classId.isEmpty ? const Iterable<_Stu>.empty() : pool;
+        }
+        final words = q.split(RegExp(r'\s+'));
+        final hits = pool.where((s) {
+          final n = s.name.toLowerCase();
+          return words.every(n.contains);
+        });
+        return _classId.isEmpty ? hits.take(8) : hits;
+      },
+      onSelected: (s) => setState(() {
+        _student = s;
+        _err = null;
+      }),
+      fieldViewBuilder: (context, c, f, _) => TextField(
+        controller: c,
+        focusNode: f,
+        onChanged: (_) {
+          // typing again clears the previous choice
+          if (_student != null && c.text != _student!.name) {
+            setState(() => _student = null);
+          }
+        },
+        decoration: InputDecoration(
+          isDense: true,
+          border: const OutlineInputBorder(),
+          hintText: _loading
+              ? 'Loading students...'
+              : (_classId.isEmpty
+              ? 'Type the student name (all classes)'
+              : 'Type the student name (this class)'),
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: _student != null
+              ? const Icon(Icons.check_circle, color: Color(0xFF2E7D32))
+              : (c.text.isEmpty
+              ? null
+              : IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                c.clear();
+                setState(() => _student = null);
+              })),
+        ),
+      ),
+      optionsViewBuilder: (context, onSelected, options) => Align(
+        alignment: Alignment.topLeft,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 260, maxWidth: 440),
+            child: ListView(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              children: [
+                for (final s in options)
+                  ListTile(
+                    dense: true,
+                    title: Text(s.name),
+                    trailing: _classId.isEmpty
+                        ? Text(_classOf(s.sectionId),
+                        style: const TextStyle(color: Colors.black54))
+                        : null,
+                    onTap: () => onSelected(s),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A tidy two-column grid of checkboxes.
+  Widget _checks({
+    required List<String> options,
+    required bool Function(String) checked,
+    required void Function(String) onTap,
+    Color? Function(String)? dot,
+  }) {
+    return LayoutBuilder(builder: (context, box) {
+      final w = (box.maxWidth - 8) / 2;
+      return Wrap(
+        spacing: 8,
+        runSpacing: 0,
+        children: [
+          for (final o in options)
+            SizedBox(
+              width: w,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () => onTap(o),
+                child: Row(children: [
+                  Checkbox(
+                    value: checked(o),
+                    visualDensity: VisualDensity.compact,
+                    onChanged: (_) => onTap(o),
+                  ),
+                  if (dot != null) ...[
+                    Icon(Icons.circle, size: 11, color: dot(o)),
+                    const SizedBox(width: 6),
+                  ],
+                  Expanded(
+                      child: Text(o,
+                          style: const TextStyle(fontSize: 13.5),
+                          overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ),
+        ],
+      );
+    });
+  }
+
+  void _toggle(Set<String> s, String v) => setState(() {
+    s.contains(v) ? s.remove(v) : s.add(v);
+    _err = null;
+  });
+
+  /// The list plus any ticked value that was deleted from the list later
+  /// (so an old record still shows what it was saved with).
+  List<String> _withExtras(List<String> list, Iterable<String> picked) =>
+      [...list, for (final p in picked) if (!list.contains(p)) p];
+
+  @override
+  Widget build(BuildContext context) {
+    final canManage = widget.canManage;
+    return AlertDialog(
+      title: Text(_editing ? 'Edit incident' : 'New incident'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.event),
+                label: Text('Date: ${DateFormat('d MMM y').format(_date)}'),
+                onPressed: _pickDate,
+              ),
+              _label('Class  (optional - narrows the student search)'),
+              _classField(),
+              const SizedBox(height: 10),
+              _label('Student'),
+              _studentField(),
+              _label('Incident type  (tick one or more)',
+                  onEdit: canManage
+                      ? () => _manage('Incident types', 'types',
+                      DisciplineRules.types)
+                      : null),
+              _checks(
+                options: _withExtras(DisciplineRules.types, _types),
+                checked: _types.contains,
+                onTap: (v) => _toggle(_types, v),
+              ),
+              _label('Severity level',
+                  onEdit: canManage
+                      ? () => _manage('Severity levels', 'severities',
+                      DisciplineRules.severities,
+                      ordered: true)
+                      : null),
+              _checks(
+                options: _withExtras(DisciplineRules.severities,
+                    [if (_severity.isNotEmpty) _severity]),
+                checked: (v) => _severity == v,
+                onTap: (v) => setState(() {
+                  _severity = _severity == v ? '' : v;
+                  _err = null;
+                }),
+                dot: DisciplineRules.severityColor,
+              ),
+              _label('Action taken  (tick one or more)',
+                  onEdit: canManage
+                      ? () => _manage('Actions taken', 'actions',
+                      DisciplineRules.actions)
+                      : null),
+              _checks(
+                options: _withExtras(DisciplineRules.actions, _actions),
+                checked: _actions.contains,
+                onTap: (v) => _toggle(_actions, v),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _note,
+                minLines: 3,
+                maxLines: 6,
+                maxLength: 1000,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                    labelText: 'Explanatory note',
+                    alignLabelWithHint: true,
+                    border: OutlineInputBorder()),
+              ),
+              if (_err != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(_err!, style: const TextStyle(color: kRed)),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(onPressed: _save, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+/// Administrator: add, delete and re-order the options of one list.
+/// Returns the new list, or null when cancelled. Old incidents keep the
+/// wording they were saved with.
+class _OptionsEditorDialog extends StatefulWidget {
+  final String title;
+  final List<String> items;
+  final bool showOrderHint;
+  const _OptionsEditorDialog(
+      {required this.title, required this.items, this.showOrderHint = false});
+
+  @override
+  State<_OptionsEditorDialog> createState() => _OptionsEditorDialogState();
+}
+
+class _OptionsEditorDialogState extends State<_OptionsEditorDialog> {
+  late List<String> _list = List.of(widget.items);
+  final _add = TextEditingController();
+  String? _err;
+
+  @override
+  void dispose() {
+    _add.dispose();
+    super.dispose();
+  }
+
+  void _addItem() {
+    final t = _add.text.trim().replaceAll(',', ' ').replaceAll(RegExp(r'\s+'), ' ');
+    if (t.isEmpty) return;
+    if (_list.any((e) => e.toLowerCase() == t.toLowerCase())) {
+      setState(() => _err = '"$t" is already in the list.');
+      return;
+    }
+    setState(() {
+      _list.add(t);
+      _add.clear();
+      _err = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SizedBox(
+        width: 400,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (widget.showOrderHint)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                  'Drag to re-order: lightest first, most serious last '
+                      '(this sets the colours).',
+                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _add,
+                textCapitalization: TextCapitalization.sentences,
+                onSubmitted: (_) => _addItem(),
+                decoration: const InputDecoration(
+                    labelText: 'New option',
+                    isDense: true,
+                    border: OutlineInputBorder()),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+                onPressed: _addItem,
+                icon: const Icon(Icons.add),
+                label: const Text('Add')),
+          ]),
+          if (_err != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(_err!, style: const TextStyle(color: kRed))),
+            ),
+          const SizedBox(height: 8),
+          Flexible(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: ReorderableListView(
+                shrinkWrap: true,
+                buildDefaultDragHandles: true,
+                onReorder: (a, b) => setState(() {
+                  if (b > a) b--;
+                  _list.insert(b, _list.removeAt(a));
+                }),
+                children: [
+                  for (final o in _list)
+                    ListTile(
+                      key: ValueKey(o),
+                      dense: true,
+                      title: Text(o),
+                      trailing: Padding(
+                        padding: const EdgeInsets.only(right: 28),
+                        child: IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline, color: kRed),
+                          onPressed: () => setState(() {
+                            _list.remove(o);
+                            _err = null;
+                          }),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(
+          onPressed: () {
+            if (_list.isEmpty) {
+              setState(() => _err = 'Keep at least one option.');
+              return;
+            }
+            Navigator.pop(context, _list);
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------- Discipline report (Excel, Word, PDF, Print) ----------------
+
+/// Builds the discipline report from the incidents currently shown on the
+/// page (so the date range, class, severity and name filters all apply).
+class DisciplineReport {
+  final List<DisciplineRecord> items;
+  final String period; // e.g. "1 Oct 2026 - 10 Nov 2026"
+  final String filters; // e.g. "Class: 2A · Severity: Severe"
+  DisciplineReport(
+      {required this.items, required this.period, required this.filters});
+
+  static final _d = DateFormat('d MMM y');
+  static const _head = [
+    '#', 'Date', 'Student', 'Class', 'Incident type', 'Severity',
+    'Action taken', 'Note', 'Recorded by'
+  ];
+
+  List<List<String>> get _rows => [
+    for (var i = 0; i < items.length; i++)
+      [
+        '${i + 1}',
+        _d.format(items[i].date),
+        items[i].studentName,
+        items[i].classLabel,
+        items[i].type,
+        items[i].severity,
+        items[i].action,
+        items[i].note,
+        items[i].createdByName,
+      ]
+  ];
+
+  String get _summary {
+    final c = {
+      for (final s in DisciplineRules.severities)
+        s: items.where((r) => r.severity == s).length
+    };
+    return 'Total: ${items.length}   |   '
+        '${DisciplineRules.severities.map((s) => '$s: ${c[s]}').join('   |   ')}';
+  }
+
+  String get _by => 'Printed ${DateFormat('d MMM y, HH:mm').format(DateTime.now())}';
+
+  static String _x(String t) => t
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+
+  void _check() {
+    if (items.isEmpty) throw Exception('There are no incidents to put in the report.');
+  }
+
+  // ---------- PDF ----------
+  Future<Uint8List> buildPdf() async {
+    _check();
+    pw.Font? arabic;
+    try {
+      arabic = await PdfGoogleFonts.notoNaskhArabicRegular();
+    } catch (_) {}
+    final theme = pw.ThemeData.withFont(
+      base: pw.Font.helvetica(),
+      bold: pw.Font.helveticaBold(),
+      fontFallback: [if (arabic != null) arabic],
+    );
+    final doc = pw.Document();
+    final grey = PdfColor.fromInt(0xFFE8EAF0);
+    doc.addPage(pw.MultiPage(
+      pageTheme: pw.PageTheme(
+        pageFormat: PdfPageFormat.a4.landscape,
+        margin: const pw.EdgeInsets.all(28),
+        theme: theme,
+      ),
+      footer: (c) => pw.Align(
+        alignment: pw.Alignment.centerRight,
+        child: pw.Text('$_by   -   Page ${c.pageNumber} / ${c.pagesCount}',
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+      ),
+      build: (c) => [
+        pw.Text('Student Discipline Report',
+            style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 4),
+        pw.Text('Period: $period${filters.isEmpty ? '' : '   |   $filters'}',
+            style: const pw.TextStyle(fontSize: 10)),
+        pw.SizedBox(height: 2),
+        pw.Text(_summary,
+            style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 10),
+        pw.Table.fromTextArray(
+          headers: _head,
+          data: _rows,
+          headerStyle:
+          pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+          cellStyle: const pw.TextStyle(fontSize: 8.5),
+          headerDecoration: pw.BoxDecoration(color: grey),
+          border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+          cellPadding: const pw.EdgeInsets.all(4),
+          cellAlignments: {
+            0: pw.Alignment.center,
+            1: pw.Alignment.centerLeft,
+            5: pw.Alignment.center,
+          },
+          columnWidths: {
+            0: const pw.FixedColumnWidth(22),
+            1: const pw.FixedColumnWidth(56),
+            2: const pw.FlexColumnWidth(2.2),
+            3: const pw.FixedColumnWidth(48),
+            4: const pw.FlexColumnWidth(2),
+            5: const pw.FixedColumnWidth(50),
+            6: const pw.FlexColumnWidth(2),
+            7: const pw.FlexColumnWidth(3.2),
+            8: const pw.FlexColumnWidth(1.4),
+          },
+        ),
+      ],
+    ));
+    return doc.save();
+  }
+
+  // ---------- Excel ----------
+  Future<Uint8List> buildXlsx() async {
+    _check();
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const rel =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    String col(int i) => String.fromCharCode(65 + i);
+    String c(int ci, int r, String t, int s) =>
+        '<c r="${col(ci)}$r" s="$s" t="inlineStr"><is>'
+            '<t xml:space="preserve">${_x(t)}</t></is></c>';
+    String n(int ci, int r, num v, int s) =>
+        '<c r="${col(ci)}$r" s="$s"><v>$v</v></c>';
+
+    final rows = StringBuffer();
+    final last = col(_head.length - 1);
+    rows.write('<row r="1" ht="24" customHeight="1">${c(0, 1, 'Student Discipline Report', 3)}</row>');
+    rows.write('<row r="2">${c(0, 2, 'Period: $period${filters.isEmpty ? '' : '   |   $filters'}', 4)}</row>');
+    rows.write('<row r="3">${c(0, 3, _summary, 5)}</row>');
+    rows.write('<row r="5">');
+    for (var i = 0; i < _head.length; i++) {
+      rows.write(c(i, 5, _head[i], 1));
+    }
+    rows.write('</row>');
+    var r = 6;
+    for (final row in _rows) {
+      rows.write('<row r="$r">');
+      for (var i = 0; i < row.length; i++) {
+        rows.write(i == 0
+            ? n(i, r, int.parse(row[i]), 2)
+            : c(i, r, row[i], i == 5 ? 6 : 2));
+      }
+      rows.write('</row>');
+      r++;
+    }
+    const widths = [5, 13, 28, 12, 28, 11, 28, 50, 20];
+    final sheet = '$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        '<cols>${[for (var i = 0; i < widths.length; i++) '<col min="${i + 1}" max="${i + 1}" width="${widths[i]}" customWidth="1"/>'].join()}</cols>'
+        '<sheetData>$rows</sheetData>'
+        '<autoFilter ref="A5:$last${r - 1}"/>'
+        '<mergeCells count="3"><mergeCell ref="A1:${last}1"/><mergeCell ref="A2:${last}2"/><mergeCell ref="A3:${last}3"/></mergeCells>'
+        '<pageSetup orientation="landscape" fitToHeight="0"/>'
+        '</worksheet>';
+    const edge = '<left style="thin"><color rgb="FF808080"/></left><right style="thin"><color rgb="FF808080"/></right>'
+        '<top style="thin"><color rgb="FF808080"/></top><bottom style="thin"><color rgb="FF808080"/></bottom>';
+    const styles = '$xmlHead<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="15"/><name val="Calibri"/></font></fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFE8EAF0"/></patternFill></fill></fills>'
+        '<borders count="2"><border><left/><right/><top/><bottom/></border><border>$edge<diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="7">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' // 0
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>' // 1 header
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' // 2 body
+        '<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>' // 3 title
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' // 4 note
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' // 5 bold note
+        '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="top"/></xf>' // 6 severity
+        '</cellXfs></styleSheet>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+              '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+              '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+      'xl/workbook.xml': utf8.encode(
+          '$xmlHead<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="$rel">'
+              '<sheets><sheet name="Discipline" sheetId="1" r:id="rId1"/></sheets>'
+              '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Discipline!\$A\$5:\$$last\$${r - 1}</definedName></definedNames>'
+              '</workbook>'),
+      'xl/_rels/workbook.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$rel/worksheet" Target="worksheets/sheet1.xml"/>'
+              '<Relationship Id="rId2" Type="$rel/styles" Target="styles.xml"/></Relationships>'),
+      'xl/styles.xml': utf8.encode(styles),
+      'xl/worksheets/sheet1.xml': utf8.encode(sheet),
+    };
+    final out = zip.Archive();
+    files.forEach((k, v) => out.addFile(zip.ArchiveFile(k, v.length, v)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Excel file.');
+    return Uint8List.fromList(bytes);
+  }
+
+  // ---------- Word ----------
+  Future<Uint8List> buildDocx() async {
+    _check();
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    const relBase =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const edge = 'w:val="single" w:sz="4" w:space="0" w:color="808080"';
+    const widths = [450, 1250, 2300, 900, 2300, 1000, 2300, 3700, 1500]; // 15700
+    const total = 15700;
+
+    String para(String t, {bool b = false, int sz = 20}) =>
+        '<w:p><w:pPr><w:spacing w:after="80"/></w:pPr><w:r><w:rPr>${b ? '<w:b/>' : ''}'
+            '<w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr>'
+            '<w:t xml:space="preserve">${_x(t)}</w:t></w:r></w:p>';
+    String cell(int i, String t, {bool head = false}) =>
+        '<w:tc><w:tcPr><w:tcW w:w="${widths[i]}" w:type="dxa"/>'
+            '${head ? '<w:shd w:val="clear" w:color="auto" w:fill="E8EAF0"/>' : ''}</w:tcPr>'
+            '<w:p><w:pPr><w:spacing w:after="0"/>${head || i == 0 || i == 5 ? '<w:jc w:val="center"/>' : ''}</w:pPr>'
+            '<w:r><w:rPr>${head ? '<w:b/>' : ''}<w:sz w:val="17"/><w:szCs w:val="17"/></w:rPr>'
+            '<w:t xml:space="preserve">${_x(t)}</w:t></w:r></w:p></w:tc>';
+
+    final tbl = StringBuffer(
+        '<w:tbl><w:tblPr><w:tblW w:w="$total" w:type="dxa"/>'
+            '<w:tblBorders><w:top $edge/><w:left $edge/><w:bottom $edge/><w:right $edge/>'
+            '<w:insideH $edge/><w:insideV $edge/></w:tblBorders>'
+            '<w:tblLayout w:type="fixed"/>'
+            '<w:tblCellMar><w:left w:w="70" w:type="dxa"/><w:right w:w="70" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+            '<w:tblGrid>${[for (final w in widths) '<w:gridCol w:w="$w"/>'].join()}</w:tblGrid>');
+    tbl.write('<w:tr><w:trPr><w:tblHeader/></w:trPr>'
+        '${[for (var i = 0; i < _head.length; i++) cell(i, _head[i], head: true)].join()}</w:tr>');
+    for (final row in _rows) {
+      tbl.write('<w:tr><w:trPr><w:cantSplit/></w:trPr>'
+          '${[for (var i = 0; i < row.length; i++) cell(i, row[i])].join()}</w:tr>');
+    }
+    tbl.write('</w:tbl>');
+
+    final body = '${para('Student Discipline Report', b: true, sz: 32)}'
+        '${para('Period: $period${filters.isEmpty ? '' : '   |   $filters'}')}'
+        '${para(_summary, b: true)}'
+        '${para(' ', sz: 8)}$tbl';
+    final documentXml = '$xmlHead<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>$body'
+        '<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'
+        '<w:pgMar w:top="720" w:right="570" w:bottom="720" w:left="570" w:header="400" w:footer="400" w:gutter="0"/>'
+        '</w:sectPr></w:body></w:document>';
+    const stylesXml = '$xmlHead<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Arial"/>'
+        '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+              '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$relBase/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/_rels/document.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rIdStyles" Type="$relBase/styles" Target="styles.xml"/></Relationships>'),
+      'word/document.xml': utf8.encode(documentXml),
+      'word/styles.xml': utf8.encode(stylesXml),
+    };
+    final out = zip.Archive();
+    files.forEach((k, v) => out.addFile(zip.ArchiveFile(k, v.length, v)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Word file.');
+    return Uint8List.fromList(bytes);
+  }
+}
+
+/// "Report" button of the Discipline page: Excel, Word, PDF or Print.
+class _DisciplineReportButton extends StatefulWidget {
+  final DisciplineReport Function() report;
+  final bool enabled;
+  const _DisciplineReportButton({required this.report, this.enabled = true});
+
+  @override
+  State<_DisciplineReportButton> createState() =>
+      _DisciplineReportButtonState();
+}
+
+class _DisciplineReportButtonState extends State<_DisciplineReportButton> {
+  bool _busy = false;
+
+  Future<void> _run(String kind) async {
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final rep = widget.report();
+      final name =
+          'Discipline-report-${DateFormat('yyyy-MM-dd').format(DateTime.now())}';
+      if (kind == 'print') {
+        final bytes = await rep.buildPdf();
+        if (mounted) setState(() => _busy = false);
+        await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+        return;
+      }
+      final (bytes, ext, mime) = switch (kind) {
+        'xlsx' => (
+        await rep.buildXlsx(),
+        'xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        ),
+        'docx' => (await rep.buildDocx(), 'docx', ExamService._docxMime),
+        _ => (await rep.buildPdf(), 'pdf', 'application/pdf'),
+      };
+      final path = await _downloadInBrowser(bytes, '$name.$ext', mime);
+      messenger.showSnackBar(SnackBar(
+          content: Text(path == null && !kIsWeb
+              ? 'Download cancelled (nothing was saved).'
+              : 'Report saved${path == null ? '' : '\nSaved to: $path'}')));
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_busy) {
+      return const Padding(
+        padding: EdgeInsets.all(14),
+        child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
+      );
+    }
+    return PopupMenuButton<String>(
+      tooltip: 'Report: download or print',
+      enabled: widget.enabled,
+      onSelected: _run,
+      icon: const Icon(Icons.summarize),
+      itemBuilder: (_) => const [
+        PopupMenuItem(
+            value: 'xlsx',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
+                title: Text('Download Excel'))),
+        PopupMenuItem(
+            value: 'docx',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.description, color: Color(0xFF1565C0)),
+                title: Text('Download Word'))),
+        PopupMenuItem(
+            value: 'pdf',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
+                title: Text('Download PDF'))),
+        PopupMenuItem(
+            value: 'print',
+            child: ListTile(
+                dense: true,
+                leading: Icon(Icons.print, color: Color(0xFF546E7A)),
+                title: Text('Print'))),
+      ],
+    );
+  }
+}
+
 
 // ======================= SCHOOL LOGO =======================
 
@@ -8158,6 +10768,14 @@ class AppSettings {
   /// hidden in Result for teachers and students. At least one exam stays open.
   final List<String> closedExams;
 
+  /// The exam the administrator made active in Settings > Exams ("" = none
+  /// chosen: the default current exam is used).
+  final String activeExam;
+
+  /// The exam that owns the papers saved before papers were kept per exam
+  /// ("" = not decided yet: one shared set).
+  final String paperBaseExam;
+
   /// Subjects ticked in Settings. They are shown in the header of every
   /// section (class list). Attendance does not use them.
   final List<String> sectionSubjects;
@@ -8168,6 +10786,9 @@ class AppSettings {
 
   /// Default pages of the Student affairs role.
   final List<String> affairsAccess;
+
+  /// Default pages of the Finance role.
+  final List<String> financeAccess;
 
   /// What is ticked when an exam dialog is opened.
   final bool uploadHeading, uploadAutoFormat, uploadNumber;
@@ -8197,14 +10818,22 @@ class AppSettings {
     this.rateWarn = 75.0,
     this.exams = const [],
     this.closedExams = const [],
+    this.activeExam = '',
+    this.paperBaseExam = '',
     this.sectionSubjects = const [],
-    this.teacherAccess = const [AppPages.attendance, AppPages.result],
+    this.teacherAccess = const [
+      AppPages.attendance,
+      AppPages.result,
+      AppPages.discipline,
+    ],
     this.studentAccess = const [AppPages.result],
     this.affairsAccess = const [
       AppPages.students,
       AppPages.attendance,
+      AppPages.daily,
       AppPages.result,
     ],
+    this.financeAccess = const [AppPages.finance],
     this.uploadHeading = true,
     this.uploadAutoFormat = true,
     this.uploadNumber = true,
@@ -8232,12 +10861,16 @@ class AppSettings {
   /// The exams to show (never empty).
   List<String> get examOptions => exams.isEmpty ? defaultExams() : exams;
 
-  /// The current exam: "Mid-term <year>" or, when that is not in the list,
-  /// the first exam. It is the one Result opens on (when it is open).
+  /// The current exam: the one made active in Settings; if none, "Mid-term
+  /// <year>" or, when that is not in the list, the first exam. It is the one Result opens on (when it is open).
   String get currentExam {
     final o = examOptions;
+    if (activeExam.isNotEmpty && o.contains(activeExam)) return activeExam;
+    // none chosen yet: prefer the exams that are open (ticked)
+    final open = [for (final e in o) if (isExamOpen(e)) e];
+    final pool = open.isEmpty ? o : open;
     final pref = 'Mid-term ${DateTime.now().year}';
-    return o.contains(pref) ? pref : o.first;
+    return pool.contains(pref) ? pref : pool.first;
   }
 
   /// The mark limits of [exam] (the defaults when none were set).
@@ -8274,8 +10907,18 @@ class AppSettings {
   bool isExamOpen(String e) => !closedExams.contains(e);
 
   /// The exam date of [subject], or null when it was not set.
+  /// Key of a subject's exam date in [subjectDates]: the exam dates are kept
+  /// per exam (the base exam keeps the plain subject key).
+  String dateKey(String subject) {
+    final k = SchoolService.subjectKey(subject);
+    final cur = currentExam;
+    return (paperBaseExam.isEmpty || cur == paperBaseExam)
+        ? k
+        : '${k}__${SchoolService.subjectKey(cur)}';
+  }
+
   DateTime? subjectDateOf(String subject) {
-    final v = subjectDates[SchoolService.subjectKey(subject)];
+    final v = subjectDates[dateKey(subject)];
     final d = v == null ? null : DateTime.tryParse(v);
     return d == null ? null : DateTime(d.year, d.month, d.day);
   }
@@ -8347,6 +10990,12 @@ class AppSettings {
           if (e is String && e.trim().isNotEmpty) e.trim(),
       ]
           : d.exams,
+      paperBaseExam: m['paperBaseExam'] is String
+          ? (m['paperBaseExam'] as String).trim()
+          : d.paperBaseExam,
+      activeExam: m['activeExam'] is String
+          ? (m['activeExam'] as String).trim()
+          : d.activeExam,
       closedExams: ce is List
           ? [
         for (final e in ce)
@@ -8362,6 +11011,7 @@ class AppSettings {
       teacherAccess: pages('teacherAccess', d.teacherAccess),
       studentAccess: pages('studentAccess', d.studentAccess),
       affairsAccess: pages('affairsAccess', d.affairsAccess),
+      financeAccess: pages('financeAccess', d.financeAccess),
       uploadHeading: flag('uploadHeading', d.uploadHeading),
       uploadAutoFormat: flag('uploadAutoFormat', d.uploadAutoFormat),
       uploadNumber: flag('uploadNumber', d.uploadNumber),
@@ -8408,7 +11058,11 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
   /// Starts listening to the saved settings (called when somebody signs in).
   void start() {
     _sub ??= _doc.snapshots().listen(
-          (d) => value = AppSettings.fromMap(d.data() ?? {}),
+          (d) {
+        final m = d.data() ?? <String, dynamic>{};
+        ExamService.applyLists(m); // before parsing: sectionSubjects uses it
+        value = AppSettings.fromMap(m);
+      },
       onError: (e) => debugPrint('Settings could not be loaded: $e'),
     );
   }
@@ -8417,6 +11071,7 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
   void stop() {
     _sub?.cancel();
     _sub = null;
+    ExamService.resetLists();
     value = const AppSettings();
   }
 
@@ -8451,6 +11106,8 @@ class _SetCat {
 const _kSetCats = <_SetCat>[
   _SetCat(0, 'School', 'Letterhead, logo, exam heading, class lists',
       Icons.school),
+  _SetCat(7, 'Subjects & classes',
+      'Add, rename or delete subjects, forms and classes', Icons.library_books),
   _SetCat(1, 'Exams & results', 'Exams, grades, mark limits, upload defaults',
       Icons.emoji_events),
   _SetCat(2, 'Attendance', 'Week start and attendance colours',
@@ -8460,7 +11117,782 @@ const _kSetCats = <_SetCat>[
   _SetCat(3, 'Users', 'Accounts, approval and page access',
       Icons.manage_accounts),
   _SetCat(4, 'Account', 'Your password and sign out', Icons.person),
+  _SetCat(6, 'Activity log', 'Who logged in or out, and who is online',
+      Icons.history),
 ];
+
+// ======================= Subjects & classes (forms) =======================
+
+enum _ListKind { subject, form }
+
+/// Saves and migrates the school's subject list and form list.
+/// Stored in settings/app: `subjectList`, `formList` (see ExamService).
+class SchoolListsService {
+  static final _db = FirebaseFirestore.instance;
+  static DocumentReference<Map<String, dynamic>> get _settings =>
+      _db.collection('settings').doc('app');
+
+  /// Subjects whose exam heading / language is chosen by NAME
+  /// (see ExamHeading.langFor), so they cannot be renamed.
+  static const _fixedNames = {'arabic', 'islamic', 'somali'};
+
+  /// null = fine, otherwise the reason the name cannot be used.
+  static String? validate(String raw, List<String> existing, {String? ignore}) {
+    final n = raw.trim();
+    if (n.isEmpty) return 'Enter a name.';
+    if (n.length > 30) return 'Use at most 30 characters.';
+    final key = SchoolService.subjectKey(n).replaceAll('_', '');
+    if (key.isEmpty) return 'Use letters and numbers (A-Z, 0-9).';
+    for (final e in existing) {
+      if (e == ignore) continue;
+      if (e.toLowerCase() == n.toLowerCase() ||
+          SchoolService.subjectKey(e).toLowerCase() ==
+              SchoolService.subjectKey(n).toLowerCase()) {
+        return '"$e" already exists.';
+      }
+    }
+    return null;
+  }
+
+  static String _field(_ListKind k) =>
+      k == _ListKind.subject ? 'subjectList' : 'formList';
+
+  /// Saves a whole list (add / reorder). Ticked section subjects that no
+  /// longer exist are dropped.
+  static Future<void> save(_ListKind k, List<String> list,
+      {Map<String, Object?> extra = const {}}) =>
+      appSettings.update({_field(k): list, ...extra});
+
+  static Future<bool> _hasExams(String field, String value) async {
+    final q = await _db
+        .collection('exams')
+        .where(field, isEqualTo: value)
+        .limit(1)
+        .get();
+    return q.docs.isNotEmpty;
+  }
+
+  /// Renames [key] inside a map field of settings/app. Keys are either the
+  /// name itself or end with / contain "__<key>".
+  static Map<String, Object?> _renameKeys(
+      Object? raw, String oldKey, String newKey,
+      {bool plain = false, bool prefixed = false}) {
+    final out = <String, Object?>{};
+    if (raw is! Map) return out;
+    for (final e in raw.entries) {
+      final k = '${e.key}';
+      String? nk;
+      if (plain) {
+        if (k == oldKey) nk = newKey;
+      } else if (k == oldKey) {
+        nk = newKey;
+      } else if (prefixed && k.startsWith('${oldKey}__')) {
+        nk = '$newKey${k.substring(oldKey.length)}';
+      } else if (k.endsWith('__$oldKey')) {
+        nk = '${k.substring(0, k.length - oldKey.length)}$newKey';
+      } else if (k.contains('__${oldKey}__')) {
+        nk = k.replaceFirst('__${oldKey}__', '__${newKey}__');
+      }
+      if (nk != null && nk != k) {
+        out[nk] = e.value;
+        out[k] = FieldValue.delete();
+      }
+    }
+    return out;
+  }
+
+  /// Teachers' (and user) records: subjects / forms / assignments.
+  static Future<void> _migratePeople(
+      {String? oldSubject, String? newSubject, String? oldForm, String? newForm}) async {
+    for (final col in ['teachers', 'users']) {
+      QuerySnapshot<Map<String, dynamic>> snap;
+      try {
+        snap = await _db.collection(col).get();
+      } catch (_) {
+        if (col == 'teachers') rethrow;
+        continue;
+      }
+      var batch = _db.batch();
+      var n = 0;
+      List swap(List l, String o, String nw) =>
+          [for (final e in l) e == o ? nw : e];
+      for (final d in snap.docs) {
+        final m = d.data();
+        final upd = <String, Object?>{};
+        final subs = m['subjects'], fms = m['forms'], a = m['assignments'];
+        if (oldSubject != null && subs is List && subs.contains(oldSubject)) {
+          upd['subjects'] = swap(subs, oldSubject, newSubject!);
+        }
+        if (oldForm != null && fms is List && fms.contains(oldForm)) {
+          upd['forms'] = swap(fms, oldForm, newForm!);
+        }
+        if (a is Map) {
+          final out = <String, Object?>{};
+          var changed = false;
+          for (final e in a.entries) {
+            var k = '${e.key}';
+            Object? v = e.value;
+            if (oldSubject != null && k == oldSubject) {
+              k = newSubject!;
+              changed = true;
+            }
+            if (oldForm != null && v is List && v.contains(oldForm)) {
+              v = swap(v, oldForm, newForm!);
+              changed = true;
+            }
+            out[k] = v;
+          }
+          if (changed) upd['assignments'] = out;
+        }
+        if (upd.isEmpty) continue;
+        batch.update(d.reference, upd);
+        if (++n >= 400) {
+          await batch.commit();
+          batch = _db.batch();
+          n = 0;
+        }
+      }
+      if (n > 0) {
+        try {
+          await batch.commit();
+        } catch (_) {
+          if (col == 'teachers') rethrow;
+        }
+      }
+    }
+  }
+
+  static Future<void> renameSubject(
+      String old, String neu, List<String> list) async {
+    if (_fixedNames.contains(old.trim().toLowerCase())) {
+      throw Exception('"$old" cannot be renamed: its exam heading language '
+          'is chosen by this name.');
+    }
+    if (_fixedNames.contains(neu.trim().toLowerCase())) {
+      throw Exception('"$neu" is a reserved name (it changes the exam '
+          'heading language). Choose another name.');
+    }
+    if (await _hasExams('subject', old)) {
+      throw Exception('Exam files already exist for $old, so it cannot be '
+          'renamed. Add a new subject instead and delete this one if it is '
+          'no longer taught.');
+    }
+    final raw = (await _settings.get()).data() ?? {};
+    final oldKey = SchoolService.subjectKey(old);
+    final newKey = SchoolService.subjectKey(neu);
+    final ss = raw['sectionSubjects'];
+    await _settings.set({
+      'subjectList': list,
+      if (ss is List) 'sectionSubjects': [for (final e in ss) e == old ? neu : e],
+      if (oldKey != newKey) ...{
+        'subjectDates':
+        _renameKeys(raw['subjectDates'], oldKey, newKey, prefixed: true),
+      },
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    await _migratePeople(oldSubject: old, newSubject: neu);
+  }
+
+  static Future<void> deleteSubject(String name, List<String> list) async {
+    if (list.isEmpty) throw Exception('At least one subject must remain.');
+    final ss = appSettings.value.sectionSubjects;
+    await appSettings.update({
+      'subjectList': list,
+      'sectionSubjects': [for (final e in ss) if (e != name) e],
+    });
+  }
+
+  static Future<int> _sectionCount(String form) async =>
+      (await _db.collection('sections').where('form', isEqualTo: form).get())
+          .docs
+          .length;
+
+  static Future<void> renameForm(
+      String old, String neu, List<String> list) async {
+    if (await _hasExams('form', old)) {
+      throw Exception('Exam files already exist for $old, so it cannot be '
+          'renamed. Add a new form instead.');
+    }
+    final raw = (await _settings.get()).data() ?? {};
+    final oldKey = SchoolService.subjectKey(old);
+    final newKey = SchoolService.subjectKey(neu);
+    final fees = raw['monthlyFees'];
+    await _settings.set({
+      'formList': list,
+      if (fees is Map && fees.containsKey(old))
+        'monthlyFees': {neu: fees[old], old: FieldValue.delete()},
+      if (oldKey != newKey)
+        'examLimits': _renameKeys(raw['examLimits'], oldKey, newKey),
+      'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    final secs = await _db.collection('sections').where('form', isEqualTo: old).get();
+    var batch = _db.batch();
+    var n = 0;
+    for (final d in secs.docs) {
+      batch.update(d.reference, {'form': neu});
+      if (++n >= 400) {
+        await batch.commit();
+        batch = _db.batch();
+        n = 0;
+      }
+    }
+    if (n > 0) await batch.commit();
+    await _migratePeople(oldForm: old, newForm: neu);
+  }
+
+  static Future<void> deleteForm(String name, List<String> list) async {
+    if (list.isEmpty) throw Exception('At least one form must remain.');
+    final c = await _sectionCount(name);
+    if (c > 0) {
+      throw Exception('$name still has $c class${c == 1 ? '' : 'es'}. '
+          'Delete or move its classes in Students first.');
+    }
+    await appSettings.update({'formList': list});
+  }
+}
+
+/// Settings card: the list of subjects (or forms) with add / rename /
+/// delete / reorder.
+class _ManageListCard extends StatefulWidget {
+  final _ListKind kind;
+  const _ManageListCard({required this.kind});
+
+  @override
+  State<_ManageListCard> createState() => _ManageListCardState();
+}
+
+class _ManageListCardState extends State<_ManageListCard> {
+  final _new = TextEditingController();
+  bool _busy = false;
+
+  bool get _isSub => widget.kind == _ListKind.subject;
+  String get _noun => _isSub ? 'subject' : 'form';
+  List<String> get _items => List.of(_isSub ? ExamService.subjects : ExamService.forms);
+
+  @override
+  void dispose() {
+    _new.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run(Future<void> Function() job, String ok) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await job();
+      messenger.showSnackBar(SnackBar(content: Text(ok)));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final name = _new.text.trim();
+    final err = SchoolListsService.validate(name, _items);
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    _new.clear();
+    await _run(() => SchoolListsService.save(widget.kind, [..._items, name]),
+        '$name added');
+  }
+
+  Future<void> _reorder(int from, int to) async {
+    final l = _items;
+    if (to > from) to -= 1;
+    l.insert(to, l.removeAt(from));
+    await _run(() => SchoolListsService.save(widget.kind, l), 'Order saved');
+  }
+
+  Future<void> _rename(String old) async {
+    final c = TextEditingController(text: old);
+    String? error;
+    final neu = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Rename $_noun'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              decoration: InputDecoration(
+                  labelText: 'New name',
+                  errorText: error,
+                  border: const OutlineInputBorder()),
+              onSubmitted: (_) => ctx.mounted
+                  ? Navigator.pop(ctx, c.text.trim())
+                  : null,
+            ),
+            const SizedBox(height: 10),
+            Text(
+                'Teachers, class lists${_isSub ? '' : ', classes, fees'} and '
+                    'settings are updated. Marks and exam files already saved '
+                    'under the old name are not moved, so a $_noun that has '
+                    'exam files cannot be renamed.',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final e = SchoolListsService.validate(c.text, _items, ignore: old);
+                if (e != null) {
+                  setD(() => error = e);
+                  return;
+                }
+                Navigator.pop(ctx, c.text.trim());
+              },
+              child: const Text('Rename'),
+            ),
+          ],
+        ),
+      ),
+    );
+    c.dispose();
+    if (neu == null || neu == old) return;
+    final l = [for (final e in _items) e == old ? neu : e];
+    await _run(
+            () => _isSub
+            ? SchoolListsService.renameSubject(old, neu, l)
+            : SchoolListsService.renameForm(old, neu, l),
+        '$old renamed to $neu');
+  }
+
+  Future<void> _delete(String name) async {
+    if (_items.length <= 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('At least one $_noun must remain.')));
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete $name?'),
+        content: Text(_isSub
+            ? '$name will disappear from exams, results, class lists and '
+            'teacher assignments. Marks and files already saved are kept '
+            'in the database but are no longer shown.'
+            : '$name will disappear from every list. It can only be deleted '
+            'when it has no classes.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final l = [for (final e in _items) if (e != name) e];
+    await _run(
+            () => _isSub
+            ? SchoolListsService.deleteSubject(name, l)
+            : SchoolListsService.deleteForm(name, l),
+        '$name deleted');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<AppSettings>(
+      valueListenable: appSettings,
+      builder: (context, _, __) {
+        final items = _items;
+        return Card(
+          margin: EdgeInsets.zero,
+          elevation: 0,
+          color: Colors.white,
+          shape: _kSettingsCardShape,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFE8F2FC),
+                      borderRadius: BorderRadius.circular(10)),
+                  child: Icon(_isSub ? Icons.menu_book : Icons.class_,
+                      size: 18, color: kBlue),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(_isSub ? 'Subjects' : 'Forms (classes)',
+                      style: const TextStyle(
+                          fontSize: 15.5, fontWeight: FontWeight.w700)),
+                ),
+                Text('${items.length}',
+                    style: const TextStyle(color: Colors.black54)),
+              ]),
+              const SizedBox(height: 6),
+              Text(
+                  _isSub
+                      ? 'The subjects taught in the school. Drag to change the '
+                      'order used in lists and reports. Arabic, Islamic and '
+                      'Somali keep their own exam heading language.'
+                      : 'The forms (class levels), e.g. Form1, Form2. Name them '
+                      'with a number (Form5): the class code (5A) is taken '
+                      'from it. Classes (1A, 1B...) are managed in the Classes tab.',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              const SizedBox(height: 8),
+              ReorderableListView(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                buildDefaultDragHandles: false,
+                onReorder: _busy ? (_, __) {} : _reorder,
+                children: [
+                  for (var i = 0; i < items.length; i++)
+                    ListTile(
+                      key: ValueKey('${widget.kind.name}-${items[i]}'),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      leading: ReorderableDragStartListener(
+                        index: i,
+                        child: const Icon(Icons.drag_indicator,
+                            color: Colors.black38),
+                      ),
+                      title: Text(items[i],
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                          tooltip: 'Rename',
+                          icon: const Icon(Icons.edit_outlined),
+                          onPressed: _busy ? null : () => _rename(items[i]),
+                        ),
+                        IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline, color: kRed),
+                          onPressed: _busy ? null : () => _delete(items[i]),
+                        ),
+                      ]),
+                    ),
+                ],
+              ),
+              const Divider(height: 24),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _new,
+                    textCapitalization: TextCapitalization.words,
+                    onSubmitted: (_) => _add(),
+                    decoration: InputDecoration(
+                      labelText: 'New $_noun',
+                      hintText: _isSub ? 'Computer' : 'Form5',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.icon(
+                  onPressed: _busy ? null : _add,
+                  icon: const Icon(Icons.add),
+                  label: Text('Add $_noun'),
+                ),
+              ]),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ======================= Classes of each form (1A, 1B, ...) =======================
+
+/// Settings tab: every form with its classes. Add, rename and delete a class.
+class _ManageClassesCard extends StatelessWidget {
+  const _ManageClassesCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final service = SchoolService();
+    return ValueListenableBuilder<AppSettings>(
+      valueListenable: appSettings,
+      builder: (context, _, __) => StreamBuilder<List<SectionInfo>>(
+        stream: service.watchSections(),
+        builder: (context, secSnap) => StreamBuilder<Map<String, int>>(
+          stream: service.watchStudentCounts(),
+          builder: (context, cntSnap) {
+            if (secSnap.hasError) {
+              return Text('Classes could not be loaded: ${secSnap.error}');
+            }
+            if (!secSnap.hasData) {
+              return const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            final counts = cntSnap.data ?? const <String, int>{};
+            final all = secSnap.data!;
+            return Column(children: [
+              for (final f in ExamService.forms) ...[
+                _FormClassesBlock(
+                  key: ValueKey('classes-$f'),
+                  form: f,
+                  service: service,
+                  // divided parts (1A-A, 1A-B...) are not listed here
+                  sections: [for (final s in all) if (s.form == f && !s.isSub) s],
+                  counts: counts,
+                ),
+                const SizedBox(height: 12),
+              ],
+            ]);
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _FormClassesBlock extends StatefulWidget {
+  final String form;
+  final SchoolService service;
+  final List<SectionInfo> sections;
+  final Map<String, int> counts;
+  const _FormClassesBlock({
+    super.key,
+    required this.form,
+    required this.service,
+    required this.sections,
+    required this.counts,
+  });
+
+  @override
+  State<_FormClassesBlock> createState() => _FormClassesBlockState();
+}
+
+class _FormClassesBlockState extends State<_FormClassesBlock> {
+  final _new = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _new.dispose();
+    super.dispose();
+  }
+
+  /// null = fine, else why the class name cannot be used.
+  String? _validate(String raw, {String? ignoreId}) {
+    final t = raw.trim();
+    if (t.isEmpty) return 'Enter the class name, e.g. A.';
+    if (t.length > 10) return 'Use at most 10 characters.';
+    if (!RegExp(r'^[A-Za-z0-9\- ]+$').hasMatch(t)) {
+      return 'Use letters and numbers only (e.g. A, B, C2).';
+    }
+    final norm = SchoolService._normSection(t);
+    for (final s in widget.sections) {
+      if (s.id != ignoreId && s.name.toUpperCase() == norm.toUpperCase()) {
+        return '${s.label} already exists.';
+      }
+    }
+    return null;
+  }
+
+  Future<void> _run(Future<void> Function() job, String ok) async {
+    final m = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await job();
+      m.showSnackBar(SnackBar(content: Text(ok)));
+    } catch (e) {
+      m.showSnackBar(SnackBar(
+          content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final err = _validate(_new.text);
+    if (err != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+      return;
+    }
+    final name = _new.text;
+    final label = SectionInfo.code(widget.form, SchoolService._normSection(name));
+    _new.clear();
+    await _run(() => widget.service.saveSection(form: widget.form, name: name),
+        'Class $label added');
+  }
+
+  Future<void> _rename(SectionInfo s) async {
+    final c = TextEditingController(text: s.name);
+    String? error;
+    final neu = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('Rename class ${s.label}'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              textCapitalization: TextCapitalization.characters,
+              decoration: InputDecoration(
+                  labelText: 'Class name',
+                  helperText: 'e.g. A, B, C (the code becomes '
+                      '${SectionInfo.code(widget.form, 'X')})',
+                  errorText: error,
+                  border: const OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+                'The students, attendance and marks of the class stay with it.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final e = _validate(c.text, ignoreId: s.id);
+                if (e != null) {
+                  setD(() => error = e);
+                  return;
+                }
+                Navigator.pop(ctx, c.text);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    c.dispose();
+    if (neu == null) return;
+    await _run(
+            () => widget.service.saveSection(id: s.id, form: s.form, name: neu),
+        'Class renamed');
+  }
+
+  Future<void> _delete(SectionInfo s) async {
+    final n = widget.counts[s.id] ?? 0;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete class ${s.label}?'),
+        content: Text(n == 0
+            ? 'The class has no students. It will be deleted.'
+            : 'This also deletes its $n student${n == 1 ? '' : 's'} and all '
+            'their attendance records. This cannot be undone.\n\n'
+            'To keep the students, move them to another class first.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kRed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() => widget.service.deleteSection(s.id), 'Class ${s.label} deleted');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = widget.sections
+        .fold<int>(0, (a, s) => a + (widget.counts[s.id] ?? 0));
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE8F2FC),
+                  borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.groups, size: 18, color: kBlue),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(widget.form,
+                  style: const TextStyle(
+                      fontSize: 15.5, fontWeight: FontWeight.w700)),
+            ),
+            Text(
+                '${widget.sections.length} classes · $total students',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ]),
+          const SizedBox(height: 6),
+          if (widget.sections.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('No classes yet.',
+                  style: TextStyle(fontSize: 12, color: Colors.black54)),
+            ),
+          for (final s in widget.sections)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              leading: const Icon(Icons.class_outlined, color: Colors.black38),
+              title: Text(s.isSub ? s.fullName : s.label,
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: Text(
+                  '${widget.counts[s.id] ?? 0} student'
+                      '${(widget.counts[s.id] ?? 0) == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 12)),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  tooltip: 'Rename',
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: _busy ? null : () => _rename(s),
+                ),
+                IconButton(
+                  tooltip: 'Delete',
+                  icon: const Icon(Icons.delete_outline, color: kRed),
+                  onPressed: _busy ? null : () => _delete(s),
+                ),
+              ]),
+            ),
+          const Divider(height: 24),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _new,
+                textCapitalization: TextCapitalization.characters,
+                onSubmitted: (_) => _add(),
+                decoration: InputDecoration(
+                  labelText: 'New class in ${widget.form}',
+                  hintText: 'A',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.icon(
+              onPressed: _busy ? null : _add,
+              icon: const Icon(Icons.add),
+              label: const Text('Add class'),
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -8949,7 +12381,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _saveFinance() async {
     final fees = <String, double>{};
-    for (final e in _fee.entries) {
+    for (final e in _fee.entries.where((x) => ExamService.forms.contains(x.key))) {
       if (e.value.text.trim().isEmpty) {
         fees[e.key] = 0;
         continue;
@@ -8999,7 +12431,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 12),
         Wrap(spacing: 10, runSpacing: 10, children: [
           for (final f in ExamService.forms)
-            SizedBox(width: 150, child: _moneyField(_fee[f]!, '$f fee')),
+            SizedBox(
+                width: 150,
+                child: _moneyField(
+                    _fee.putIfAbsent(f, () => TextEditingController()),
+                    '$f fee')),
         ]),
         const Divider(height: 28),
         const Text('Payment methods',
@@ -9087,12 +12523,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }, open ? '\"$exam\" opened' : '\"$exam\" closed');
   }
 
+  /// Makes [exam] the active exam: it is opened and every other exam is
+  /// closed, so teachers and students only work on it. Other exams can still
+  /// be opened again with their tick box.
+  Future<void> _makeActive(AppSettings s, String exam) async {
+    setState(() => _busy = true);
+    try {
+      await switchActiveExam(context, exam);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Changes which exam owns the papers saved before papers were kept per
+  /// exam (the ones that show under the base exam in Exam Manager).
+  Future<void> _setPaperBase(AppSettings s, String exam) async {
+    if (exam == s.paperBaseExam) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Change the owner of the saved papers?'),
+        content: Text('The papers now shown under "${s.paperBaseExam}" will '
+            'show under "$exam" instead, and "${s.paperBaseExam}" will start '
+            'empty. Nothing is deleted.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Change')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busy = true);
+    try {
+      final db = FirebaseFirestore.instance;
+      final q = await db.collection('exams').where('exam', isEqualTo: exam).get();
+      if (q.docs.any((d) => d.data()['hasFile'] == true)) {
+        throw Exception('"$exam" already has uploaded papers of its own. '
+            'Remove them first (set them back to Pending), then try again.');
+      }
+      // only empty placeholders (e.g. a teacher name): remove them
+      for (final d in q.docs) {
+        await d.reference.delete();
+      }
+      await appSettings.update({'paperBaseExam': exam});
+      _toast('The saved papers now belong to "$exam"');
+    } catch (e) {
+      _toast('Failed: ${'$e'.replaceFirst('Exception: ', '')}');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   Widget _examsCard(AppSettings s) {
     final list = s.examOptions;
     return _card('Exams', Icons.event_note, [
       const Text(
-          'Tick an exam to open it in Result, untick it to close it (teachers '
-              'and students no longer see it). At least one exam stays open. '
+          'Use "Make active" to switch to an exam (e.g. Monthly1, Mid-term, '
+              'Monthly2, Final): it is opened and the others are closed. You can '
+              'also tick an exam to open it in Result, untick it to close it '
+              '(teachers and students no longer see it). At least one exam stays open. '
               'Removing an exam only hides it; its saved marks are kept. Use the '
               'sliders button of an exam to set its own mark limits (lowest '
               'and highest subject mark, lowest and highest exam total).',
@@ -9107,11 +12600,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
           onChanged: _busy ? null : (v) => _toggleExam(s, e, v ?? true),
           title: Text(e),
           subtitle: Text(
-              '${e == s.currentExam ? 'Current exam - ' : ''}'
+              '${e == s.currentExam ? 'ACTIVE - ' : ''}'
                   '${s.isExamOpen(e) ? 'Open' : 'Closed'}\n'
                   '${s.limitsSummary(e)}'),
           isThreeLine: true,
           secondary: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (e == s.currentExam)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Chip(
+                  visualDensity: VisualDensity.compact,
+                  avatar: Icon(Icons.check_circle, size: 16, color: Colors.green),
+                  label: Text('Active'),
+                ),
+              )
+            else
+              TextButton(
+                onPressed: _busy ? null : () => _makeActive(s, e),
+                child: const Text('Make active'),
+              ),
             IconButton(
               tooltip: 'Mark limits',
               icon: const Icon(Icons.tune),
@@ -9124,6 +12631,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ]),
         ),
+      if (s.paperBaseExam.isNotEmpty) ...[
+        const Divider(height: 24),
+        const Text('Papers saved before the exams were separated belong to:',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        DropdownButton<String>(
+          isExpanded: true,
+          value: list.contains(s.paperBaseExam) ? s.paperBaseExam : null,
+          items: [
+            for (final e in list) DropdownMenuItem(value: e, child: Text(e)),
+          ],
+          onChanged: _busy ? null : (v) => v == null ? null : _setPaperBase(s, v),
+        ),
+        const Text(
+            'Use this if the old papers show under the wrong exam in Exam Manager.',
+            style: _hint),
+      ],
       const SizedBox(height: 12),
       Row(children: [
         Expanded(
@@ -9150,7 +12674,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: TextButton(
           onPressed: _busy
               ? null
-              : () => _save({'exams': <String>[], 'closedExams': <String>[]},
+              : () => _save({
+            'exams': <String>[],
+            'closedExams': <String>[],
+            'activeExam': ''
+          },
               'Exam list reset'),
           child: const Text('Reset to default list'),
         ),
@@ -9250,6 +12778,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ('School', <Widget>[_schoolCard(), _subjectsCard(s)]),
       ];
     }
+    if (id == 7) {
+      return <(String, List<Widget>)>[
+        ('Subjects', <Widget>[const _ManageListCard(kind: _ListKind.subject)]),
+        ('Forms', <Widget>[const _ManageListCard(kind: _ListKind.form)]),
+        ('Classes', <Widget>[const _ManageClassesCard()]),
+      ];
+    }
     if (id == 1) {
       return <(String, List<Widget>)>[
         ('Exams', <Widget>[_examsCard(s)]),
@@ -9271,6 +12806,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return <(String, List<Widget>)>[
         ('Users', <Widget>[const _PermissionsCard(part: 1)]),
         ('Default access', <Widget>[const _PermissionsCard(part: 2)]),
+      ];
+    }
+    if (id == 6) {
+      return <(String, List<Widget>)>[
+        ('Activity log', <Widget>[
+          const _ActivityLogCard(),
+          const _ActivityLogCard(students: true),
+        ]),
       ];
     }
     return <(String, List<Widget>)>[
@@ -9420,7 +12963,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
-            if (c.id != 3 || admin) c
+            if (((c.id != 3 && c.id != 7) || admin) &&
+                (c.id != 6 || me.data?.isAdmin == true))
+              c
         ];
         if (!cats.any((c) => c.id == _cat)) _cat = cats.first.id;
         final cur = cats.firstWhere((c) => c.id == _cat);
@@ -11003,6 +14548,7 @@ class SchoolService {
     }
 
     final writes = <void Function(WriteBatch)>[];
+    final addedLog = <Map<String, dynamic>>[]; // for the activity log
     var newSections = 0, newStudents = 0, skipped = 0;
     var updated = 0, noPhone = 0;
 
@@ -11120,6 +14666,11 @@ class SchoolService {
       newStudents++;
       if (phones.isEmpty) noPhone++;
       final nn = noForNew(row);
+      addedLog.add({
+        'type': 'added',
+        'studentName': name,
+        'to': secLabel[sid] ?? '',
+      });
       writes.add((b) => b.set(_students.doc(), {
         'studentNo': nn.no,
         'studentNoAuto': nn.auto,
@@ -11144,6 +14695,7 @@ class SchoolService {
       }
       await batch.commit();
     }
+    await logStudentEvents(addedLog);
     return (
     sections: newSections,
     students: newStudents,
@@ -11164,12 +14716,22 @@ class SchoolService {
   Future<void> deleteSection(String id) async {
     final st = await _students.where('sectionId', isEqualTo: id).get();
     final at = await _attendance.where('sectionId', isEqualTo: id).get();
+    final label = (await _sectionLabels())[id] ?? '';
     final batch = _db.batch();
     for (final d in [...st.docs, ...at.docs]) {
       batch.delete(d.reference);
     }
     batch.delete(_sections.doc(id));
     await batch.commit();
+    await logStudentEvents([
+      for (final d in st.docs)
+        {
+          'type': 'deleted',
+          'studentId': d.id,
+          'studentName': '${d.data()['name'] ?? ''}',
+          'from': label,
+        }
+    ]);
   }
 
   // ---------------- Students ----------------
@@ -11237,7 +14799,11 @@ class SchoolService {
         'createdAt': FieldValue.serverTimestamp(),
       });
     }
-    return batch.commit();
+    await batch.commit();
+    final label = (await _sectionLabels())[sectionId] ?? '';
+    await logStudentEvents([
+      for (final n in names) {'type': 'added', 'studentName': n, 'to': label}
+    ]);
   }
 
   /// Adds students that may have a phone number. Returns the new ids.
@@ -11264,10 +14830,35 @@ class SchoolService {
       });
     }
     await batch.commit();
+    final label = (await _sectionLabels())[sectionId] ?? '';
+    await logStudentEvents([
+      for (var i = 0; i < list.length; i++)
+        {
+          'type': 'added',
+          'studentId': ids[i],
+          'studentName': list[i].name,
+          'to': label,
+        }
+    ]);
     return ids;
   }
 
-  Future<void> deleteStudent(String id) => _students.doc(id).delete();
+  Future<void> deleteStudent(String id) async {
+    Map<String, dynamic>? m;
+    try {
+      m = (await _students.doc(id).get()).data();
+    } catch (_) {}
+    await _students.doc(id).delete();
+    if (m == null) return;
+    await logStudentEvents([
+      {
+        'type': 'deleted',
+        'studentId': id,
+        'studentName': '${m['name'] ?? ''}',
+        'from': (await _sectionLabels())['${m['sectionId'] ?? ''}'] ?? '',
+      }
+    ]);
+  }
 
   /// Edit: changes the name of a student.
   Future<void> renameStudent(String id, String name) =>
@@ -11291,12 +14882,29 @@ class SchoolService {
   }
 
   /// Change: moves a student to another section / class of the same form.
-  Future<void> moveStudent(String id, String newSectionId) =>
-      _students.doc(id).update({
-        'sectionId': newSectionId,
-        'updatedBy': _uid,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+  Future<void> moveStudent(String id, String newSectionId) async {
+    Map<String, dynamic>? m;
+    try {
+      m = (await _students.doc(id).get()).data();
+    } catch (_) {}
+    await _students.doc(id).update({
+      'sectionId': newSectionId,
+      'updatedBy': _uid,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    final oldId = '${m?['sectionId'] ?? ''}';
+    if (m == null || oldId == newSectionId) return;
+    final labels = await _sectionLabels();
+    await logStudentEvents([
+      {
+        'type': 'moved',
+        'studentId': id,
+        'studentName': '${m['name'] ?? ''}',
+        'from': labels[oldId] ?? '',
+        'to': labels[newSectionId] ?? '',
+      }
+    ]);
+  }
 
   /// Every student of every section, live (used by the Students page).
   Stream<List<StudentInfo>> watchAllStudents() =>
@@ -12660,29 +16268,50 @@ class _SectionsToolsState extends State<_SectionsTools> {
       );
     }
     return Row(mainAxisSize: MainAxisSize.min, children: [
-      IconButton(
+      _BarAction(
+        label: 'Upload',
         tooltip: 'Upload student list (Excel / CSV)',
-        icon: const Icon(Icons.upload_file),
-        onPressed: _upload,
+        icon: Icons.upload_file,
+        color: const Color(0xFF2E7D32),
+        onTap: _upload,
       ),
       PopupMenuButton<String>(
         tooltip: 'Download sections',
-        icon: const Icon(Icons.download),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: const _BarAction(
+          icon: Icons.download,
+          label: 'Download',
+          color: Color(0xFF00897B),
+        ),
         onSelected: (v) => v == 'docx' ? _downloadDocx() : _downloadPdf(),
         itemBuilder: (_) => const [
-          PopupMenuItem(value: 'pdf', child: Text('Download sections (PDF)')),
-          PopupMenuItem(value: 'docx', child: Text('Download sections (Word)')),
+          PopupMenuItem(
+              value: 'pdf',
+              child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
+                  title: Text('Download sections (PDF)'))),
+          PopupMenuItem(
+              value: 'docx',
+              child: ListTile(
+                  dense: true,
+                  leading: Icon(Icons.description, color: Color(0xFF1565C0)),
+                  title: Text('Download sections (Word)'))),
         ],
       ),
-      IconButton(
+      _BarAction(
+        label: 'Print',
         tooltip: 'Print sections',
-        icon: const Icon(Icons.print),
-        onPressed: _printAll,
+        icon: Icons.print,
+        color: const Color(0xFF546E7A),
+        onTap: _printAll,
       ),
-      IconButton(
+      _BarAction(
+        label: 'Delete all',
         tooltip: 'Delete all sections',
-        icon: const Icon(Icons.delete_sweep),
-        onPressed: _deleteAll,
+        icon: Icons.delete_sweep,
+        color: const Color(0xFFC62828),
+        onTap: _deleteAll,
       ),
     ]);
   }
@@ -13876,31 +17505,50 @@ class _StudentsScreenState extends State<StudentsScreen> {
             ),
           )
         else ...[
-          IconButton(
+          _BarAction(
+            label: 'Logins',
             tooltip: 'Create login accounts for all students',
-            icon: const Icon(Icons.key),
-            onPressed: () => runAccountCreation(context),
+            icon: Icons.key,
+            color: const Color(0xFFEF6C00),
+            onTap: () => runAccountCreation(context),
           ),
-          IconButton(
+          _BarAction(
+            label: 'Merge',
             tooltip: 'Merge duplicate students',
-            icon: const Icon(Icons.merge_type),
-            onPressed: () => _mergeDuplicates(secs, all),
+            icon: Icons.merge_type,
+            color: const Color(0xFF6A1B9A),
+            onTap: () => _mergeDuplicates(secs, all),
           ),
-          IconButton(
+          _BarAction(
+            label: 'Upload',
             tooltip: 'Upload student list (Excel / CSV)',
-            icon: const Icon(Icons.upload_file),
-            onPressed: _upload,
+            icon: Icons.upload_file,
+            color: const Color(0xFF2E7D32),
+            onTap: _upload,
           ),
           PopupMenuButton<String>(
             tooltip: 'Download',
-            icon: const Icon(Icons.download),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            child: const _BarAction(
+              icon: Icons.download,
+              label: 'Download',
+              color: Color(0xFF00897B),
+            ),
             onSelected: (v) =>
             v == 'template' ? _template() : _exportList(shown, secById),
             itemBuilder: (_) => const [
               PopupMenuItem(
-                  value: 'list', child: Text('Download this list (CSV)')),
+                  value: 'list',
+                  child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
+                      title: Text('Download this list (CSV)'))),
               PopupMenuItem(
-                  value: 'template', child: Text('Download empty template')),
+                  value: 'template',
+                  child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.file_present, color: Color(0xFF1565C0)),
+                      title: Text('Download empty template'))),
             ],
           ),
         ],
@@ -13933,6 +17581,9 @@ class StudentPortal extends StatelessWidget {
       if (allowed.contains(AppPages.attendance))
         ('Attendance', Icons.fact_check,
         _StudentAttendanceBody(studentId: studentId)),
+// a student who is a class monitor takes the daily attendance here
+      if (allowed.contains(AppPages.daily))
+        ('Daily attendance', Icons.how_to_reg, const DailyAttendanceBody()),
     ];
     final header = Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -14145,7 +17796,10 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
     ];
     final avgs = [for (final e in exams) data[e]!.average!];
     final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-    final overallG = _gradeOf(overall);
+// grade limits are percentages: marks are compared with the highest
+// subject mark of the exam (20, 50 ...), not with 100
+    final mx = _gradeMax(exams.first);
+    final overallG = _gradeOf(overall, max: mx);
     final multi = exams.length > 1;
 
     double? subAvg(String sub) {
@@ -14190,7 +17844,8 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
           textAlign: TextAlign.center,
           style: TextStyle(fontWeight: FontWeight.w800, color: c)),
     );
-    Widget markPill(double v) => pill(_fmtMark(v), _gradeColor(_gradeOf(v)));
+    Widget markPill(double v) =>
+        pill(_fmtMark(v), _gradeColor(_gradeOf(v, max: mx)));
     Widget gradeBadge(String g, {double size = 34}) => Container(
       width: size,
       height: size,
@@ -14303,7 +17958,7 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
                       style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
-                          color: _gradeColor(_gradeOf(bestV)))),
+                          color: _gradeColor(_gradeOf(bestV, max: mx)))),
               ]),
             ),
           ]),
@@ -14394,7 +18049,7 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
                             children: [
                               label('Grade'),
                               for (var i = 0; i < exams.length; i++)
-                                cell(gradeBadge(_gradeOf(avgs[i]))),
+                                cell(gradeBadge(_gradeOf(avgs[i], max: _gradeMax(exams[i])))),
                               if (multi) cell(gradeBadge(overallG)),
                             ]),
                       ],
@@ -14416,7 +18071,7 @@ class _StudentResultsBodyState extends State<_StudentResultsBody> {
 
   Widget _examCard(String exam, ResultMarks r) {
     final avg = r.average!;
-    final g = _gradeOf(avg);
+    final g = _gradeOf(avg, max: _gradeMax(exam));
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -14655,6 +18310,412 @@ class _ExamView {
   double? get average => counted.isEmpty ? null : total / counted.length;
 }
 
+// ======================= REPORT CARD (student Results tab + print) =======================
+
+class _RcRow {
+  final String subject, grade;
+  final double? mark;
+  final double max;
+  final bool cheated;
+  const _RcRow(this.subject, this.mark, this.max, this.grade, this.cheated);
+}
+
+class _RcData {
+  final String name, studentNo, className, form, exam, year, issued;
+  final List<_RcRow> rows;
+  final double total, totalMax;
+  final double? average, percent;
+  final String? grade;
+  final bool cheatedAll, belowMin;
+  final List<String> scale;
+  final int attTotal, attPresent, attAbsent;
+  const _RcData({
+    required this.name,
+    required this.studentNo,
+    required this.className,
+    required this.form,
+    required this.exam,
+    required this.year,
+    required this.issued,
+    required this.rows,
+    required this.total,
+    required this.totalMax,
+    required this.average,
+    required this.percent,
+    required this.grade,
+    required this.cheatedAll,
+    required this.belowMin,
+    required this.scale,
+    required this.attTotal,
+    required this.attPresent,
+    required this.attAbsent,
+  });
+
+  bool get passed => !cheatedAll && average != null && grade != 'F' && !belowMin;
+}
+
+/// The printable report card (A4): school letterhead, student details, the
+/// statement of marks, the summary, attendance, grade scale and signatures.
+Future<Uint8List> _buildReportCardPdf(_RcData d) async {
+// The built-in PDF font is Latin-1 only.
+  String safe(String t) => String.fromCharCodes([
+    for (final r in t.runes)
+      r == 0x2018 || r == 0x2019
+          ? 0x27
+          : r == 0x2013 || r == 0x2014
+          ? 0x2D
+          : r > 255
+          ? 0x3F
+          : r
+  ]);
+  String m(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+  const navy = PdfColor.fromInt(0xFF1F4E79);
+  const zebra = PdfColor.fromInt(0xFFEEF3F9);
+  const line = PdfColor.fromInt(0xFFB8C4D4);
+  final red = PdfColors.red700;
+  PdfColor gradeColor(String g) => g == 'A' || g == 'B'
+      ? PdfColors.green800
+      : g == 'C' || g == 'D'
+      ? PdfColors.orange800
+      : PdfColors.red800;
+
+// The report card uses the school LOGO (Settings > School > School logo),
+// not the letterhead. It is shown whenever a logo is saved.
+  final logoBytes = schoolLogo.value.bytes;
+  final logoImg = logoBytes == null ? null : pw.MemoryImage(logoBytes);
+  final wmBg = pdfWatermark(LogoPlace.result);
+
+  pw.Widget info(String label, String value) => pw.Container(
+    padding: const pw.EdgeInsets.symmetric(vertical: 4),
+    decoration: const pw.BoxDecoration(
+        border: pw.Border(bottom: pw.BorderSide(color: line, width: 0.6))),
+    child: pw.Row(children: [
+      pw.SizedBox(
+          width: 84,
+          child: pw.Text(safe(label),
+              style: const pw.TextStyle(
+                  fontSize: 9.5, color: PdfColors.grey700))),
+      pw.Expanded(
+          child: pw.Text(safe(value),
+              style: pw.TextStyle(
+                  fontSize: 11,
+                  fontWeight: pw.FontWeight.bold,
+                  color: navy))),
+    ]),
+  );
+
+  pw.Widget cell(String t,
+      {bool bold = false,
+        bool left = false,
+        PdfColor? color,
+        double size = 10.5}) =>
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 6),
+        child: pw.Align(
+          alignment: left ? pw.Alignment.centerLeft : pw.Alignment.center,
+          child: pw.Text(safe(t),
+              style: pw.TextStyle(
+                  fontSize: size,
+                  color: color,
+                  fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+        ),
+      );
+
+  pw.Widget box(String value, String label,
+      {PdfColor? fill, PdfColor? color}) =>
+      pw.Expanded(
+        child: pw.Container(
+          margin: const pw.EdgeInsets.symmetric(horizontal: 3),
+          padding: const pw.EdgeInsets.symmetric(vertical: 8),
+          alignment: pw.Alignment.center,
+          decoration: pw.BoxDecoration(
+              color: fill,
+              borderRadius: pw.BorderRadius.circular(5),
+              border: pw.Border.all(color: navy, width: 1.4)),
+          child: pw.Column(children: [
+            pw.Text(safe(value),
+                style: pw.TextStyle(
+                    fontSize: 15,
+                    fontWeight: pw.FontWeight.bold,
+                    color: color ?? navy)),
+            pw.SizedBox(height: 2),
+            pw.Text(safe(label),
+                style: pw.TextStyle(
+                    fontSize: 8, color: fill == null ? PdfColors.grey700 : color)),
+          ]),
+        ),
+      );
+
+  pw.Widget panel(String title, pw.Widget child) => pw.Expanded(
+    child: pw.Container(
+      margin: const pw.EdgeInsets.symmetric(horizontal: 3),
+      padding: const pw.EdgeInsets.all(8),
+      decoration: pw.BoxDecoration(
+          borderRadius: pw.BorderRadius.circular(5),
+          border: pw.Border.all(color: line, width: 0.8)),
+      child: pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(title,
+                style: pw.TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: pw.FontWeight.bold,
+                    color: navy)),
+            pw.SizedBox(height: 5),
+            child,
+          ]),
+    ),
+  );
+
+  final attPct =
+  d.attTotal == 0 ? 0 : (d.attPresent / d.attTotal * 100).round();
+
+  final doc = pw.Document();
+  doc.addPage(pw.MultiPage(
+    pageTheme: pw.PageTheme(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.fromLTRB(36, 34, 36, 34),
+// watermark (if any) + a thin frame around the page
+      buildBackground: (ctx) => pw.FullPage(
+        ignoreMargins: true,
+        child: pw.Stack(children: [
+          if (wmBg != null) wmBg(ctx),
+          pw.Padding(
+            padding: const pw.EdgeInsets.all(16),
+            child: pw.Container(
+                decoration: pw.BoxDecoration(
+                    border: pw.Border.all(color: navy, width: 1.6))),
+          ),
+        ]),
+      ),
+    ),
+    build: (ctx) => [
+// Header bar: the school logo on the left, the title in the middle.
+      pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(vertical: 9, horizontal: 10),
+        color: navy,
+        child: pw.Stack(alignment: pw.Alignment.center, children: [
+          if (logoImg != null)
+            pw.Align(
+              alignment: pw.Alignment.centerLeft,
+              child: pw.Container(
+                padding: const pw.EdgeInsets.all(2),
+                decoration: pw.BoxDecoration(
+                    color: PdfColors.white,
+                    borderRadius: pw.BorderRadius.circular(4)),
+                child: pw.Image(logoImg, height: 52, fit: pw.BoxFit.contain),
+              ),
+            ),
+          pw.Column(children: [
+            pw.Text('REPORT CARD',
+                style: pw.TextStyle(
+                    fontSize: 19,
+                    letterSpacing: 4,
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.white)),
+            pw.SizedBox(height: 2),
+            pw.Text(
+                safe(d.year.isEmpty ? d.exam : '${d.exam}  |  ${d.year}'),
+                style: const pw.TextStyle(
+                    fontSize: 10.5, color: PdfColors.white)),
+          ]),
+        ]),
+      ),
+      pw.SizedBox(height: 12),
+      pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+        pw.Expanded(
+            child: pw.Column(children: [
+              info('Student name', d.name),
+              info('Student ID', d.studentNo.isEmpty ? '-' : d.studentNo),
+            ])),
+        pw.SizedBox(width: 14),
+        pw.Expanded(
+            child: pw.Column(children: [
+              info('Class', d.className),
+              info('Form', d.form),
+            ])),
+      ]),
+      pw.SizedBox(height: 14),
+      pw.Row(children: [
+        pw.Text('STATEMENT OF MARKS',
+            style: pw.TextStyle(
+                fontSize: 10.5,
+                fontWeight: pw.FontWeight.bold,
+                color: navy)),
+        pw.SizedBox(width: 8),
+        pw.Expanded(child: pw.Container(height: 1, color: line)),
+      ]),
+      pw.SizedBox(height: 5),
+      pw.Table(
+        border: pw.TableBorder.all(color: line, width: 0.6),
+        columnWidths: const {
+          0: pw.FixedColumnWidth(28),
+          1: pw.FlexColumnWidth(),
+          2: pw.FixedColumnWidth(70),
+          3: pw.FixedColumnWidth(60),
+          4: pw.FixedColumnWidth(56),
+        },
+        children: [
+          pw.TableRow(
+            decoration: const pw.BoxDecoration(color: navy),
+            children: [
+              cell('#', bold: true, color: PdfColors.white, size: 9.5),
+              cell('SUBJECT',
+                  bold: true, left: true, color: PdfColors.white, size: 9.5),
+              cell('MARKS',
+                  bold: true, color: PdfColors.white, size: 9.5),
+              cell('MAX', bold: true, color: PdfColors.white, size: 9.5),
+              cell('GRADE',
+                  bold: true, color: PdfColors.white, size: 9.5),
+            ],
+          ),
+          for (var i = 0; i < d.rows.length; i++)
+            pw.TableRow(
+              decoration:
+              pw.BoxDecoration(color: i.isOdd ? zebra : PdfColors.white),
+              children: [
+                cell('${i + 1}'),
+                cell(d.rows[i].subject, left: true, bold: true),
+                d.rows[i].cheated
+                    ? cell('Cheated', bold: true, color: red, size: 9.5)
+                    : cell(d.rows[i].mark == null ? '-' : m(d.rows[i].mark!),
+                    bold: true,
+                    color: d.rows[i].mark == null
+                        ? null
+                        : gradeColor(d.rows[i].grade)),
+                cell(d.rows[i].cheated ? '-' : m(d.rows[i].max)),
+                cell(d.rows[i].cheated || d.rows[i].mark == null
+                    ? '-'
+                    : d.rows[i].grade,
+                    bold: true,
+                    color: d.rows[i].cheated || d.rows[i].mark == null
+                        ? null
+                        : gradeColor(d.rows[i].grade)),
+              ],
+            ),
+          pw.TableRow(
+            decoration: const pw.BoxDecoration(color: zebra),
+            children: [
+              cell(''),
+              cell('Grand Total', left: true, bold: true, color: navy),
+              cell(m(d.total), bold: true, color: navy),
+              cell(m(d.totalMax), bold: true, color: navy),
+              cell(d.grade ?? '-',
+                  bold: true,
+                  color: d.grade == null ? null : gradeColor(d.grade!)),
+            ],
+          ),
+        ],
+      ),
+      pw.SizedBox(height: 12),
+      pw.Row(children: [
+        box('${m(d.total)} / ${m(d.totalMax)}', 'TOTAL MARKS'),
+        box(d.average == null ? '-' : m(d.average!), 'AVERAGE'),
+        box(d.percent == null ? '-' : '${d.percent!.toStringAsFixed(1)}%',
+            'PERCENTAGE'),
+        box(d.grade ?? '-', 'OVERALL GRADE',
+            color: d.grade == null ? null : gradeColor(d.grade!)),
+        box(
+            d.cheatedAll
+                ? 'CHEATED'
+                : d.average == null
+                ? '-'
+                : d.passed
+                ? 'PASS'
+                : 'FAIL',
+            'RESULT',
+            fill: d.cheatedAll || (d.average != null && !d.passed)
+                ? PdfColors.red700
+                : navy,
+            color: PdfColors.white),
+      ]),
+      pw.SizedBox(height: 12),
+      pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+        panel(
+            'ATTENDANCE',
+            pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Text('Total lessons: ${d.attTotal}',
+                      style: const pw.TextStyle(fontSize: 9.5)),
+                  pw.Text('Present: ${d.attPresent}',
+                      style: const pw.TextStyle(fontSize: 9.5)),
+                  pw.Text('Absent: ${d.attAbsent}',
+                      style: const pw.TextStyle(fontSize: 9.5)),
+                  pw.Text('Attendance: $attPct%',
+                      style: pw.TextStyle(
+                          fontSize: 9.5, fontWeight: pw.FontWeight.bold)),
+                ])),
+        panel(
+            'GRADE SCALE (average mark)',
+            pw.Wrap(spacing: 4, runSpacing: 4, children: [
+              for (final s in d.scale)
+                pw.Container(
+                  padding: const pw.EdgeInsets.symmetric(
+                      horizontal: 5, vertical: 2),
+                  decoration: pw.BoxDecoration(
+                      color: s.startsWith('F') ? PdfColors.red50 : zebra,
+                      borderRadius: pw.BorderRadius.circular(8)),
+                  child: pw.Text(safe(s),
+                      style: const pw.TextStyle(fontSize: 8.5)),
+                ),
+            ])),
+      ]),
+      if (d.cheatedAll || d.belowMin) ...[
+        pw.SizedBox(height: 8),
+        pw.Text(
+            d.cheatedAll
+                ? 'Marked as cheated in all subjects. No mark counts.'
+                : 'Below the minimum total for this exam.',
+            style: pw.TextStyle(
+                fontSize: 9.5,
+                fontWeight: pw.FontWeight.bold,
+                color: red)),
+      ],
+      pw.SizedBox(height: 14),
+      pw.Row(children: [
+        pw.Text("CLASS TEACHER'S REMARKS",
+            style: pw.TextStyle(
+                fontSize: 10, fontWeight: pw.FontWeight.bold, color: navy)),
+        pw.SizedBox(width: 8),
+        pw.Expanded(child: pw.Container(height: 1, color: line)),
+      ]),
+      pw.SizedBox(height: 22),
+      pw.Container(height: 0.6, color: line),
+      pw.SizedBox(height: 22),
+      pw.Container(height: 0.6, color: line),
+      pw.SizedBox(height: 26),
+      pw.Row(children: [
+        for (final s in const ['CLASS TEACHER', 'EXAM CONTROLLER', 'PRINCIPAL'])
+          pw.Expanded(
+            child: pw.Container(
+              margin: const pw.EdgeInsets.symmetric(horizontal: 12),
+              padding: const pw.EdgeInsets.only(top: 4),
+              decoration: const pw.BoxDecoration(
+                  border: pw.Border(top: pw.BorderSide(color: navy, width: 1))),
+              child: pw.Center(
+                  child: pw.Text(s,
+                      style: pw.TextStyle(
+                          fontSize: 9,
+                          fontWeight: pw.FontWeight.bold,
+                          color: navy))),
+            ),
+          ),
+      ]),
+      pw.SizedBox(height: 10),
+      pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+        pw.Text('This is a computer generated report card',
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+        pw.Text('Date of issue: ${d.issued}',
+            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700)),
+      ]),
+    ],
+  ));
+  return doc.save();
+}
+
 class StudentDetailScreen extends StatefulWidget {
   final StudentInfo student;
   final SectionInfo section;
@@ -14730,18 +18791,37 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       .snapshots();
   late Future<List<_AttEntry>> _attFuture = _loadAttendance();
   late Future<Map<String, ResultMarks>> _resFuture = _loadResults();
+  final Map<String, bool> _exp = {}; // exam card open / closed
+  bool _printing = false;
   late Future<_RealSection> _secFuture = _loadRealSection();
+  /// True for an administrator: may edit everything here.
+  bool _admin = false;
+  /// True when the signed-in user may open the Discipline page: the
+  /// Discipline tab is then shown here too.
+  bool _canDiscipline = false;
+  StreamSubscription<UserProfile>? _meSub;
   String _filter = 'all'; // all | present | absent | late
   String? _twin; // the same student's record in the class <-> section twin
-  bool _admin = false;
 
   @override
   void initState() {
     super.initState();
     CheatService.start();
-    UserProfile.watchMine().first.then((p) {
-      if (mounted) setState(() => _admin = p.fullAccess);
-    }).catchError((_) {});
+    _meSub = UserProfile.watchMine().listen((p) {
+      if (mounted) {
+        setState(() {
+          _admin = p.fullAccess;
+          _canDiscipline = p.effectiveAccess(appSettings.value)
+              .contains(AppPages.discipline);
+        });
+      }
+    }, onError: (_) {});
+  }
+
+  @override
+  void dispose() {
+    _meSub?.cancel();
+    super.dispose();
   }
 
   /// The real section of the student. A student of a whole class (2B) is
@@ -15083,7 +19163,359 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
           tab(Icons.badge_outlined, 'Overview'),
           tab(Icons.emoji_events_outlined, 'Results'),
           tab(Icons.fact_check_outlined, 'Attendance'),
+          if (_canDiscipline) tab(Icons.gavel_outlined, 'Discipline'),
         ],
+      ),
+    );
+  }
+
+// ---------------- discipline tab ----------------
+  /// Incidents of this student (also the ones saved on the class / section
+  /// twin record), newest first. Read only: they are added and edited in the
+  /// Discipline page.
+  Widget _disciplineTab() => FutureBuilder<String?>(
+    future: _twinId,
+    builder: (context, tw) {
+      if (tw.connectionState != ConnectionState.done) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final ids = <String>{widget.student.id, if (tw.data != null) tw.data!}
+          .toList();
+      return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance
+            .collection('discipline')
+            .where('studentId', whereIn: ids)
+            .snapshots(),
+        builder: (context, snap) {
+          if (snap.hasError) {
+            return _msg('Could not load discipline: ${snap.error}',
+                Icons.error_outline);
+          }
+          if (!snap.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final list = snap.data!.docs.map(DisciplineRecord.fromDoc).toList()
+            ..sort((a, b) => b.date.compareTo(a.date));
+          if (list.isEmpty) {
+            return _msg('No discipline incidents for this student.',
+                Icons.gavel_outlined);
+          }
+          final fmt = DateFormat('d MMM y');
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                    '${list.length} incident${list.length == 1 ? '' : 's'}',
+                    style: const TextStyle(
+                        fontSize: 13, color: Colors.black54)),
+              ),
+              for (final r in list)
+                Builder(builder: (context) {
+                  final c = DisciplineRules.severityColor(r.severity);
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    elevation: 0,
+                    color: Colors.white,
+                    shape: _kSettingsCardShape,
+                    clipBehavior: Clip.antiAlias,
+                    child: IntrinsicHeight(
+                      child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Container(width: 6, color: c),
+                            Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.all(14),
+                                child: Column(
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                    Row(children: [
+                                      Expanded(
+                                          child: Text(r.type,
+                                              style: const TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight:
+                                                  FontWeight.w700))),
+                                      Chip(
+                                          visualDensity:
+                                          VisualDensity.compact,
+                                          side: BorderSide(color: c),
+                                          backgroundColor:
+                                          c.withOpacity(0.15),
+                                          label: Text(r.severity,
+                                              style: TextStyle(
+                                                  fontWeight:
+                                                  FontWeight.w600,
+                                                  color: c))),
+                                    ]),
+                                    Text(fmt.format(r.date),
+                                        style: const TextStyle(
+                                            color: Colors.black54)),
+                                    const SizedBox(height: 6),
+                                    Text.rich(TextSpan(children: [
+                                      const TextSpan(
+                                          text: 'Action taken: ',
+                                          style: TextStyle(
+                                              fontWeight: FontWeight.w600)),
+                                      TextSpan(text: r.action),
+                                    ])),
+                                    if (r.note.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(r.note),
+                                    ],
+                                    if (r.createdByName.isNotEmpty) ...[
+                                      const SizedBox(height: 6),
+                                      Text('Recorded by ${r.createdByName}',
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.black45)),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ]),
+                    ),
+                  );
+                }),
+            ],
+          );
+        },
+      );
+    },
+  );
+
+// ---------------- profile: quick-to-read info tiles ----------------
+  /// One small tile: coloured icon, small label, bold value (and a grey line).
+  Widget _tile(IconData icon, Color color, String label, Widget value) =>
+      Container(
+        padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: color.withOpacity(0.18)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+                color: color.withOpacity(0.16), shape: BoxShape.circle),
+            child: Icon(icon, size: 19, color: color),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(label,
+                      style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black45)),
+                  const SizedBox(height: 2),
+                  value,
+                ]),
+          ),
+        ]),
+      );
+
+  Widget _tv(String t) => Text(t,
+      style: const TextStyle(
+          fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF1B2733)));
+
+  Widget _tsub(String t) => Padding(
+    padding: const EdgeInsets.only(top: 1),
+    child: Text(t,
+        style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+  );
+
+  /// Tiles of one group, [cols] per row (fewer on a narrow screen).
+  Widget _tiles(List<Widget> tiles, {int cols = 2, int narrow = 2}) =>
+      LayoutBuilder(builder: (context, c) {
+        final n = c.maxWidth >= 560 ? cols : narrow;
+        final w = (c.maxWidth - 10 * (n - 1)) / n;
+        return Wrap(spacing: 10, runSpacing: 10, children: [
+          for (final t in tiles) SizedBox(width: w, child: t),
+        ]);
+      });
+
+  Widget _groupLabel(String t, Color c) => Padding(
+    padding: const EdgeInsets.fromLTRB(2, 0, 0, 8),
+    child: Text(t.toUpperCase(),
+        style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.2,
+            color: c)),
+  );
+
+  Widget _profileCard(Map<String, dynamic> m, SectionInfo sec,
+      List<String> phones, bool hasPhone, bool linked, bool noId) {
+    const blue = kBlue;
+    const green = Color(0xFF16A085);
+    const orange = Color(0xFFE67E22);
+    const purple = Color(0xFF8E44AD);
+    final gender = '${m['gender'] ?? ''}'.trim();
+    final created = m['createdAt'] as Timestamp?;
+    final updated = m['updatedAt'] as Timestamp?;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 0,
+      color: Colors.white,
+      shape: _kSettingsCardShape,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // ---- class ----
+          _groupLabel('Class', blue),
+          FutureBuilder<_RealSection>(
+            future: _secFuture,
+            builder: (context, s) {
+              final r = s.data;
+              final real = r?.sec;
+              final done = s.connectionState == ConnectionState.done;
+              final secName = !done
+                  ? '…'
+                  : real != null
+                  ? 'Section ${real.subName}'
+                  : (r != null && r.classDivided
+                  ? 'Not placed yet'
+                  : 'Whole class');
+              return _tiles([
+                _tile(Icons.school_outlined, blue, 'Form', _tv(sec.form)),
+                _tile(Icons.class_outlined, blue, 'Class',
+                    _tv(SectionInfo.code(sec.form, sec.classKey))),
+                _tile(Icons.groups_outlined, blue, 'Section', _tv(secName)),
+                _tile(
+                    Icons.people_outline,
+                    blue,
+                    'Students here',
+                    Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _tv(r?.size == null ? '-' : '${r!.size}'),
+                          if (r?.size != null)
+                            _tsub('in ${(real ?? sec).fullName}'),
+                        ])),
+              ], cols: 4, narrow: 2);
+            },
+          ),
+          const SizedBox(height: 18),
+          // ---- student ----
+          _groupLabel('Student', green),
+          _tiles([
+            _tile(
+                gender == 'Female'
+                    ? Icons.female
+                    : gender == 'Male'
+                    ? Icons.male
+                    : Icons.wc,
+                green,
+                'Gender',
+                _tv(gender.isEmpty ? 'Not set' : gender)),
+            _tile(
+                Icons.badge_outlined,
+                green,
+                'Student ID',
+                noId
+                    ? Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    children: [
+                      _tv('Not set'),
+                      _smallBtn(Icons.auto_fix_high, 'Generate', () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        try {
+                          await SchoolService()
+                              .generateStudentNo(widget.student.id);
+                        } catch (e) {
+                          messenger.showSnackBar(SnackBar(
+                              content:
+                              Text('Could not generate the ID: $e')));
+                        }
+                      }),
+                    ])
+                    : _tv('${m['studentNo']}'.trim())),
+            _tile(
+                Icons.phone_outlined,
+                green,
+                phones.length > 1 ? 'Phone numbers' : 'Phone number',
+                phones.isEmpty
+                    ? _tv('Not saved')
+                    : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [for (final p in phones) _tv(p)])),
+            _tile(
+                Icons.event_available_outlined,
+                green,
+                'Added',
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _tv(_fmtDate(created)),
+                  if (updated != null) _tsub('Updated ${_fmtDate(updated)}'),
+                ])),
+          ], cols: 2, narrow: 1),
+          const SizedBox(height: 18),
+          // ---- login ----
+          _groupLabel('Login', purple),
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            decoration: BoxDecoration(
+              color: (linked ? kGreen : kLate).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: (linked ? kGreen : kLate).withOpacity(0.3)),
+            ),
+            child: Wrap(
+              spacing: 14,
+              runSpacing: 10,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                        color: purple.withOpacity(0.15), shape: BoxShape.circle),
+                    child: const Icon(Icons.key_outlined,
+                        size: 19, color: purple),
+                  ),
+                  const SizedBox(width: 11),
+                  Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text('Username / password',
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.black45)),
+                        const SizedBox(height: 2),
+                        _tv(hasPhone ? '${m['phone']}' : 'No phone number'),
+                        _tsub(hasPhone
+                            ? 'Same for both'
+                            : 'The student cannot log in'),
+                      ]),
+                ]),
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  linked
+                      ? _tag('Linked', kGreen, icon: Icons.check_circle)
+                      : _tag('Not linked', kLate, icon: Icons.link_off),
+                  if (!linked && hasPhone) ...[
+                    const SizedBox(width: 8),
+                    _smallBtn(Icons.key, 'Create login', () {
+                      runAccountCreation(context,
+                          ids: [widget.student.id], quiet: true);
+                    }),
+                  ],
+                ]),
+              ],
+            ),
+          ),
+        ]),
       ),
     );
   }
@@ -15132,366 +19564,30 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               return _statTile(Icons.emoji_events_outlined, 'Average', '…',
                   Colors.blueGrey);
             }
-            final avgs = [
+            final vs = [
               for (final v in _views(snap.data!))
-                if (v.average != null) v.average!
+                if (v.average != null) v
             ];
-            if (avgs.isEmpty) {
+            if (vs.isEmpty) {
               return _statTile(Icons.emoji_events_outlined, 'Average', '–',
                   Colors.blueGrey, 'no result yet');
             }
-            final o = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-            final g = _gradeOf(o);
+            final o = vs.fold(0.0, (a, v) => a + v.average!) / vs.length;
+            final oPct = vs.fold(
+                0.0,
+                    (a, v) =>
+                a +
+                    v.average! /
+                        _gradeMax(v.exam, widget.section.form) *
+                        100) /
+                vs.length;
+            final g = _gradeOf(oPct);
             return _statTile(Icons.emoji_events_outlined, 'Average', _f1(o),
                 _gradeColor(g), 'Grade $g');
           },
         ),
       ),
     ]);
-  }
-
-
-  // ---------------- admin editing ----------------
-  Widget _adminBar(Map<String, dynamic> m) => Padding(
-    padding: const EdgeInsets.only(bottom: 12),
-    child: Wrap(spacing: 8, runSpacing: 8, children: [
-      FilledButton.tonalIcon(
-        onPressed: () => _editProfile(m),
-        icon: const Icon(Icons.edit, size: 18),
-        label: const Text('Edit details'),
-      ),
-      OutlinedButton.icon(
-        onPressed: _moveSection,
-        icon: const Icon(Icons.swap_horiz, size: 18),
-        label: const Text('Change section / class'),
-      ),
-    ]),
-  );
-
-  Future<void> _editProfile(Map<String, dynamic> m) async {
-    final name =
-    TextEditingController(text: '${m['name'] ?? widget.student.name}');
-    final no = TextEditingController(text: '${m['studentNo'] ?? ''}');
-    final phones = TextEditingController(
-        text: m['phones'] is List
-            ? (m['phones'] as List).join(', ')
-            : '${m['phone'] ?? ''}');
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Edit student details'),
-        content: SizedBox(
-          width: 380,
-          child: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              TextField(
-                controller: name,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(
-                    labelText: 'Student name', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: no,
-                decoration: const InputDecoration(
-                    labelText: 'Student ID', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: phones,
-                keyboardType: TextInputType.phone,
-                decoration: const InputDecoration(
-                  labelText: 'Phone number(s)',
-                  helperText: 'Separate several numbers with a comma. If the '
-                      'student already has a login, it keeps its old phone number.',
-                  helperMaxLines: 3,
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ]),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Save')),
-        ],
-      ),
-    );
-    final newName = name.text.trim();
-    final newNo = cleanStudentNo(no.text);
-    final newPhones = phones.text;
-    name.dispose();
-    no.dispose();
-    phones.dispose();
-    if (ok != true || !mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    if (newName.isEmpty) {
-      messenger.showSnackBar(const SnackBar(content: Text('Enter the name.')));
-      return;
-    }
-    try {
-      final col = FirebaseFirestore.instance.collection('students');
-      final twin = await _twinId;
-      final oldNo = '${m['studentNo'] ?? ''}'.trim();
-      if (newNo.isNotEmpty && newNo != oldNo) {
-        final q = await col.where('studentNo', isEqualTo: newNo).get();
-        if (q.docs.any((d) => d.id != widget.student.id && d.id != twin)) {
-          messenger.showSnackBar(
-              SnackBar(content: Text('Another student already has ID $newNo.')));
-          return;
-        }
-      }
-      final svc = SchoolService();
-      await svc.updateStudent(widget.student.id, newName, newPhones);
-      if (newNo != oldNo) {
-        await col
-            .doc(widget.student.id)
-            .update({'studentNo': newNo, 'studentNoAuto': false});
-      }
-      if (twin != null) {
-        try {
-          await svc.updateStudent(twin, newName, newPhones);
-        } catch (_) {} // the twin copy is optional
-      }
-      messenger.showSnackBar(const SnackBar(content: Text('Student updated')));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
-    }
-  }
-
-  Future<void> _moveSection() async {
-    final messenger = ScaffoldMessenger.of(context);
-    final from = widget.section;
-    final all = await SchoolService().watchSections().first;
-    final targets = [
-      for (final x in all)
-        if (x.form == from.form && x.id != from.id) x
-    ];
-    if (!mounted) return;
-    if (targets.isEmpty) {
-      messenger.showSnackBar(
-          SnackBar(content: Text('There is no other section in ${from.form}.')));
-      return;
-    }
-    final to = await showDialog<SectionInfo>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: Text('Move "${widget.student.name}" to...'),
-        children: [
-          for (final t in targets)
-            SimpleDialogOption(
-                onPressed: () => Navigator.pop(ctx, t),
-                child: Text(t.fullName, style: const TextStyle(fontSize: 16))),
-        ],
-      ),
-    );
-    if (to == null || !mounted) return;
-    try {
-      await SchoolService().moveStudent(widget.student.id, to.id);
-      if (!mounted) return;
-      Navigator.pop(context); // this page still shows the old section
-      messenger.showSnackBar(SnackBar(content: Text('Moved to ${to.fullName}')));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
-    }
-  }
-
-  // results
-  Future<void> _editResult(String exam) async {
-    await _openResultEditor(
-        context, widget.student, widget.section.fullName, exam,
-        form: widget.section.form);
-    if (mounted) setState(() => _resFuture = _loadResults());
-  }
-
-  Future<void> _addResult() async {
-    final pick = await showDialog<String>(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: const Text('Choose the exam'),
-        children: [
-          for (final e in appSettings.value.examOptions)
-            SimpleDialogOption(
-                onPressed: () => Navigator.pop(ctx, e),
-                child:
-                Text(appSettings.value.isExamOpen(e) ? e : '$e (closed)')),
-        ],
-      ),
-    );
-    if (pick != null) await _editResult(pick);
-  }
-
-  // attendance
-  Future<void> _editDayMarks(List<_AttEntry> list) async {
-    String k(_AttEntry e) => '${e.docId}|${e.sid}';
-    final marks = {
-      for (final e in list) k(e): e.mark == 'late' ? 'present' : e.mark
-    };
-    final d = _parse(list.first.dateKey);
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: Text(d == null
-              ? list.first.dateKey
-              : DateFormat('EEE, MMM d, yyyy').format(d)),
-          content: SizedBox(
-            width: 400,
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                for (final e in list)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(e.subject.isEmpty ? 'Whole day' : e.subject,
-                              style:
-                              const TextStyle(fontWeight: FontWeight.w600)),
-                          const SizedBox(height: 4),
-                          SegmentedButton<String>(
-                            showSelectedIcon: false,
-                            segments: const [
-                              ButtonSegment(
-                                  value: 'present', label: Text('Present')),
-                              ButtonSegment(
-                                  value: 'absent', label: Text('Absent')),
-                              ButtonSegment(
-                                  value: 'remove', label: Text('Remove')),
-                            ],
-                            selected: {marks[k(e)]!},
-                            onSelectionChanged: (v) =>
-                                setD(() => marks[k(e)] = v.first),
-                          ),
-                        ]),
-                  ),
-              ]),
-            ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Cancel')),
-            FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Save')),
-          ],
-        ),
-      ),
-    );
-    if (ok != true || !mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final col = FirebaseFirestore.instance.collection('attendance');
-      final batch = FirebaseFirestore.instance.batch();
-      var n = 0;
-      for (final e in list) {
-        final v = marks[k(e)]!;
-        if (e.docId.isEmpty || v == e.mark) continue;
-        batch.update(col.doc(e.docId), {
-          FieldPath(['records', e.sid]):
-          v == 'remove' ? FieldValue.delete() : v,
-        });
-        n++;
-      }
-      if (n > 0) await batch.commit();
-      if (!mounted) return;
-      setState(() => _attFuture = _loadAttendance());
-      messenger.showSnackBar(SnackBar(
-          content: Text(n == 0 ? 'Nothing changed' : 'Attendance updated')));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
-    }
-  }
-
-  Future<void> _addAttendance() async {
-    var date = DateTime.now();
-    var subject = '';
-    var mark = 'present';
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setD) => AlertDialog(
-          title: const Text('Add attendance'),
-          content: SizedBox(
-            width: 380,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final p = await showDatePicker(
-                    context: ctx,
-                    initialDate: date,
-                    firstDate: DateTime(2020),
-                    lastDate: DateTime.now().add(const Duration(days: 365)),
-                  );
-                  if (p != null) setD(() => date = p);
-                },
-                icon: const Icon(Icons.calendar_today, size: 18),
-                label: Text(DateFormat('EEE, MMM d, yyyy').format(date)),
-                style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 44)),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: subject,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                    labelText: 'Subject',
-                    border: OutlineInputBorder(),
-                    isDense: true),
-                items: [
-                  const DropdownMenuItem(value: '', child: Text('Whole day')),
-                  for (final s in ExamService.subjects)
-                    DropdownMenuItem(value: s, child: Text(s)),
-                ],
-                onChanged: (v) => setD(() => subject = v ?? ''),
-              ),
-              const SizedBox(height: 12),
-              SegmentedButton<String>(
-                showSelectedIcon: false,
-                segments: const [
-                  ButtonSegment(value: 'present', label: Text('Present')),
-                  ButtonSegment(value: 'absent', label: Text('Absent')),
-                ],
-                selected: {mark},
-                onSelectionChanged: (v) => setD(() => mark = v.first),
-              ),
-            ]),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Cancel')),
-            FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Save')),
-          ],
-        ),
-      ),
-    );
-    if (ok != true || !mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final key = DateFormat('yyyy-MM-dd').format(date);
-      final id = SchoolService()._attId(widget.student.sectionId, key, subject);
-      await FirebaseFirestore.instance.collection('attendance').doc(id).set({
-        'sectionId': widget.student.sectionId,
-        'date': key,
-        'subject': subject,
-        'records': {widget.student.id: mark},
-        'updatedBy': FirebaseAuth.instance.currentUser?.uid,
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      if (!mounted) return;
-      setState(() => _attFuture = _loadAttendance());
-      messenger.showSnackBar(const SnackBar(content: Text('Attendance added')));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Failed: $e')));
-    }
   }
 
   Widget _overview() {
@@ -15512,105 +19608,21 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
           children: [
+            if (_admin)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.icon(
+                    onPressed: () => _editStudent(m),
+                    icon: const Icon(Icons.edit_outlined, size: 18),
+                    label: const Text('Edit student details'),
+                  ),
+                ),
+              ),
             _statsRow(),
             const SizedBox(height: 12),
-            if (_admin) _adminBar(m),
-            _box('Class & section', Icons.groups_outlined, [
-              _kv(Icons.school_outlined, 'Form', _val(sec.form)),
-              _kv(Icons.class_outlined, 'Class',
-                  _val(SectionInfo.code(sec.form, sec.classKey))),
-              FutureBuilder<_RealSection>(
-                future: _secFuture,
-                builder: (context, s) {
-                  final r = s.data;
-                  final real = r?.sec;
-                  final Widget secVal = s.connectionState != ConnectionState.done
-                      ? _val('…')
-                      : real != null
-                      ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _val('Section ${real.subName}'),
-                        Text(real.fullName,
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.black54)),
-                      ])
-                      : _val(r != null && r.classDivided
-                      ? 'Not placed in a section yet'
-                      : 'Whole class (no sections)');
-                  return Column(children: [
-                    _kv(Icons.groups_outlined, 'Section', secVal),
-                    if (r != null && r.size != null)
-                      _kv(Icons.people_outline, 'Students here',
-                          _val('${r.size} in ${(real ?? sec).fullName}')),
-                  ]);
-                },
-              ),
-            ]),
-            _box('Contact', Icons.phone_outlined, [
-              if (phones.isEmpty)
-                _kv(Icons.phone_outlined, 'Phone number', _val('Not saved'))
-              else
-                for (var i = 0; i < phones.length; i++)
-                  _kv(Icons.phone_outlined, i == 0 ? 'Phone number(s)' : '',
-                      _val(phones[i])),
-            ]),
-            _box('Login', Icons.key_outlined, [
-              _kv(
-                  Icons.person_outline,
-                  'Username / password',
-                  _val(!hasPhone
-                      ? 'No phone number, cannot log in'
-                      : '${m['phone']}  (same for both)')),
-              _kv(
-                Icons.link,
-                'Student account',
-                Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 4,
-                    children: [
-                      linked
-                          ? _tag('Linked', kGreen, icon: Icons.check_circle)
-                          : _tag('Not linked', kLate, icon: Icons.link_off),
-                      if (!linked && hasPhone)
-                        _smallBtn(Icons.key, 'Create login', () {
-                          runAccountCreation(context,
-                              ids: [widget.student.id], quiet: true);
-                        }),
-                    ]),
-              ),
-            ]),
-            _box('Record', Icons.badge_outlined, [
-              _kv(
-                  Icons.tag,
-                  'Student ID',
-                  noId
-                      ? Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 8,
-                      runSpacing: 4,
-                      children: [
-                        _val('Not set yet'),
-                        _smallBtn(Icons.auto_fix_high, 'Generate', () async {
-                          final messenger = ScaffoldMessenger.of(context);
-                          try {
-                            await SchoolService()
-                                .generateStudentNo(widget.student.id);
-                          } catch (e) {
-                            messenger.showSnackBar(SnackBar(
-                                content:
-                                Text('Could not generate the ID: $e')));
-                          }
-                        }),
-                      ])
-                      : _val('${m['studentNo']}'.trim())),
-              _kv(Icons.event_available_outlined, 'Added',
-                  _val(_fmtDate(m['createdAt'] as Timestamp?))),
-              if (m['updatedAt'] != null)
-                _kv(Icons.update, 'Last updated',
-                    _val(_fmtDate(m['updatedAt'] as Timestamp?))),
-            ]),
+            _profileCard(m, sec, phones, hasPhone, linked, noId),
           ],
         );
       },
@@ -15625,7 +19637,13 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     ];
     if (avgs.isEmpty) return const SizedBox.shrink();
     final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
-    final g = _gradeOf(overall);
+    final overallPct = [
+      for (final v in views)
+        if (v.average != null)
+          v.average! / _gradeMax(v.exam, widget.section.form) * 100
+    ].fold(0.0, (a, b) => a + b) /
+        avgs.length;
+    final g = _gradeOf(overallPct);
     final bySub = <String, List<double>>{};
     for (final v in views) {
       v.counted.forEach((k, x) => (bySub[k] ??= []).add(x));
@@ -15700,11 +19718,141 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
             color: _gradeColor(g))),
   );
 
-  Widget _examCard(_ExamView v, bool expanded) {
+  Future<_RcData> _cardData(_ExamView v) async {
     final avg = v.average;
-    final g = avg == null ? null : _gradeOf(avg);
     final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
     final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+    final g = avg == null ? null : _gradeOf(avg, max: maxMark);
+    final subs = <String>[
+      for (final s in ExamService.subjects)
+        if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
+      for (final s in {...v.marks.keys, ...v.cheatedSubs})
+        if (!ExamService.subjects.contains(s)) s,
+    ];
+    var attTotal = 0, attPresent = 0;
+    try {
+      final att = await _attFuture;
+      attTotal = att.length;
+      attPresent = att.where((e) => e.present).length;
+    } catch (_) {}
+    var year = '';
+    try {
+      year = (await ExamService().getHeading()).academicYear;
+    } catch (_) {}
+    final st = appSettings.value;
+    final totalMax =
+    limits.totalMax > 0 ? limits.totalMax : maxMark * v.counted.length;
+    return _RcData(
+      name: widget.student.name,
+      studentNo: widget.student.studentNo,
+      className: widget.section.fullName,
+      form: widget.section.form,
+      exam: v.exam,
+      year: year,
+      issued: DateFormat('dd-MM-yyyy').format(DateTime.now()),
+      rows: [
+        for (final s in subs)
+          _RcRow(
+            s,
+            v.marks[s],
+            maxMark,
+            v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!, max: maxMark),
+            v.cheatedAll || v.cheatedSubs.contains(s),
+          ),
+      ],
+      total: v.total,
+      totalMax: totalMax,
+      average: avg,
+      percent: avg == null || maxMark <= 0 ? null : avg / maxMark * 100,
+      grade: g,
+      cheatedAll: v.cheatedAll,
+      belowMin: limits.totalMin > 0 && avg != null && v.total < limits.totalMin,
+      scale: [
+        for (var i = 0; i < st.grades.length; i++)
+          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
+        'F below ${_fmtMark(st.grades.last)}',
+      ],
+      attTotal: attTotal,
+      attPresent: attPresent,
+      attAbsent: attTotal - attPresent,
+    );
+  }
+
+  /// Opens the print dialog with this student's report card for one exam.
+  Future<void> _printCard(_ExamView v) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _printing = true);
+    try {
+      final bytes = await _buildReportCardPdf(await _cardData(v));
+      if (mounted) setState(() => _printing = false);
+      await Printing.layoutPdf(
+        name: 'Report card - ${widget.student.name} - ${v.exam}',
+        onLayout: (_) async => bytes,
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text(
+              'Could not create the report card: ${'$e'.replaceFirst('Exception: ', '')}')));
+    } finally {
+      if (mounted) setState(() => _printing = false);
+    }
+  }
+
+  static const _rcNavy = Color(0xFF1F4E79);
+  static const _rcZebra = Color(0xFFF1F5FA);
+
+  Widget _rcInfo(String label, String value) => Container(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: _line))),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SizedBox(
+          width: 78,
+          child: Text(label,
+              style: const TextStyle(fontSize: 12, color: Colors.black54))),
+      Expanded(
+          child: Text(value,
+              style: const TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: _rcNavy))),
+    ]),
+  );
+
+  Widget _rcBox(String value, String label,
+      {Color? fill, Color? color, double size = 16}) =>
+      Expanded(
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+          decoration: BoxDecoration(
+              color: fill,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _rcNavy, width: 1.5)),
+          child: Column(children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(value,
+                  style: TextStyle(
+                      fontSize: size,
+                      fontWeight: FontWeight.w800,
+                      color: color ?? _rcNavy)),
+            ),
+            const SizedBox(height: 2),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 9.5,
+                    letterSpacing: 0.4,
+                    color: fill == null ? Colors.black54 : color)),
+          ]),
+        ),
+      );
+
+  Widget _examCard(_ExamView v, bool expanded) {
+    final avg = v.average;
+    final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
+    final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
+    final g = avg == null ? null : _gradeOf(avg, max: maxMark);
+    final gs = g ?? 'F'; // grade used where an average exists
     final subs = <String>[
       for (final s in ExamService.subjects)
         if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
@@ -15713,153 +19861,339 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
     ];
     final belowMin =
         limits.totalMin > 0 && avg != null && v.total < limits.totalMin;
+    final passed = !v.cheatedAll && avg != null && g != 'F' && !belowMin;
+    final totalMax =
+    limits.totalMax > 0 ? limits.totalMax : maxMark * v.counted.length;
+    final pct = avg == null || maxMark <= 0 ? null : avg / maxMark * 100;
+    final open = _exp[v.exam] ?? expanded;
+    final st = appSettings.value;
+    final logo = schoolLogo.value;
 
-    Widget subjectRow(String sub) {
+    Widget th(String t, {double? w, bool left = false}) {
+      final x = Text(t,
+          textAlign: left ? TextAlign.left : TextAlign.center,
+          style: const TextStyle(
+              fontSize: 11,
+              letterSpacing: 0.5,
+              fontWeight: FontWeight.w800,
+              color: Colors.white));
+      return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
+    }
+
+    Widget td(String t,
+        {double? w,
+          bool left = false,
+          Color? color,
+          bool bold = false,
+          double size = 13.5}) {
+      final x = Text(t,
+          textAlign: left ? TextAlign.left : TextAlign.center,
+          style: TextStyle(
+              fontSize: size,
+              fontWeight: bold ? FontWeight.w800 : FontWeight.w500,
+              color: color ?? Colors.black87));
+      return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
+    }
+
+    Widget subjectRow(int i, String sub) {
       final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
       final mark = v.marks[sub];
-      final c = mark == null ? Colors.grey : _gradeColor(_gradeOf(mark));
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5),
+      final gr = mark == null ? null : _gradeOf(mark, max: maxMark);
+      final c = cheated
+          ? kCheatColor
+          : gr == null
+          ? Colors.black38
+          : _gradeColor(gr);
+      return Container(
+        color: i.isOdd ? _rcZebra : Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
         child: Row(children: [
-          SizedBox(
-              width: 92,
-              child: Text(sub,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w600))),
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(5),
-              child: LinearProgressIndicator(
-                value: cheated || mark == null
-                    ? 0
-                    : (mark / maxMark).clamp(0.0, 1.0),
-                minHeight: 8,
-                backgroundColor: Colors.grey.shade200,
-                color: c,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 78,
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: cheated
-                  ? _tag('Cheated', kCheatColor, icon: Icons.gavel)
-                  : mark == null
-                  ? const Text('-')
-                  : Container(
-                constraints: const BoxConstraints(minWidth: 46),
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 3),
-                decoration: BoxDecoration(
-                    color: c.withAlpha(30),
-                    borderRadius: BorderRadius.circular(20)),
-                child: Text(_fmtMark(mark),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        fontWeight: FontWeight.w800, color: c)),
-              ),
-            ),
-          ),
+          td('${i + 1}', w: 24, color: Colors.black45, size: 12),
+          td(sub, left: true, bold: true),
+          if (cheated)
+            td('Cheated', w: 100, color: kCheatColor, bold: true, size: 12.5)
+          else ...[
+            td(mark == null ? '–' : _fmtMark(mark), w: 54, color: c, bold: true),
+            td(_fmtMark(maxMark), w: 44, color: Colors.black54, size: 12.5),
+            td(gr ?? '–', w: 40, color: c, bold: true),
+          ],
         ]),
       );
     }
 
+    final banner = InkWell(
+      onTap: () => setState(() => _exp[v.exam] = !open),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 14, 10, 14),
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+              colors: [Color(0xFF2C6A96), Color(0xFF173B5A)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight),
+        ),
+        child: Row(children: [
+          Container(
+            width: 44,
+            height: 44,
+            padding: EdgeInsets.all(logo.bytes != null ? 4 : 0),
+            decoration:
+            const BoxDecoration(shape: BoxShape.circle, color: Colors.white),
+            child: logo.bytes != null
+                ? ClipOval(child: Image.memory(logo.bytes!, fit: BoxFit.contain))
+                : const Icon(Icons.school, color: _rcNavy, size: 24),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('REPORT CARD',
+                  style: TextStyle(
+                      fontSize: 10.5,
+                      letterSpacing: 3,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white70)),
+              const SizedBox(height: 2),
+              Row(children: [
+                Flexible(
+                  child: Text(v.exam,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white)),
+                ),
+                if (!v.open) ...[
+                  const SizedBox(width: 8),
+                  _tag('Closed', Colors.white),
+                ],
+              ]),
+              Text(
+                  v.cheatedAll
+                      ? 'Marked as cheated'
+                      : avg == null
+                      ? 'No marks counted'
+                      : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            ]),
+          ),
+          if (g != null && !v.cheatedAll)
+            Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration:
+              const BoxDecoration(shape: BoxShape.circle, color: Colors.white),
+              child: Text(g,
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                      color: _gradeColor(g))),
+            ),
+          Icon(open ? Icons.expand_less : Icons.expand_more, color: Colors.white),
+        ]),
+      ),
+    );
+
+    final body = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        LayoutBuilder(builder: (context, box) {
+          final a = Column(children: [
+            _rcInfo('Student', widget.student.name),
+            _rcInfo('Student ID',
+                widget.student.studentNo.isEmpty ? '–' : widget.student.studentNo),
+          ]);
+          final b = Column(children: [
+            _rcInfo('Class', widget.section.fullName),
+            _rcInfo('Form', widget.section.form),
+          ]);
+          return box.maxWidth >= 520
+              ? Row(children: [
+            Expanded(child: a),
+            const SizedBox(width: 16),
+            Expanded(child: b),
+          ])
+              : Column(children: [a, b]);
+        }),
+        const SizedBox(height: 16),
+        Row(children: [
+          const Text('STATEMENT OF MARKS',
+              style: TextStyle(
+                  fontSize: 12,
+                  letterSpacing: 0.6,
+                  fontWeight: FontWeight.w800,
+                  color: _rcNavy)),
+          const SizedBox(width: 8),
+          const Expanded(child: Divider(color: Color(0xFFE0A526), thickness: 1.2)),
+        ]),
+        const SizedBox(height: 6),
+        if (v.cheatedAll)
+          _note('Marked as cheated in all subjects. No mark counts.')
+        else if (v.cheatedSubs.isNotEmpty)
+          _note('Cheated in ${v.cheatedSubs.join(', ')}. '
+              'Those marks are not counted.'),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            decoration:
+            BoxDecoration(border: Border.all(color: _line), borderRadius: BorderRadius.circular(10)),
+            child: Column(children: [
+              Container(
+                color: _rcNavy,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+                child: Row(children: [
+                  th('#', w: 24),
+                  th('SUBJECT', left: true),
+                  th('MARKS', w: 54),
+                  th('MAX', w: 44),
+                  th('GRADE', w: 40),
+                ]),
+              ),
+              for (var i = 0; i < subs.length; i++) subjectRow(i, subs[i]),
+              if (!v.cheatedAll && avg != null)
+                Container(
+                  decoration: const BoxDecoration(
+                      color: _rcZebra,
+                      border: Border(top: BorderSide(color: _rcNavy, width: 1.5))),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                  child: Row(children: [
+                    td('', w: 24),
+                    td('Grand Total', left: true, bold: true, color: _rcNavy),
+                    td(_fmtMark(v.total), w: 54, bold: true, color: _rcNavy),
+                    td(_fmtMark(totalMax), w: 44, bold: true, color: _rcNavy, size: 12.5),
+                    td(gs, w: 40, bold: true, color: _gradeColor(gs)),
+                  ]),
+                ),
+            ]),
+          ),
+        ),
+        if (!v.cheatedAll && avg != null) ...[
+          const SizedBox(height: 14),
+          Row(children: [
+            _rcBox('${_fmtMark(v.total)} / ${_fmtMark(totalMax)}', 'TOTAL', size: 14),
+            const SizedBox(width: 6),
+            _rcBox(_f1(avg), 'AVERAGE', color: _gradeColor(gs)),
+            const SizedBox(width: 6),
+            _rcBox(gs, 'GRADE', color: _gradeColor(gs), size: 20),
+            const SizedBox(width: 6),
+            _rcBox(passed ? 'PASS' : 'FAIL', 'RESULT',
+                fill: passed ? _rcNavy : kRed, color: Colors.white, size: 15),
+          ]),
+          if (pct != null) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: LinearProgressIndicator(
+                value: (pct / 100).clamp(0.0, 1.0),
+                minHeight: 7,
+                backgroundColor: _gradeColor(gs).withAlpha(36),
+                color: _gradeColor(gs),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text('${pct.toStringAsFixed(1)}% of the maximum mark',
+                style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+          ],
+          if (belowMin) ...[
+            const SizedBox(height: 8),
+            _tag('Below the minimum total (${_fmtMark(limits.totalMin)})', kRed,
+                icon: Icons.warning_amber_rounded),
+          ],
+        ],
+        const SizedBox(height: 14),
+        LayoutBuilder(builder: (context, box) {
+          final attendance = FutureBuilder<List<_AttEntry>>(
+            future: _attFuture,
+            builder: (context, snap) {
+              final l = snap.data ?? const <_AttEntry>[];
+              final p = l.where((e) => e.present).length;
+              final pc = l.isEmpty ? 0 : (p / l.length * 100).round();
+              return _rcPanel(
+                  'ATTENDANCE',
+                  Text(
+                      'Total lessons: ${l.length}\nPresent: $p\n'
+                          'Absent: ${l.length - p}\nAttendance: $pc%',
+                      style: const TextStyle(fontSize: 12.5, height: 1.45)));
+            },
+          );
+          final scale = _rcPanel(
+            'GRADE SCALE',
+            Wrap(spacing: 6, runSpacing: 6, children: [
+              for (var i = 0; i < st.grades.length; i++)
+                _rcChip(
+                    '${AppSettings.gradeLetters[i]} ≥ ${_fmtMark(st.grades[i])}',
+                    _rcZebra),
+              _rcChip('F below ${_fmtMark(st.grades.last)}',
+                  kRed.withAlpha(30)),
+            ]),
+          );
+          return box.maxWidth >= 520
+              ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: attendance),
+            const SizedBox(width: 10),
+            Expanded(child: scale),
+          ])
+              : Column(children: [attendance, const SizedBox(height: 10), scale]);
+        }),
+        const SizedBox(height: 14),
+        Row(children: [
+          FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: _rcNavy),
+            onPressed: _printing ? null : () => _printCard(v),
+            icon: _printing
+                ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.print, size: 18),
+            label: const Text('Print report card'),
+          ),
+          const SizedBox(width: 8),
+          if (_admin)
+            _smallBtn(Icons.edit_outlined, 'Edit marks',
+                    () => _editMarks(v.exam, v.marks)),
+        ]),
+      ]),
+    );
+
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 14),
       elevation: 0,
       color: Colors.white,
       clipBehavior: Clip.antiAlias,
       shape: _kSettingsCardShape,
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          initiallyExpanded: expanded,
-          tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-          expandedCrossAxisAlignment: CrossAxisAlignment.start,
-          leading: v.cheatedAll
-              ? Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: kCheatColor.withAlpha(30),
-                border: Border.all(color: kCheatColor, width: 2)),
-            child: const Icon(Icons.gavel, size: 20, color: kCheatColor),
-          )
-              : g == null
-              ? const Icon(Icons.hourglass_empty, color: Colors.black38)
-              : _gradeBadge(g, 42),
-          title: Row(children: [
-            Flexible(
-                child: Text(v.exam,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 15.5, fontWeight: FontWeight.w700))),
-            if (!v.open) ...[
-              const SizedBox(width: 8),
-              _tag('Closed', Colors.blueGrey),
-            ],
-          ]),
-          subtitle: Text(
-              v.cheatedAll
-                  ? 'Marked as cheated'
-                  : avg == null
-                  ? 'No marks counted'
-                  : 'Average ${_f1(avg)} · Total ${_fmtMark(v.total)}'
-                  '${belowMin ? ' · below min' : ''}',
-              style: TextStyle(
-                  fontSize: 12.5,
-                  color: belowMin || v.cheatedAll ? kRed : Colors.black54,
-                  fontWeight:
-                  belowMin || v.cheatedAll ? FontWeight.w700 : FontWeight.w400)),
-          children: [
-            if (v.cheatedAll)
-              _note('Marked as cheated in all subjects. No mark counts.')
-            else if (v.cheatedSubs.isNotEmpty)
-              _note('Cheated in ${v.cheatedSubs.join(', ')}. '
-                  'Those marks are not counted.'),
-            for (final sub in subs) subjectRow(sub),
-            if (_admin)
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: () => _editResult(v.exam),
-                  icon: const Icon(Icons.edit, size: 16),
-                  label: const Text('Edit marks'),
-                ),
-              ),
-            if (!v.cheatedAll && avg != null) ...[
-              const Divider(height: 18),
-              Row(children: [
-                const Expanded(
-                    child: Text('Total',
-                        style: TextStyle(fontWeight: FontWeight.w700))),
-                Text(
-                    '${_fmtMark(v.total)}'
-                        '${limits.totalMax > 0 ? ' / ${_fmtMark(limits.totalMax)}' : ''}',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        color: belowMin ? kRed : Colors.black87)),
-              ]),
-              const SizedBox(height: 4),
-              Row(children: [
-                const Expanded(
-                    child: Text('Average',
-                        style: TextStyle(fontWeight: FontWeight.w700))),
-                Text('${_f1(avg)}  ·  Grade $g',
-                    style: TextStyle(
-                        fontWeight: FontWeight.w800, color: _gradeColor(g!))),
-              ]),
-            ],
-          ],
-        ),
-      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        banner,
+        if (open) body,
+      ]),
     );
   }
+
+  Widget _rcPanel(String title, Widget child) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _line)),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title,
+          style: const TextStyle(
+              fontSize: 11.5,
+              letterSpacing: 0.5,
+              fontWeight: FontWeight.w800,
+              color: _rcNavy)),
+      const SizedBox(height: 6),
+      child,
+    ]),
+  );
+
+  Widget _rcChip(String t, Color c) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration:
+    BoxDecoration(color: c, borderRadius: BorderRadius.circular(10)),
+    child: Text(t, style: const TextStyle(fontSize: 11.5)),
+  );
 
   Widget _note(String t) => Container(
     width: double.infinity,
@@ -15893,27 +20227,22 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         valueListenable: CheatService.byExam,
         builder: (context, _, __) {
           final views = _views(snap.data!);
-          if (views.isEmpty && _admin) {
-            return Column(children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton.tonalIcon(
-                    onPressed: _addResult,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add / edit exam result'),
-                  ),
-                ),
-              ),
-              Expanded(
-                  child: _msg('No results yet for this student.',
-                      Icons.emoji_events_outlined)),
-            ]);
-          }
+          final addBtn = Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _smallBtn(Icons.add, 'Add exam result',
+                      () => _addResult(snap.data!)),
+            ),
+          );
           if (views.isEmpty) {
-            return _msg('No results yet for this student.',
+            final empty = _msg('No results yet for this student.',
                 Icons.emoji_events_outlined);
+            if (!_admin) return empty;
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+              children: [addBtn, empty],
+            );
           }
           return RefreshIndicator(
             onRefresh: () async {
@@ -15924,17 +20253,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
               children: [
-                if (_admin) ...[
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: FilledButton.tonalIcon(
-                      onPressed: _addResult,
-                      icon: const Icon(Icons.add),
-                      label: const Text('Add / edit exam result'),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                ],
+                if (_admin) addBtn,
                 _overallCard(views),
                 for (var i = 0; i < views.length; i++)
                   _examCard(views[i], i == 0),
@@ -15964,11 +20283,8 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
               padding: const EdgeInsets.only(bottom: 12),
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: FilledButton.tonalIcon(
-                  onPressed: _addAttendance,
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add attendance'),
-                ),
+                child: _smallBtn(
+                    Icons.add, 'Add attendance', _addAttendance),
               ),
             ),
           _summary(snap.data!),
@@ -16137,6 +20453,275 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
         style: TextStyle(fontWeight: FontWeight.w600, color: c)),
   );
 
+
+// ---------------- administrator editing ----------------
+
+  void _snack(String t) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+  }
+
+  /// Overview: name, phone number(s) and Student ID.
+  Future<void> _editStudent(Map<String, dynamic> m) async {
+    final oldPhones = <String>[
+      if (m['phones'] is List)
+        for (final p in (m['phones'] as List))
+          if ('$p'.trim().isNotEmpty) '$p'.trim()
+    ];
+    if (oldPhones.isEmpty && '${m['phone'] ?? ''}'.trim().isNotEmpty) {
+      oldPhones.add('${m['phone']}'.trim());
+    }
+    final oldName = '${m['name'] ?? widget.student.name}';
+    final oldNo = '${m['studentNo'] ?? ''}'.trim();
+    final nameC = TextEditingController(text: oldName);
+    final phoneC = TextEditingController(text: oldPhones.join(', '));
+    final noC = TextEditingController(text: oldNo);
+    final oldGender = '${m['gender'] ?? ''}'.trim();
+    var gender = oldGender; // '' = not set
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Edit student details'),
+          content: SingleChildScrollView(
+            child: SizedBox(
+              width: 380,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                  controller: nameC,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Student name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: phoneC,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(
+                    labelText: 'Phone number(s)',
+                    helperText: 'Separate several numbers with a comma. The first '
+                        'one is the username and password.',
+                    helperMaxLines: 3,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: noC,
+                  decoration: const InputDecoration(
+                    labelText: 'Student ID',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Gender',
+                      style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+                ),
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Wrap(spacing: 8, children: [
+                    for (final g in const ['Male', 'Female'])
+                      ChoiceChip(
+                        label: Text(g),
+                        selected: gender == g,
+                        onSelected: (on) => setD(() => gender = on ? g : ''),
+                      ),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    final name = nameC.text.trim();
+    final phoneText = phoneC.text.trim();
+    final no = noC.text.trim();
+    nameC.dispose();
+    phoneC.dispose();
+    noC.dispose();
+    if (ok != true || !mounted) return;
+    if (name.isEmpty) {
+      _snack('The name cannot be empty.');
+      return;
+    }
+    final phones = phonesIn(phoneText);
+    if (phoneText.isNotEmpty && phones.isEmpty) {
+      _snack('That is not a valid phone number.');
+      return;
+    }
+    final newFirst = phones.isEmpty ? '' : phones.first;
+    final oldFirst = oldPhones.isEmpty ? '' : oldPhones.first;
+    if (name == oldName &&
+        no == oldNo &&
+        '$phones' == '$oldPhones' &&
+        gender == oldGender) {
+      return;
+    }
+    try {
+      final col = FirebaseFirestore.instance.collection('students');
+      final twin = (await ResultService().twinMap())[widget.student.id];
+      if (no.isNotEmpty && no != oldNo) {
+        final dup = await col.where('studentNo', isEqualTo: no).limit(5).get();
+        if (dup.docs.any((d) => d.id != widget.student.id && d.id != twin)) {
+          _snack('Student ID $no is already used by another student.');
+          return;
+        }
+      }
+      final upd = <String, Object?>{
+        'name': name,
+        'phone': newFirst,
+        'phones': phones,
+        'username': newFirst,
+        'studentNo': no,
+        'gender': gender,
+        if (no != oldNo) 'studentNoAuto': false,
+        'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      await col.doc(widget.student.id).update(upd);
+      if (twin != null) {
+        try {
+          await col.doc(twin).update(upd); // the other copy stays in step
+        } catch (_) {}
+      }
+      _snack('Student updated');
+      if (mounted && newFirst.isNotEmpty && newFirst != oldFirst) {
+        await runAccountCreation(context, ids: [widget.student.id], quiet: true);
+      }
+    } catch (e) {
+      _snack('Could not save: $e');
+    }
+  }
+
+  /// Results: edit every subject mark of one exam.
+  Future<void> _editMarks(String exam, Map<String, double> current) async {
+    final limits = appSettings.value.limitsFor(exam, widget.section.form);
+    final res = await showDialog<Map<String, double>>(
+      context: context,
+      builder: (_) => _AdminMarksDialog(
+        name: widget.student.name,
+        exam: exam,
+        initial: current,
+        maxMark: limits.maxMark,
+      ),
+    );
+    if (res == null || !mounted) return;
+    try {
+      await ResultService()
+          .adminSaveMarks(widget.student, exam, res, widget.section.form);
+      if (!mounted) return;
+      setState(() => _resFuture = _loadResults());
+      _snack(res.isEmpty ? 'Result removed' : 'Marks saved');
+    } catch (e) {
+      _snack('Could not save marks: ${e.toString().replaceFirst('Exception: ', '')}');
+    }
+  }
+
+  /// Results: add the marks of an exam the student has none for yet.
+  Future<void> _addResult(Map<String, ResultMarks> data) async {
+    final options = [
+      for (final e in appSettings.value.examOptions)
+        if (!data.containsKey(e)) e
+    ];
+    if (options.isEmpty) {
+      _snack('This student already has a result for every exam.');
+      return;
+    }
+    final exam = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Choose the exam'),
+        children: [
+          for (final e in options)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, e), child: Text(e)),
+        ],
+      ),
+    );
+    if (exam == null || !mounted) return;
+    await _editMarks(exam, const <String, double>{});
+  }
+
+  /// Attendance: change / remove the mark of every subject of one day, and
+  /// the note of that day.
+  Future<void> _editDay(String dateKey, List<_AttEntry> list) async {
+    final current = {
+      for (final e in list)
+        if (e.note.isNotEmpty) e.note
+    }.join(' · ');
+    final r = await showDialog<_DayEditResult>(
+      context: context,
+      builder: (_) => _AdminDayDialog(
+        name: widget.student.name,
+        date: dateKey,
+        entries: list,
+        note: current,
+      ),
+    );
+    if (r == null || !mounted) return;
+    try {
+      final col = FirebaseFirestore.instance.collection('attendance');
+      final noteChanged = r.note != current;
+      for (var i = 0; i < list.length; i++) {
+        final e = list[i];
+        if (e.docId.isEmpty) continue;
+        final mark = r.marks[i];
+        if (mark == e.mark && !noteChanged) continue;
+        await col.doc(e.docId).update({
+          FieldPath(['records', e.sid]): mark ?? FieldValue.delete(),
+          FieldPath(['notes', e.sid]):
+          (mark == null || r.note.isEmpty) ? FieldValue.delete() : r.note,
+        });
+      }
+      if (!mounted) return;
+      setState(() => _attFuture = _loadAttendance());
+      _snack('Attendance saved');
+    } catch (e) {
+      _snack('Could not save attendance: $e');
+    }
+  }
+
+  /// Attendance: add (or replace) the mark of one day / subject.
+  Future<void> _addAttendance() async {
+    final r = await showDialog<({String date, String subject, String mark, String note})>(
+      context: context,
+      builder: (_) => _AdminAddAttendanceDialog(name: widget.student.name),
+    );
+    if (r == null || !mounted) return;
+    try {
+      final id = SchoolService()._attId(widget.student.sectionId, r.date, r.subject);
+      await FirebaseFirestore.instance.collection('attendance').doc(id).set({
+        'sectionId': widget.student.sectionId,
+        'date': r.date,
+        'subject': r.subject.trim(),
+        'records': {widget.student.id: r.mark},
+        if (r.note.isNotEmpty) 'notes': {widget.student.id: r.note},
+        'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      if (!mounted) return;
+      setState(() => _attFuture = _loadAttendance());
+      _snack('Attendance added');
+    } catch (e) {
+      _snack('Could not add attendance: $e');
+    }
+  }
+
   /// Add / edit / remove the note of one day (all subjects of that day).
   Future<void> _editDayNote(List<_AttEntry> list) async {
     final current = {
@@ -16250,7 +20835,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       }.join(' · ');
       children.add(ListTile(
         dense: true,
-        onTap: () => _editDayNote(list),
+        onTap: () => _admin ? _editDay(day.key, list) : _editDayNote(list),
         leading: Icon(nAbsent > 0 ? Icons.cancel : Icons.check_circle, color: c),
         title: Text(d == null
             ? day.key
@@ -16283,16 +20868,8 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
             ),
           ],
         ),
-        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          Text(trailing,
-              style: TextStyle(color: c, fontWeight: FontWeight.w700)),
-          if (_admin)
-            IconButton(
-              tooltip: 'Edit marks',
-              icon: const Icon(Icons.edit_calendar_outlined, size: 20),
-              onPressed: () => _editDayMarks(list),
-            ),
-        ]),
+        trailing: Text(trailing,
+            style: TextStyle(color: c, fontWeight: FontWeight.w700)),
       ));
     }
     return Card(
@@ -16311,7 +20888,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return DefaultTabController(
-      length: 3,
+      length: _canDiscipline ? 4 : 3,
       child: Scaffold(
         appBar: AppBar(title: const Text('Student details'), actions: [
           IconButton(
@@ -16337,6 +20914,7 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
                   _overview(),
                   _resultsTab(),
                   _attendanceTab(),
+                  if (_canDiscipline) _disciplineTab(),
                 ]),
               ),
             ]),
@@ -16345,6 +20923,339 @@ class _StudentDetailScreenState extends State<StudentDetailScreen> {
       ),
     );
   }
+}
+
+
+// ---------------- administrator dialogs (student details) ----------------
+
+/// Edit all subject marks of one exam. Empty field = no mark; all fields
+/// empty = the result of the exam is removed.
+class _AdminMarksDialog extends StatefulWidget {
+  final String name, exam;
+  final Map<String, double> initial;
+  final double maxMark;
+  const _AdminMarksDialog({
+    required this.name,
+    required this.exam,
+    required this.initial,
+    required this.maxMark,
+  });
+
+  @override
+  State<_AdminMarksDialog> createState() => _AdminMarksDialogState();
+}
+
+class _AdminMarksDialogState extends State<_AdminMarksDialog> {
+  late final Map<String, TextEditingController> _c = {
+    for (final s in [
+      ...ExamService.subjects,
+      for (final k in widget.initial.keys)
+        if (!ExamService.subjects.contains(k)) k
+    ])
+      s: TextEditingController(
+          text: widget.initial[s] == null ? '' : _fmtMark(widget.initial[s]!)),
+  };
+  String? _error;
+
+  @override
+  void dispose() {
+    for (final c in _c.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    final out = <String, double>{};
+    for (final e in _c.entries) {
+      final t = e.value.text.trim().replaceAll(',', '.');
+      if (t.isEmpty) continue;
+      final v = double.tryParse(t);
+      if (v == null || v < 0) {
+        setState(() => _error = '${e.key}: enter a valid number.');
+        return;
+      }
+      if (widget.maxMark > 0 && v > widget.maxMark + 1e-9) {
+        setState(() => _error =
+        '${e.key}: the highest mark is ${_fmtMark(widget.maxMark)}.');
+        return;
+      }
+      out[e.key] = v;
+    }
+    Navigator.pop(context, out);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text('Edit marks · ${widget.exam}'),
+    content: SingleChildScrollView(
+      child: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.name,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            const Text(
+                'Leave a subject empty for no mark. Clear every field to '
+                    'remove this exam result.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 12),
+            for (final e in _c.entries)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: TextField(
+                  controller: e.value,
+                  keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: e.key,
+                    isDense: true,
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+              ),
+            if (_error != null)
+              Text(_error!,
+                  style: const TextStyle(
+                      color: Colors.red, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(onPressed: _save, child: const Text('Save')),
+    ],
+  );
+}
+
+class _DayEditResult {
+  /// New mark of every entry of the day (same order); null = remove it.
+  final List<String?> marks;
+  final String note;
+  const _DayEditResult(this.marks, this.note);
+}
+
+Widget _markSelector(String value, ValueChanged<String> onChanged) =>
+    SegmentedButton<String>(
+      showSelectedIcon: false,
+      style: const ButtonStyle(visualDensity: VisualDensity.compact),
+      segments: const [
+        ButtonSegment(value: 'present', label: Text('Present')),
+        ButtonSegment(value: 'late', label: Text('Late')),
+        ButtonSegment(value: 'absent', label: Text('Absent')),
+      ],
+      selected: {value},
+      onSelectionChanged: (s) => onChanged(s.first),
+    );
+
+/// Edit one day of the student's attendance (one line per subject).
+class _AdminDayDialog extends StatefulWidget {
+  final String name, date, note;
+  final List<_AttEntry> entries;
+  const _AdminDayDialog({
+    required this.name,
+    required this.date,
+    required this.entries,
+    required this.note,
+  });
+
+  @override
+  State<_AdminDayDialog> createState() => _AdminDayDialogState();
+}
+
+class _AdminDayDialogState extends State<_AdminDayDialog> {
+  late final List<String?> _marks = [for (final e in widget.entries) e.mark];
+  late final _note = TextEditingController(text: widget.note);
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Edit attendance'),
+    content: SingleChildScrollView(
+      child: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.name,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            Text(widget.date,
+                style: const TextStyle(color: Colors.black54)),
+            const SizedBox(height: 12),
+            for (var i = 0; i < widget.entries.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                        widget.entries[i].subject.isEmpty
+                            ? 'Whole day'
+                            : widget.entries[i].subject,
+                        style:
+                        const TextStyle(fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 4),
+                    if (_marks[i] == null)
+                      Row(children: [
+                        const Expanded(
+                            child: Text('Will be removed',
+                                style: TextStyle(color: Colors.red))),
+                        TextButton(
+                            onPressed: () => setState(
+                                    () => _marks[i] = widget.entries[i].mark),
+                            child: const Text('Undo')),
+                      ])
+                    else
+                      Row(children: [
+                        Expanded(
+                            child: _markSelector(_marks[i]!,
+                                    (v) => setState(() => _marks[i] = v))),
+                        IconButton(
+                          tooltip: 'Remove this mark',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => setState(() => _marks[i] = null),
+                        ),
+                      ]),
+                  ],
+                ),
+              ),
+            TextField(
+              controller: _note,
+              maxLines: 2,
+              maxLength: 200,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'Note for this day',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+          onPressed: () => Navigator.pop(
+              context, _DayEditResult(List.of(_marks), _note.text.trim())),
+          child: const Text('Save')),
+    ],
+  );
+}
+
+/// Add the attendance of one day / subject for the student.
+class _AdminAddAttendanceDialog extends StatefulWidget {
+  final String name;
+  const _AdminAddAttendanceDialog({required this.name});
+
+  @override
+  State<_AdminAddAttendanceDialog> createState() =>
+      _AdminAddAttendanceDialogState();
+}
+
+class _AdminAddAttendanceDialogState extends State<_AdminAddAttendanceDialog> {
+  DateTime _date = DateTime.now();
+  String _subject = '';
+  String _mark = 'absent';
+  final _note = TextEditingController();
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pick() async {
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 366)),
+    );
+    if (d != null) setState(() => _date = d);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Add attendance'),
+    content: SingleChildScrollView(
+      child: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.name,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _pick,
+              icon: const Icon(Icons.event_outlined, size: 18),
+              label: Text(DateFormat('EEE, MMM d, yyyy').format(_date)),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: _subject,
+              decoration: const InputDecoration(
+                labelText: 'Subject',
+                border: OutlineInputBorder(),
+              ),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('Whole day')),
+                for (final s in ExamService.subjects)
+                  DropdownMenuItem(value: s, child: Text(s)),
+              ],
+              onChanged: (v) => setState(() => _subject = v ?? ''),
+            ),
+            const SizedBox(height: 12),
+            _markSelector(_mark, (v) => setState(() => _mark = v)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _note,
+              maxLines: 2,
+              maxLength: 200,
+              textCapitalization: TextCapitalization.sentences,
+              decoration: const InputDecoration(
+                labelText: 'Note (optional)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const Text(
+                'If this student already has a mark for that day and '
+                    'subject, it is replaced.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
+      ),
+    ),
+    actions: [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+          onPressed: () => Navigator.pop(context, (
+          date: DateFormat('yyyy-MM-dd').format(_date),
+          subject: _subject,
+          mark: _mark,
+          note: _note.text.trim(),
+          )),
+          child: const Text('Save')),
+    ],
+  );
 }
 
 // ======================= ATTENDANCE SCREEN =======================
@@ -16482,6 +21393,1625 @@ class _NoteDialogState extends State<_NoteDialog> {
           child: const Text('Save')),
     ],
   );
+}
+
+/// Fixed roll numbers of a class.
+///  - a student keeps the number he / she has
+///  - a student who is really removed (deleted / moved to another class)
+///    leaves that number vacant
+///  - a NEW student always gets the number after the last one, in the order
+///    the students were added
+///  - the very first time (nothing saved yet) the students are numbered
+///    1, 2, 3 ... by name
+/// The number belongs to the student's record id. When the same person comes
+/// back under a new record id (the whole-class copy and the section copy of a
+/// student can swap), the saved NAME finds the person again, so no false
+/// vacant number appears.
+/// [students] are maps with 'id', 'name' and 'created' (milliseconds).
+String _rollName(String n) =>
+    n.toLowerCase().trim().replaceAll(RegExp(r'\s+'), ' ');
+
+Map<String, int> _assignRollNumbers(
+    Map<String, int> saved, List<Map<String, String>> students,
+    [Map<String, String> savedNames = const {}]) {
+  final keep = <String, int>{};
+  if (saved.isEmpty) {
+    final byName = [...students]..sort((a, b) =>
+        a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+    for (var i = 0; i < byName.length; i++) {
+      keep[byName[i]['id']!] = i + 1;
+    }
+    return keep;
+  }
+  // 1) same record id
+  final matched = <String>{};
+  for (final r in students) {
+    final n = saved[r['id']];
+    if (n != null) {
+      keep[r['id']!] = n;
+      matched.add(r['id']!);
+    }
+  }
+  // 2) the same person under a new record id: found by the saved name
+  for (final e in saved.entries) {
+    if (matched.contains(e.key)) continue;
+    final nk = savedNames[e.key];
+    if (nk == null || nk.isEmpty) continue;
+    for (final r in students) {
+      if (keep.containsKey(r['id'])) continue;
+      if (_rollName(r['name']!) == nk) {
+        keep[r['id']!] = e.value;
+        break;
+      }
+    }
+  }
+  // 3) really new students: after the last number, in the order added
+  var next = keep.isEmpty ? 0 : keep.values.reduce((a, b) => a > b ? a : b);
+  final fresh = [
+    for (final r in students)
+      if (!keep.containsKey(r['id'])) r
+  ]..sort((a, b) {
+    final c = (int.tryParse(a['created'] ?? '') ?? 0)
+        .compareTo(int.tryParse(b['created'] ?? '') ?? 0);
+    return c != 0
+        ? c
+        : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+  });
+  for (final r in fresh) {
+    keep[r['id']!] = ++next;
+  }
+  return keep;
+}
+
+/// name of every numbered student (to find the person again later)
+Map<String, String> _rollNames(
+    Map<String, int> nums, List<Map<String, String>> students) =>
+    {
+      for (final r in students)
+        if (nums.containsKey(r['id'])) r['id']!: _rollName(r['name']!)
+    };
+
+// ======================= DAILY ATTENDANCE REPORT (admin) =======================
+/// One table of the daily attendance report (one class).
+class _DrTable {
+  final String title; // e.g. "Form1 - 1A"
+  final List<String> headers;
+  final List<List<String>> rows;
+  final List<double> weights; // relative column widths
+  final List<String> notes;
+  final Set<int> left; // columns aligned to the left (and wrapped)
+  final Set<int> text; // columns kept as text in Excel (ID, phone ...)
+  const _DrTable({
+    required this.title,
+    required this.headers,
+    required this.rows,
+    required this.weights,
+    this.notes = const [],
+    this.left = const {1},
+    this.text = const {1, 2, 3},
+  });
+}
+
+/// Builds the daily attendance report from the saved registers and writes it
+/// as PDF (also used for Print), Excel or Word.
+///  - period of ONE day: a row per student with Present / Absent for each shift
+///  - longer period: a row per student with Present, Absent, Sessions and %
+class DailyAttendanceReport {
+  static const _shiftName = {'am': 'Shift A', 'pm': 'Shift B'};
+  static final _day = DateFormat('d MMM yyyy');
+  static String _t(String s) =>
+      s.replaceAll('–', '-').replaceAll('—', '-').replaceAll('·', '-');
+
+  static String periodText(DateTime from, DateTime to, String shift,
+      [String status = '']) {
+    final p = from == to
+        ? _day.format(from)
+        : '${_day.format(from)} - ${_day.format(to)}';
+    return 'Period: $p   |   ${shift.isEmpty ? 'Shift A + Shift B' : _shiftName[shift]}'
+        '${status == 'a' ? '   |   Absent students only' : status == 'p' ? '   |   Students never absent only' : ''}';
+  }
+
+  static Future<List<_DrTable>> tables({
+    required DateTime from,
+    required DateTime to,
+    required String classId, // '' = every class
+    required String shift, // '' = both shifts
+    String status = '', // '' = everybody, 'a' = absent at least once, 'p' = never absent
+    required QuerySnapshot<Map<String, dynamic>> secs,
+    required QuerySnapshot<Map<String, dynamic>> stus,
+  }) async {
+    if (teacherScope.value.scoped) {
+      throw Exception('Only an administrator can create the report.');
+    }
+    final key = DateFormat('yyyy-MM-dd');
+    final snap = await FirebaseFirestore.instance
+        .collection('dailyAttendance')
+        .where('date', isGreaterThanOrEqualTo: key.format(from))
+        .where('date', isLessThanOrEqualTo: key.format(to))
+        .get();
+    final regs = [
+      for (final d in snap.docs)
+        if (shift.isEmpty || d.data()['session'] == shift) d.data()
+    ];
+    if (regs.isEmpty) {
+      throw Exception('No attendance was taken in this period.');
+    }
+    final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
+    final classes = [
+      for (final c in all)
+        if (!c.isSub && (classId.isEmpty || c.id == classId)) c
+    ]..sort((a, b) {
+      final f = a.form.compareTo(b.form);
+      return f != 0 ? f : a.name.compareTo(b.name);
+    });
+    final single = from == to;
+    final shifts = shift.isEmpty ? ['am', 'pm'] : [shift];
+    String pct(int p, int n) =>
+        n == 0 ? '-' : '${(p * 100 / n).toStringAsFixed(1)}%';
+    // Absent = absent at least once in the period; Present = never absent
+    // (and marked at least once)
+    bool keep(int pr, int ab) =>
+        status.isEmpty || (status == 'a' ? ab > 0 : (ab == 0 && pr > 0));
+
+    final out = <_DrTable>[];
+    for (final cls in classes) {
+      final mine = [for (final r in regs) if (r['sectionId'] == cls.id) r];
+      if (mine.isEmpty) continue;
+      // students of the class (+ the ones only in a divided section)
+      final subIds = {
+        for (final c in all)
+          if (c.isSub &&
+              c.form == cls.form &&
+              c.classKey == cls.name.toUpperCase())
+            c.id
+      };
+      final inClass = <Map<String, String>>[];
+      final inSubs = <Map<String, String>>[];
+      for (final d in stus.docs) {
+        final m = d.data();
+        final sid = '${m['sectionId'] ?? ''}';
+        final pl = m['phones'];
+        final phone = pl is List && pl.isNotEmpty
+            ? pl.map((e) => '$e').where((e) => e.isNotEmpty).join(' / ')
+            : '${m['phone'] ?? ''}';
+        final row = {
+          'id': d.id,
+          'name': '${m['name'] ?? ''}'.trim(),
+          'no': '${m['studentNo'] ?? ''}'.trim(),
+          'phone': phone.trim(),
+          'created':
+          '${(m['createdAt'] is Timestamp ? (m['createdAt'] as Timestamp).millisecondsSinceEpoch : 0)}',
+        };
+        if (sid == cls.id) {
+          inClass.add(row);
+        } else if (subIds.contains(sid)) {
+          inSubs.add(row);
+        }
+      }
+      final names = {for (final r in inClass) r['name']!.toLowerCase()};
+      final students = [
+        ...inClass,
+        for (final r in inSubs)
+          if (!names.contains(r['name']!.toLowerCase())) r
+      ]..sort((a, b) =>
+          a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+
+      // the fixed numbers of the class (a removed student leaves a gap)
+      final nm = <String, int>{};
+      final nmNames = <String, String>{};
+      try {
+        final nd = await FirebaseFirestore.instance
+            .collection('classNumbers')
+            .doc(cls.id)
+            .get();
+        final raw = nd.data()?['nums'];
+        if (raw is Map) {
+          for (final e in raw.entries) {
+            if (e.value is num) nm['${e.key}'] = (e.value as num).toInt();
+          }
+        }
+        final rn = nd.data()?['names'];
+        if (rn is Map) {
+          for (final e in rn.entries) {
+            nmNames['${e.key}'] = '${e.value}';
+          }
+        }
+      } catch (_) {}
+      final noOf = _assignRollNumbers(nm, students, nmNames);
+      students.sort((a, b) {
+        final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+        return c != 0
+            ? c
+            : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+      });
+
+      Map<String, dynamic> marksOf(Map<String, dynamic> r) =>
+          r['marks'] is Map ? Map<String, dynamic>.from(r['marks'] as Map) : {};
+
+      if (single) {
+        final bySession = {
+          for (final r in mine) '${r['session']}': marksOf(r),
+        };
+        final rows = <List<String>>[];
+        for (final s in students) {
+          var pr = 0, ab = 0;
+          for (final sh in shifts) {
+            final v = bySession[sh]?[s['id']];
+            if (v == null) continue;
+            if (v == 'a') {
+              ab++;
+            } else {
+              pr++;
+            }
+          }
+          if (!keep(pr, ab)) continue;
+          rows.add([
+            '${noOf[s['id']]}',
+            s['name']!,
+            s['no']!.isEmpty ? '-' : s['no']!,
+            s['phone']!.isEmpty ? '-' : s['phone']!,
+            for (final sh in shifts)
+              bySession[sh] == null || bySession[sh]![s['id']] == null
+                  ? '-'
+                  : (bySession[sh]![s['id']] == 'a' ? 'Absent' : 'Present'),
+          ]);
+        }
+        if (rows.isEmpty) continue;
+        final notes = <String>[];
+        for (final sh in shifts) {
+          final m = bySession[sh];
+          if (m == null) {
+            notes.add('${_shiftName[sh]}: attendance was not taken.');
+          } else {
+            final ab = students.where((s) => m[s['id']] == 'a').length;
+            final pr = students.where((s) => m[s['id']] != null).length - ab;
+            notes.add('${_shiftName[sh]}: Present $pr, Absent $ab');
+          }
+        }
+        if (status.isNotEmpty) {
+          notes.add('Shown: ${rows.length} of ${students.length} students '
+              '(${status == 'a' ? 'absent' : 'never absent'}).');
+        }
+        out.add(_DrTable(
+          title: '${cls.form} - ${cls.label}',
+          headers: [
+            'No.',
+            'Student name',
+            'ID',
+            'Phone',
+            for (final sh in shifts) _shiftName[sh]!
+          ],
+          rows: rows,
+          weights: [0.7, 3.8, 1.4, 2.2, for (final _ in shifts) 1.4],
+          notes: notes,
+        ));
+      } else {
+        var tp = 0, tn = 0;
+        final rows = <List<String>>[];
+        // oldest first, Shift A before Shift B
+        mine.sort((x, y) => '${x['date']}${x['session']}'
+            .compareTo('${y['date']}${y['session']}'));
+        for (final s in students) {
+          var pr = 0, ab = 0;
+          final absentOn = <String, List<String>>{}; // date -> shifts
+          for (final r in mine) {
+            final v = marksOf(r)[s['id']];
+            if (v == null) continue;
+            if (v == 'a') {
+              ab++;
+              absentOn
+                  .putIfAbsent('${r['date']}', () => [])
+                  .add(r['session'] == 'pm' ? 'B' : 'A');
+            } else {
+              pr++;
+            }
+          }
+          final absentText = [
+            for (final e in absentOn.entries)
+              '${DateFormat('EEE d MMM').format(DateTime.tryParse(e.key) ?? from)}'
+                  ' (Shift ${e.value.join(' + ')})'
+          ].join('; ');
+          tp += pr;
+          tn += pr + ab;
+          if (!keep(pr, ab)) continue;
+          rows.add([
+            '${noOf[s['id']]}',
+            s['name']!,
+            s['no']!.isEmpty ? '-' : s['no']!,
+            s['phone']!.isEmpty ? '-' : s['phone']!,
+            '$pr',
+            '$ab',
+            '${pr + ab}',
+            absentText.isEmpty ? '-' : absentText,
+          ]);
+        }
+        if (rows.isEmpty) continue;
+        final a = mine.where((r) => r['session'] == 'am').length;
+        final b = mine.where((r) => r['session'] == 'pm').length;
+        out.add(_DrTable(
+          title: '${cls.form} - ${cls.label}',
+          headers: const [
+            'No.',
+            'Student name',
+            'ID',
+            'Phone',
+            'Present',
+            'Absent',
+            'Sessions',
+            'Absent on (shift)'
+          ],
+          rows: rows,
+          weights: const [0.7, 3.4, 1.4, 2.1, 1.0, 1.0, 1.1, 3.8],
+          left: const {1, 7},
+          text: const {1, 2, 3, 7},
+          notes: [
+            'Registers taken: ${mine.length} (Shift A: $a, Shift B: $b)',
+            'Class attendance: ${pct(tp, tn)}',
+            if (status.isNotEmpty)
+              'Shown: ${rows.length} of ${students.length} students '
+                  '(${status == 'a' ? 'absent at least once' : 'never absent'}).',
+          ],
+        ));
+      }
+    }
+    if (out.isEmpty) {
+      throw Exception(status.isEmpty
+          ? 'No attendance was taken in this period.'
+          : 'No student matches this filter in this period.');
+    }
+    return out;
+  }
+
+  // ---------------- PDF (and Print) ----------------
+  static Future<Uint8List> pdf(List<_DrTable> tables, String period) async {
+    final doc = pw.Document();
+    final lb = schoolLogo.value.bytes;
+    final logo = lb == null ? null : pw.MemoryImage(lb);
+    const navy = PdfColor.fromInt(0xFF1F4E79);
+    pw.Widget cell(String t, bool left,
+        {bool head = false, PdfColor? color, bool zebra = false}) =>
+        pw.Container(
+          color: head ? PdfColors.grey300 : (zebra ? PdfColors.grey100 : null),
+          padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+          alignment: left && !head ? pw.Alignment.centerLeft : pw.Alignment.center,
+          child: pw.Text(_t(t),
+              style: pw.TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: head || color != null
+                      ? pw.FontWeight.bold
+                      : pw.FontWeight.normal,
+                  color: color)),
+        );
+    for (final tb in tables) {
+      doc.addPage(pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(28),
+        build: (ctx) => [
+          pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+            if (logo != null) ...[
+              pw.Image(logo, height: 46),
+              pw.SizedBox(width: 10),
+            ],
+            pw.Expanded(
+              child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text('DAILY ATTENDANCE REPORT',
+                        style: pw.TextStyle(
+                            fontSize: 17, fontWeight: pw.FontWeight.bold)),
+                    pw.SizedBox(height: 2),
+                    pw.Text(_t(period), style: const pw.TextStyle(fontSize: 10)),
+                  ]),
+            ),
+          ]),
+          pw.SizedBox(height: 10),
+          pw.Container(
+            width: double.infinity,
+            color: navy,
+            padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            child: pw.Text(_t(tb.title),
+                style: pw.TextStyle(
+                    color: PdfColors.white,
+                    fontSize: 12,
+                    fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(height: 6),
+          pw.Table(
+            border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+            columnWidths: {
+              for (var i = 0; i < tb.weights.length; i++)
+                i: pw.FlexColumnWidth(tb.weights[i]),
+            },
+            children: [
+              pw.TableRow(children: [
+                for (var c = 0; c < tb.headers.length; c++)
+                  cell(tb.headers[c], tb.left.contains(c), head: true),
+              ]),
+              for (var r = 0; r < tb.rows.length; r++)
+                pw.TableRow(children: [
+                  for (var c = 0; c < tb.rows[r].length; c++)
+                    cell(tb.rows[r][c], tb.left.contains(c),
+                        zebra: r.isOdd,
+                        color: tb.rows[r][c] == 'Absent'
+                            ? PdfColors.red800
+                            : (tb.rows[r][c] == 'Present'
+                            ? PdfColors.green800
+                            : null)),
+                ]),
+            ],
+          ),
+          pw.SizedBox(height: 8),
+          for (final n in tb.notes)
+            pw.Padding(
+              padding: const pw.EdgeInsets.only(top: 2),
+              child: pw.Text(_t(n),
+                  style: pw.TextStyle(
+                      fontSize: 10, fontWeight: pw.FontWeight.bold)),
+            ),
+        ],
+      ));
+    }
+    return Uint8List.fromList(await doc.save());
+  }
+
+  // ---------------- Excel ----------------
+  static Uint8List xlsx(List<_DrTable> tables, String period) {
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    String col(int i) {
+      var n = i + 1;
+      var s = '';
+      while (n > 0) {
+        final m = (n - 1) % 26;
+        s = String.fromCharCode(65 + m) + s;
+        n = (n - 1) ~/ 26;
+      }
+      return s;
+    }
+
+    String sc(int c, int r, String t, int style) =>
+        '<c r="${col(c)}$r" s="$style" t="inlineStr"><is>'
+            '<t xml:space="preserve">${ExamService._xml(_t(t))}</t></is></c>';
+    String nc(int c, int r, num v, int style) =>
+        '<c r="${col(c)}$r" s="$style"><v>$v</v></c>';
+    String ec(int c, int r, int style) => '<c r="${col(c)}$r" s="$style"/>';
+
+    final used = <String>{};
+    String sheetName(String t) {
+      var n = t.replaceAll(RegExp(r'[\[\]:*?/\\]'), '-').trim();
+      if (n.isEmpty) n = 'Class';
+      if (n.length > 31) n = n.substring(0, 31);
+      var u = n;
+      var k = 2;
+      while (!used.add(u.toLowerCase())) {
+        final suf = ' ($k)';
+        u = n.substring(0, (31 - suf.length).clamp(0, n.length)) + suf;
+        k++;
+      }
+      return u;
+    }
+
+    final sheets = <String>[];
+    final names = <String>[];
+    for (final tb in tables) {
+      final cols = tb.headers.length;
+      final rows = StringBuffer();
+      final merges = <String>[];
+      String band(int r, String text, int style) {
+        merges.add('A$r:${col(cols - 1)}$r');
+        final b = StringBuffer('<row r="$r">')..write(sc(0, r, text, style));
+        for (var c = 1; c < cols; c++) {
+          b.write(ec(c, r, style));
+        }
+        b.write('</row>');
+        return b.toString();
+      }
+
+      rows.write(band(1, 'DAILY ATTENDANCE REPORT', 5));
+      rows.write(band(2, period, 10));
+      rows.write(band(3, tb.title, 10));
+      final head = StringBuffer('<row r="5" ht="26" customHeight="1">');
+      for (var c = 0; c < cols; c++) {
+        head.write(sc(c, 5, tb.headers[c], 1));
+      }
+      head.write('</row>');
+      rows.write(head);
+      var r = 6;
+      for (final row in tb.rows) {
+        final line = StringBuffer('<row r="$r">');
+        for (var c = 0; c < row.length; c++) {
+          final v = row[c];
+          final n = tb.text.contains(c) ? null : int.tryParse(v);
+          if (n != null) {
+            line.write(nc(c, r, n, 2));
+          } else if (v == 'Absent') {
+            line.write(sc(c, r, v, 9));
+          } else if (v == 'Present') {
+            line.write(sc(c, r, v, 7));
+          } else {
+            line.write(sc(c, r, v, tb.left.contains(c) ? 3 : 2));
+          }
+        }
+        line.write('</row>');
+        rows.write(line);
+        r++;
+      }
+      r++;
+      for (final n in tb.notes) {
+        rows.write('<row r="$r">${sc(0, r, n, 6)}</row>');
+        r++;
+      }
+      final colsXml = StringBuffer('<cols>');
+      for (var c = 0; c < cols; c++) {
+        final w = (tb.weights[c] * 8).clamp(8, 44);
+        colsXml.write(
+            '<col min="${c + 1}" max="${c + 1}" width="$w" customWidth="1"/>');
+      }
+      colsXml.write('</cols>');
+      sheets.add('$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+          '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+          '<sheetViews><sheetView workbookViewId="0">'
+          '<pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/>'
+          '</sheetView></sheetViews>'
+          '<sheetFormatPr defaultRowHeight="16"/>'
+          '$colsXml<sheetData>$rows</sheetData>'
+          '<mergeCells count="${merges.length}">'
+          '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>'
+          '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
+          '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>'
+          '</worksheet>');
+      names.add(sheetName(tb.title));
+    }
+
+    const rel =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const b1 =
+        '<border><left style="thin"><color auto="1"/></left><right style="thin"><color auto="1"/></right>'
+        '<top style="thin"><color auto="1"/></top><bottom style="thin"><color auto="1"/></bottom><diagonal/></border>';
+    String xf(int font, int fill, int border, String h, {bool wrap = false}) =>
+        '<xf numFmtId="0" fontId="$font" fillId="$fill" borderId="$border" xfId="0" '
+            'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+            '<alignment horizontal="$h" vertical="center"${wrap ? ' wrapText="1"' : ''}/></xf>';
+    String font(String extra, {int sz = 11, String? color}) =>
+        '<font>$extra<sz val="$sz"/>${color == null ? '' : '<color rgb="$color"/>'}'
+            '<name val="Times New Roman"/></font>';
+    final stylesXml = '$xmlHead<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="5">${font('')}${font('<b/>')}${font('<b/>', sz: 14)}'
+        '${font('<b/>', color: 'FF2E7D32')}${font('<b/>', color: 'FFC62828')}</fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/><bgColor indexed="64"/></patternFill></fill></fills>'
+        '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>$b1</borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="11">'
+        '${xf(0, 0, 0, 'general')}' // 0
+        '${xf(1, 2, 1, 'center', wrap: true)}' // 1 header
+        '${xf(0, 0, 1, 'center')}' // 2 body centre
+        '${xf(0, 0, 1, 'left', wrap: true)}' // 3 body left (wraps)
+        '${xf(1, 0, 1, 'center')}' // 4 bold centre
+        '${xf(2, 2, 1, 'center')}' // 5 title
+        '${xf(1, 0, 0, 'left')}' // 6 bold note
+        '${xf(3, 0, 1, 'center')}' // 7 present (green)
+        '${xf(1, 0, 1, 'center')}' // 8 spare
+        '${xf(4, 0, 1, 'center')}' // 9 absent (red)
+        '${xf(1, 2, 1, 'center')}' // 10 sub title
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>';
+
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+              '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+              '${[for (var i = 0; i < sheets.length; i++) '<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'].join()}'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/>'
+              '</Relationships>'),
+      'xl/workbook.xml': utf8.encode(
+          '$xmlHead<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+              'xmlns:r="$rel"><sheets>'
+              '${[for (var i = 0; i < names.length; i++) '<sheet name="${ExamService._xml(names[i])}" sheetId="${i + 1}" r:id="rId${i + 1}"/>'].join()}'
+              '</sheets></workbook>'),
+      'xl/_rels/workbook.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '${[for (var i = 0; i < sheets.length; i++) '<Relationship Id="rId${i + 1}" Type="$rel/worksheet" Target="worksheets/sheet${i + 1}.xml"/>'].join()}'
+              '<Relationship Id="rId${sheets.length + 1}" Type="$rel/styles" Target="styles.xml"/>'
+              '</Relationships>'),
+      'xl/styles.xml': utf8.encode(stylesXml),
+      for (var i = 0; i < sheets.length; i++)
+        'xl/worksheets/sheet${i + 1}.xml': utf8.encode(sheets[i]),
+    };
+    final out = zip.Archive();
+    files.forEach(
+            (name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Excel file.');
+    return Uint8List.fromList(bytes);
+  }
+
+  // ---------------- Word ----------------
+  static Uint8List docx(List<_DrTable> tables, String period) {
+    String x(String t) => ExamService._xml(_t(t));
+    const ns =
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const relBase =
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const shade = '<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>';
+    const zebra = '<w:shd w:val="clear" w:color="auto" w:fill="F5F5F5"/>';
+    const edge = 'w:val="single" w:sz="6" w:space="0" w:color="000000"';
+    const tblBorders = '<w:tblBorders><w:top $edge/><w:left $edge/>'
+        '<w:bottom $edge/><w:right $edge/><w:insideH $edge/>'
+        '<w:insideV $edge/></w:tblBorders>';
+    const pageW = 10106; // portrait A4 minus 900 twips margins
+
+    String run(String t, {bool b = false, int sz = 20, String? color}) =>
+        '<w:r><w:rPr>${b ? '<w:b/><w:bCs/>' : ''}'
+            '${color == null ? '' : '<w:color w:val="$color"/>'}'
+            '<w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr>'
+            '<w:t xml:space="preserve">${x(t)}</w:t></w:r>';
+    String para(String t,
+        {bool b = true,
+          String jc = 'center',
+          bool pageBreak = false,
+          int sz = 20,
+          int sp = 20,
+          String? color}) =>
+        '<w:p><w:pPr>${pageBreak ? '<w:pageBreakBefore/>' : ''}'
+            '<w:spacing w:before="$sp" w:after="$sp"/><w:jc w:val="$jc"/>'
+            '<w:rPr><w:sz w:val="$sz"/><w:szCs w:val="$sz"/></w:rPr></w:pPr>'
+            '${t.isEmpty ? '' : run(t, b: b, sz: sz, color: color)}</w:p>';
+    String tc(int w, String t,
+        {bool head = false,
+          String jc = 'center',
+          bool zebraRow = false,
+          String? color}) =>
+        '<w:tc><w:tcPr><w:tcW w:w="$w" w:type="dxa"/>'
+            '${head ? shade : (zebraRow ? zebra : '')}<w:vAlign w:val="center"/></w:tcPr>'
+            '${para(t, b: head || color != null, jc: jc, sz: 19, sp: 30, color: color)}</w:tc>';
+    String tr(List<String> cells, {bool head = false}) =>
+        '<w:tr><w:trPr><w:cantSplit/>${head ? '<w:tblHeader/>' : ''}'
+            '<w:trHeight w:val="340" w:hRule="atLeast"/></w:trPr>${cells.join()}</w:tr>';
+
+    final body = StringBuffer();
+    for (var ti = 0; ti < tables.length; ti++) {
+      final tb = tables[ti];
+      final total = tb.weights.fold<double>(0, (a, b) => a + b);
+      final widths = [
+        for (final w in tb.weights) (pageW * w / total).floor()
+      ];
+      widths[1] += pageW - widths.fold<int>(0, (a, b) => a + b);
+      body.write(para('DAILY ATTENDANCE REPORT',
+          sz: 30, sp: 30, pageBreak: ti > 0));
+      body.write(para(period, b: false, sz: 20, sp: 20));
+      body.write(
+          '<w:tbl><w:tblPr><w:tblW w:w="$pageW" w:type="dxa"/>$tblBorders'
+              '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>'
+              '${widths.map((w) => '<w:gridCol w:w="$w"/>').join()}</w:tblGrid>');
+      body.write('<w:tr><w:tc><w:tcPr><w:tcW w:w="$pageW" w:type="dxa"/>'
+          '<w:gridSpan w:val="${tb.headers.length}"/>$shade</w:tcPr>'
+          '${para(tb.title, sz: 22, sp: 30)}</w:tc></w:tr>');
+      body.write(tr([
+        for (var c = 0; c < tb.headers.length; c++)
+          tc(widths[c], tb.headers[c], head: true),
+      ], head: true));
+      for (var r = 0; r < tb.rows.length; r++) {
+        body.write(tr([
+          for (var c = 0; c < tb.rows[r].length; c++)
+            tc(widths[c], tb.rows[r][c],
+                jc: tb.left.contains(c) ? 'left' : 'center',
+                zebraRow: r.isOdd,
+                color: tb.rows[r][c] == 'Absent'
+                    ? 'C62828'
+                    : (tb.rows[r][c] == 'Present' ? '2E7D32' : null)),
+        ]));
+      }
+      body.write('</w:tbl>');
+      body.write(para('', b: false, sz: 12, sp: 0));
+      for (final n in tb.notes) {
+        body.write(para(n, jc: 'left', sz: 19, sp: 10));
+      }
+    }
+
+    const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    final documentXml = '$xmlHead<w:document $ns><w:body>$body'
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="720" w:right="900" w:bottom="720" w:left="900" '
+        'w:header="400" w:footer="400" w:gutter="0"/>'
+        '</w:sectPr></w:body></w:document>';
+    const stylesXml =
+        '$xmlHead<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" w:cs="Times New Roman"/>'
+        '<w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:rPrDefault>'
+        '<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault>'
+        '</w:docDefaults></w:styles>';
+    final files = <String, List<int>>{
+      '[Content_Types].xml': utf8.encode(
+          '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+              '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+              '</Types>'),
+      '_rels/.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="$relBase/officeDocument" Target="word/document.xml"/>'
+              '</Relationships>'),
+      'word/_rels/document.xml.rels': utf8.encode(
+          '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rIdStyles" Type="$relBase/styles" Target="styles.xml"/>'
+              '</Relationships>'),
+      'word/document.xml': utf8.encode(documentXml),
+      'word/styles.xml': utf8.encode(stylesXml),
+    };
+    final out = zip.Archive();
+    files.forEach(
+            (name, data) => out.addFile(zip.ArchiveFile(name, data.length, data)));
+    final bytes = zip.ZipEncoder().encode(out);
+    if (bytes == null) throw Exception('Could not create the Word file.');
+    return Uint8List.fromList(bytes);
+  }
+}
+
+// ======================= DAILY (REGULAR) ATTENDANCE =======================
+/// Regular school attendance, taken for two shifts (Shift A / Shift B),
+/// Monday to Friday. It is separate from the exam attendance above.
+///   dailyAttendance/{classId}_{yyyy-MM-dd}_{am|pm}   (am = Shift A, pm = Shift B)
+///     sectionId, date, session, marks {studentId: p|a|l|e},
+///     byUid, byName, updatedAt
+/// Admin / Student affairs (and anybody given the page) take any class on any
+/// day. A class monitor (classes ticked in Settings > Users) takes only those
+/// classes, only for today.
+class DailyAttendanceScreen extends StatelessWidget {
+  const DailyAttendanceScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Daily attendance')),
+    body: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: const DailyAttendanceBody(),
+      ),
+    ),
+  );
+}
+
+class DailyAttendanceBody extends StatefulWidget {
+  const DailyAttendanceBody({super.key});
+
+  @override
+  State<DailyAttendanceBody> createState() => _DailyAttendanceBodyState();
+}
+
+class _DailyAttendanceBodyState extends State<DailyAttendanceBody> {
+  static const _presentColor = Color(0xFF2E7D32);
+  static const _absentColor = Color(0xFFC62828);
+
+  final _db = FirebaseFirestore.instance;
+  late final Stream<UserProfile> _me = UserProfile.watchMine();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _secs =
+  _db.collection('sections').snapshots();
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
+  _db.collection('students').snapshots();
+
+  String? _classId;
+
+  // ---- report (admin) ----
+  DateTime _rFrom = _monday(DateTime.now());
+  DateTime _rTo = _lastWeekday(DateTime.now());
+  String _rClass = ''; // '' = every class
+  String _rShift = ''; // '' = Shift A + Shift B
+  String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
+  String _show = 'all'; // list filter: all | p (present) | a (absent)
+
+  // ---- fixed roll numbers of a class (stored in classNumbers/{classId}) ----
+  final Map<String, Map<String, int>> _nums = {};
+  final Map<String, Map<String, String>> _numNames = {};
+  final Map<String, String> _numSig = {};
+  final Set<String> _numBusy = {};
+
+  /// Saves the fixed numbers of the class (see _assignRollNumbers).
+  Future<void> _ensureNumbers(
+      String cid, List<Map<String, String>> students) async {
+    final sig = ([for (final r in students) r['id']!]..sort()).join(',');
+    if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
+    _numBusy.add(cid);
+    try {
+      final ref = _db.collection('classNumbers').doc(cid);
+      final saved = <String, int>{};
+      final savedNames = <String, String>{};
+      try {
+        final d = await ref.get();
+        final m = d.data()?['nums'];
+        if (m is Map) {
+          for (final e in m.entries) {
+            final v = e.value;
+            if (v is num) saved['${e.key}'] = v.toInt();
+          }
+        }
+        final nmz = d.data()?['names'];
+        if (nmz is Map) {
+          for (final e in nmz.entries) {
+            savedNames['${e.key}'] = '${e.value}';
+          }
+        }
+      } catch (_) {}
+      final keep = _assignRollNumbers(saved, students, savedNames);
+      final names = _rollNames(keep, students);
+      final changed = keep.length != saved.length ||
+          keep.entries.any((e) => saved[e.key] != e.value);
+      if (changed) {
+        try {
+          await ref.set({
+            'nums': keep,
+            'names': names,
+            'updatedAt': FieldValue.serverTimestamp()
+          });
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      setState(() {
+        _nums[cid] = keep;
+        _numNames[cid] = names;
+        _numSig[cid] = sig;
+      });
+    } finally {
+      _numBusy.remove(cid);
+    }
+  }
+
+  /// Closes ONE vacant number: the students after it move up by one.
+  Future<void> _removeVacant(String cid, int n, Map<String, int> noOf,
+      List<Map<String, String>> students) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Remove number $n?'),
+        content: Text('The students after number $n move up by one number '
+            '(number ${n + 1} becomes $n, and so on). This is used in the '
+            'daily attendance and in its reports.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _saveNumbers(cid, {
+      for (final e in noOf.entries) e.key: e.value > n ? e.value - 1 : e.value
+    }, students);
+  }
+
+  /// Closes EVERY vacant number: the students are numbered 1, 2, 3 ... in the
+  /// order they have now.
+  Future<void> _removeAllVacant(String cid, Map<String, int> noOf,
+      List<Map<String, String>> students, int vacant) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove all vacant numbers?'),
+        content: Text('$vacant vacant number${vacant == 1 ? '' : 's'} will be '
+            'removed. The students keep their order and are numbered 1, 2, '
+            '3 ... without gaps.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove all')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final ordered = [...students]..sort((a, b) {
+      final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+      return c != 0
+          ? c
+          : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+    });
+    await _saveNumbers(cid, {
+      for (var i = 0; i < ordered.length; i++) ordered[i]['id']!: i + 1
+    }, students);
+  }
+
+  Future<void> _saveNumbers(String cid, Map<String, int> nums,
+      List<Map<String, String>> students) async {
+    final names = _rollNames(nums, students);
+    try {
+      await _db.collection('classNumbers').doc(cid).set({
+        'nums': nums,
+        'names': names,
+        'updatedAt': FieldValue.serverTimestamp()
+      });
+      if (!mounted) return;
+      setState(() {
+        _nums[cid] = nums;
+        _numNames[cid] = names;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not save the numbers: '
+              '${'$e'.replaceFirst('Exception: ', '')}')));
+    }
+  }
+
+  QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
+  late DateTime _date = _lastWeekday(DateTime.now());
+  // 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
+  // stay valid)
+  String _session = 'am';
+  // studentId -> 'a' (absent). Everybody else counts as present (ticked).
+  Map<String, String> _marks = {};
+  List<String> _current = const []; // ids of the students shown
+  bool _exists = false; // a register is already saved for this day / session
+  String _loadedKey = '';
+  bool _loading = false, _saving = false, _dirty = false;
+  String? _error;
+
+  static DateTime _lastWeekday(DateTime d) {
+    var x = DateTime(d.year, d.month, d.day);
+    while (x.weekday > DateTime.friday) {
+      x = x.subtract(const Duration(days: 1));
+    }
+    return x;
+  }
+
+  static DateTime _monday(DateTime d) {
+    final x = DateTime(d.year, d.month, d.day);
+    return x.subtract(Duration(days: x.weekday - 1));
+  }
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  String get _dateKey => DateFormat('yyyy-MM-dd').format(_date);
+  String get _docId => '${_classId}_${_dateKey}_$_session';
+
+  Future<void> _load() async {
+    final id = _classId;
+    if (id == null) return;
+    final key = _docId;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _dirty = false;
+      _exists = false;
+      _marks = {};
+      _loadedKey = key;
+    });
+    try {
+      final d = await _db.collection('dailyAttendance').doc(key).get();
+      if (!mounted || _loadedKey != key) return;
+      final m = d.data()?['marks'];
+      setState(() {
+        _exists = d.exists;
+        _marks = {
+          if (m is Map)
+            for (final e in m.entries)
+              if ('${e.value}' != 'p') '${e.key}': 'a'
+        };
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted || _loadedKey != key) return;
+      setState(() {
+        _loading = false;
+        _error = '$e'.replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  Future<void> _save(UserProfile me) async {
+    final id = _classId;
+    if (id == null) return;
+    setState(() => _saving = true);
+    try {
+      await _db.collection('dailyAttendance').doc(_docId).set({
+        'sectionId': id,
+        'date': _dateKey,
+        'session': _session,
+        // every student of the class: p = ticked, a = unticked
+        'marks': {
+          for (final sid in _current) sid: _marks[sid] == 'a' ? 'a' : 'p'
+        },
+        'byUid': me.uid,
+        'byName': me.name.isEmpty ? me.email : me.name,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _dirty = false;
+        _exists = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Saved: ${_session == 'am' ? 'Shift A' : 'Shift B'}'
+              ' attendance of ${DateFormat('EEE d MMM').format(_date)}')));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Could not save: '
+              '${'$e'.replaceFirst('Exception: ', '')}')));
+    }
+  }
+
+  Future<void> _pickReportDate(bool from) async {
+    final p = await showDatePicker(
+      context: context,
+      initialDate: from ? _rFrom : _rTo,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
+    );
+    if (p == null || !mounted) return;
+    final d = DateTime(p.year, p.month, p.day);
+    setState(() {
+      if (from) {
+        _rFrom = d;
+        if (_rTo.isBefore(d)) _rTo = d;
+      } else {
+        _rTo = d;
+        if (_rFrom.isAfter(d)) _rFrom = d;
+      }
+    });
+  }
+
+  Future<List<_DrTable>> _reportTables() => DailyAttendanceReport.tables(
+    from: _rFrom,
+    to: _rTo,
+    classId: _rClass,
+    shift: _rShift,
+    status: _rStatus,
+    secs: _secsSnap!,
+    stus: _stusSnap!,
+  );
+
+  String get _reportPeriod =>
+      DailyAttendanceReport.periodText(_rFrom, _rTo, _rShift, _rStatus);
+
+  Widget _reportPanel(List<SectionInfo> classes) {
+    final fmt = DateFormat('EEE d MMM yyyy');
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ExpansionTile(
+        leading: const Icon(Icons.summarize),
+        title: const Text('Report',
+            style: TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: const Text('Excel, Word, PDF and Print',
+            style: TextStyle(fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(spacing: 10, runSpacing: 10, children: [
+            OutlinedButton.icon(
+              onPressed: () => _pickReportDate(true),
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text('From ${fmt.format(_rFrom)}'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _pickReportDate(false),
+              icon: const Icon(Icons.event, size: 18),
+              label: Text('To ${fmt.format(_rTo)}'),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          Wrap(spacing: 10, runSpacing: 10, children: [
+            SizedBox(
+              width: 220,
+              child: DropdownButtonFormField<String>(
+                value: classes.any((c) => c.id == _rClass) ? _rClass : '',
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Class',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('All classes')),
+                  for (final c in classes)
+                    DropdownMenuItem(value: c.id, child: Text(c.fullName)),
+                ],
+                onChanged: (v) => setState(() => _rClass = v ?? ''),
+              ),
+            ),
+            SizedBox(
+              width: 200,
+              child: DropdownButtonFormField<String>(
+                value: _rShift,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Shift',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: const [
+                  DropdownMenuItem(value: '', child: Text('Shift A + B')),
+                  DropdownMenuItem(value: 'am', child: Text('Shift A')),
+                  DropdownMenuItem(value: 'pm', child: Text('Shift B')),
+                ],
+                onChanged: (v) => setState(() => _rShift = v ?? ''),
+              ),
+            ),
+            SizedBox(
+              width: 220,
+              child: DropdownButtonFormField<String>(
+                value: _rStatus,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                    labelText: 'Show',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+                items: const [
+                  DropdownMenuItem(value: '', child: Text('All students')),
+                  DropdownMenuItem(value: 'a', child: Text('Absent only')),
+                  DropdownMenuItem(value: 'p', child: Text('Present only')),
+                ],
+                onChanged: (v) => setState(() => _rStatus = v ?? ''),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+              '${_rFrom == _rTo ? 'One day: each student shows Present / Absent for each shift.' : 'More than one day: each student shows Present, Absent, Sessions and Attendance %.'}'
+                  '${_rStatus == 'a' ? '\nAbsent only: students who were absent at least once.' : _rStatus == 'p' ? '\nPresent only: students who were never absent.' : ''}',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _ReportMenuButton(
+              fileName: () => _safeFile(
+                  'Daily-attendance-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
+                      '${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
+              build: () async => DailyAttendanceReport.pdf(
+                  await _reportTables(), _reportPeriod),
+              buildXlsx: () async => DailyAttendanceReport.xlsx(
+                  await _reportTables(), _reportPeriod),
+              buildDocx: () async => DailyAttendanceReport.docx(
+                  await _reportTables(), _reportPeriod),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickDate() async {
+    final p = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
+    );
+    if (p == null || !mounted) return;
+    setState(() => _date = DateTime(p.year, p.month, p.day));
+    _load();
+  }
+
+  Widget _msg(String t, {bool error = false}) => Padding(
+    padding: const EdgeInsets.all(24),
+    child: Center(
+        child: Text(t,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: error ? Colors.red : Colors.black54))),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: _me,
+      builder: (context, meSnap) {
+        if (meSnap.hasError) return _msg('${meSnap.error}', error: true);
+        final me = meSnap.data;
+        if (me == null) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _secs,
+          builder: (context, secSnap) =>
+              StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: _stus,
+                builder: (context, stuSnap) {
+                  final err = secSnap.error ?? stuSnap.error;
+                  if (err != null) {
+                    return _msg('Could not load: $err', error: true);
+                  }
+                  if (!secSnap.hasData || !stuSnap.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  return _content(me, secSnap.data!, stuSnap.data!);
+                },
+              ),
+        );
+      },
+    );
+  }
+
+  Widget _content(UserProfile me, QuerySnapshot<Map<String, dynamic>> secDocs,
+      QuerySnapshot<Map<String, dynamic>> stuDocs) {
+    _secsSnap = secDocs;
+    _stusSnap = stuDocs;
+    final allSecs = [for (final d in secDocs.docs) SectionInfo.fromDoc(d)];
+    // a person with assigned classes sees ONLY those classes; they can take
+    // today only (Student affairs keep any date)
+    final restricted = me.monitorSections.isNotEmpty && !me.fullAccess;
+    final todayOnly = restricted && me.role != 'affairs';
+    final classes = [
+      for (final c in allSecs)
+        if (!c.isSub && (!restricted || me.monitorSections.contains(c.id))) c
+    ]..sort((a, b) {
+      final f = a.form.compareTo(b.form);
+      return f != 0 ? f : a.name.compareTo(b.name);
+    });
+    if (classes.isEmpty) {
+      return _msg(restricted
+          ? 'None of your classes was found. Ask the administrator.'
+          : 'There are no classes yet.');
+    }
+    final cid =
+    classes.any((c) => c.id == _classId) ? _classId! : classes.first.id;
+    if (cid != _classId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _classId = cid;
+        _load();
+      });
+    }
+    final cls = classes.firstWhere((c) => c.id == cid);
+
+    // students of the class: the whole class + the ones that exist only in a
+    // divided section of it (a student saved in both counts once)
+    final subIds = {
+      for (final c in allSecs)
+        if (c.isSub &&
+            c.form == cls.form &&
+            c.classKey == cls.name.toUpperCase())
+          c.id
+    };
+    final inClass = <Map<String, String>>[];
+    final inSubs = <Map<String, String>>[];
+    for (final d in stuDocs.docs) {
+      final m = d.data();
+      final sid = '${m['sectionId'] ?? ''}';
+      final row = {
+        'id': d.id,
+        'name': '${m['name'] ?? ''}'.trim(),
+        'no': '${m['studentNo'] ?? ''}'.trim(),
+        'created':
+        '${(m['createdAt'] is Timestamp ? (m['createdAt'] as Timestamp).millisecondsSinceEpoch : 0)}',
+      };
+      if (sid == cid) {
+        inClass.add(row);
+      } else if (subIds.contains(sid)) {
+        inSubs.add(row);
+      }
+    }
+    final names = {for (final r in inClass) r['name']!.toLowerCase()};
+    final students = [
+      ...inClass,
+      for (final r in inSubs)
+        if (!names.contains(r['name']!.toLowerCase())) r
+    ]..sort((a, b) =>
+        a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
+
+    final today = DateTime.now();
+    final canEdit = !todayOnly || _sameDay(_date, today);
+    final isWeekend = today.weekday > DateTime.friday;
+    _current = [for (final r in students) r['id']!];
+
+    // fixed numbers: saved ones first; a student without a number yet goes
+    // after the last number until it is saved
+    final studentsNow = [...students];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _ensureNumbers(cid, studentsNow);
+    });
+    final noOf = _assignRollNumbers(
+        _nums[cid] ?? const {}, students, _numNames[cid] ?? const {});
+    students.sort((a, b) {
+      final c = noOf[a['id']]!.compareTo(noOf[b['id']]!);
+      return c != 0
+          ? c
+          : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
+    });
+    final absent = students.where((r) => _marks[r['id']] == 'a').length;
+    final present = students.length - absent;
+    // how many numbers are vacant (a removed student)
+    final usedNos = {for (final r in students) noOf[r['id']]!};
+    final vacantTotal = usedNos.isEmpty
+        ? 0
+        : usedNos.reduce((a, b) => a > b ? a : b) - usedNos.length;
+    // rows shown, in number order. A vacant number (a removed student) is
+    // shown as an empty slot (negative number) when the whole list is shown.
+    final items = <int>[];
+    var prevNo = 0;
+    for (var i = 0; i < students.length; i++) {
+      final n = noOf[students[i]['id']]!;
+      if (_show == 'all') {
+        for (var g = prevNo + 1; g < n; g++) {
+          items.add(-g);
+        }
+      }
+      if (_show == 'all' ||
+          (_show == 'a') == (_marks[students[i]['id']] == 'a')) {
+        items.add(i);
+      }
+      if (n > prevNo) prevNo = n;
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+      children: [
+        // only the administrator sees the report
+        if (me.fullAccess) _reportPanel(classes),
+        DropdownButtonFormField<String>(
+          value: cid,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Class',
+            border: OutlineInputBorder(),
+            isDense: true,
+            prefixIcon: Icon(Icons.groups),
+          ),
+          items: [
+            for (final c in classes)
+              DropdownMenuItem(value: c.id, child: Text(c.fullName)),
+          ],
+          onChanged: (v) {
+            if (v == null || v == _classId) return;
+            setState(() => _classId = v);
+            _load();
+          },
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                onPressed: todayOnly ? null : _pickDate,
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
+              ),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                      value: 'am',
+                      icon: Icon(Icons.looks_one_outlined, size: 18),
+                      label: Text('Shift A')),
+                  ButtonSegment(
+                      value: 'pm',
+                      icon: Icon(Icons.looks_two_outlined, size: 18),
+                      label: Text('Shift B')),
+                ],
+                selected: {_session},
+                onSelectionChanged: (v) {
+                  setState(() => _session = v.first);
+                  _load();
+                },
+              ),
+            ]),
+        if (todayOnly && isWeekend)
+          const Padding(
+            padding: EdgeInsets.only(top: 10),
+            child: Text(
+                'Attendance is taken Monday to Friday. Today is a weekend, '
+                    'so you can only look at the last school day.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          )
+        else if (todayOnly)
+          const Padding(
+            padding: EdgeInsets.only(top: 10),
+            child: Text('You can take today\'s attendance of your classes.',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ),
+        const SizedBox(height: 12),
+        // the counts are also the filter of the list below
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'all',
+            label: Text('All ${students.length}',
+                style: const TextStyle(
+                    fontWeight: FontWeight.w600, fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'all'),
+          ),
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'p',
+            selectedColor: _presentColor.withOpacity(0.2),
+            side: const BorderSide(color: _presentColor),
+            label: Text('Present $present',
+                style: const TextStyle(
+                    color: _presentColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'p'),
+          ),
+          ChoiceChip(
+            visualDensity: VisualDensity.compact,
+            showCheckmark: false,
+            selected: _show == 'a',
+            selectedColor: _absentColor.withOpacity(0.2),
+            side: const BorderSide(color: _absentColor),
+            label: Text('Absent $absent',
+                style: const TextStyle(
+                    color: _absentColor,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12)),
+            onSelected: (_) => setState(() => _show = 'a'),
+          ),
+          if (_exists)
+            const Chip(
+              visualDensity: VisualDensity.compact,
+              label: Text('Register saved', style: TextStyle(fontSize: 12)),
+            ),
+          if (!restricted && vacantTotal > 0)
+            ActionChip(
+              visualDensity: VisualDensity.compact,
+              avatar: const Icon(Icons.delete_sweep_outlined, size: 16),
+              label: Text('Remove $vacantTotal vacant',
+                  style: const TextStyle(fontSize: 12)),
+              onPressed: () =>
+                  _removeAllVacant(cid, noOf, students, vacantTotal),
+            ),
+        ]),
+        const SizedBox(height: 10),
+        Row(children: [
+          TextButton.icon(
+            onPressed: !canEdit || students.isEmpty
+                ? null
+                : () => setState(() {
+              _marks.clear();
+              _dirty = true;
+            }),
+            icon: const Icon(Icons.check_box, size: 18),
+            label: const Text('Tick all'),
+          ),
+          TextButton.icon(
+            onPressed: !canEdit || students.isEmpty
+                ? null
+                : () => setState(() {
+              for (final r in students) {
+                _marks[r['id']!] = 'a';
+              }
+              _dirty = true;
+            }),
+            icon: const Icon(Icons.check_box_outline_blank, size: 18),
+            label: const Text('Untick all'),
+          ),
+          const Spacer(),
+          FilledButton.icon(
+            onPressed: !canEdit || _saving || (_exists && !_dirty)
+                ? null
+                : () => _save(me),
+            icon: _saving
+                ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save, size: 18),
+            label: Text(_exists && !_dirty ? 'Saved' : 'Save'),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        if (_loading)
+          const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: CircularProgressIndicator()))
+        else if (_error != null)
+          _msg('Could not load this register.\n$_error', error: true)
+        else if (students.isEmpty)
+            _msg('This class has no students yet.')
+          else if (items.isEmpty)
+              _msg(_show == 'a'
+                  ? 'No student is absent.'
+                  : 'No student is present.')
+            else
+              for (final i in items)
+                if (i < 0)
+                // vacant number: the student was removed
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 3),
+                    padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.black12),
+                    ),
+                    child: Row(children: [
+                      SizedBox(
+                          width: 34,
+                          child: Text('${-i}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.black38))),
+                      const Text('Vacant',
+                          style: TextStyle(
+                              fontSize: 12.5,
+                              fontStyle: FontStyle.italic,
+                              color: Colors.black38)),
+                      const Spacer(),
+                      // removing the number moves the next students up by one
+                      if (!restricted)
+                        IconButton(
+                          tooltip: 'Remove this number',
+                          visualDensity: VisualDensity.compact,
+                          iconSize: 19,
+                          color: Colors.black45,
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () =>
+                              _removeVacant(cid, -i, noOf, students),
+                        ),
+                    ]),
+                  )
+                else
+                  Card(
+                    margin: const EdgeInsets.symmetric(vertical: 3),
+                    child: Padding(
+                      padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      child: Row(children: [
+                        SizedBox(
+                            width: 34,
+                            child: Text('${noOf[students[i]['id']]}',
+                                style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.black54))),
+                        Expanded(
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(students[i]['name']!,
+                                    style: const TextStyle(
+                                        fontSize: 14.5, fontWeight: FontWeight.w600)),
+                                if (students[i]['no']!.isNotEmpty)
+                                  Text('ID ${students[i]['no']}',
+                                      style: const TextStyle(
+                                          fontSize: 11.5, color: Colors.black54)),
+                              ]),
+                        ),
+                        Text(_marks[students[i]['id']] == 'a' ? 'Absent' : 'Present',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _marks[students[i]['id']] == 'a'
+                                    ? _absentColor
+                                    : _presentColor)),
+                        Checkbox(
+                          value: _marks[students[i]['id']] != 'a',
+                          activeColor: _presentColor,
+                          onChanged: !canEdit
+                              ? null
+                              : (on) => setState(() {
+                            if (on == true) {
+                              _marks.remove(students[i]['id']);
+                            } else {
+                              _marks[students[i]['id']!] = 'a';
+                            }
+                            _dirty = true;
+                          }),
+                        ),
+                      ]),
+                    ),
+                  ),
+      ],
+    );
+  }
 }
 
 class AttendanceScreen extends StatefulWidget {
@@ -17513,7 +24043,11 @@ class _FinanceScreenState extends State<FinanceScreen> {
   final _service = SchoolService();
   late final Stream<List<SectionInfo>> _secStream = _service.watchSections();
   final _col = FirebaseFirestore.instance.collection('payments');
-  String? _sectionId;
+  /// The class picked in the list. [_allId] = every class (the default).
+  static const _allId = '__all__';
+  String? _sectionId = _allId;
+  late final Stream<List<StudentInfo>> _allStudents =
+  _service.watchAllStudents().asBroadcastStream();
   DateTime _month = DateTime(DateTime.now().year, DateTime.now().month);
   int _filter = -1; // -1 all, 0 unpaid, 1 partial, 2 paid
   String _search = '';
@@ -17572,7 +24106,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
       void add(String month, double amount, double disc) {
         batch.set(_col.doc(), {
           'studentId': s.id,
-          'sectionId': _sectionId ?? '',
+          'sectionId': s.sectionId,
           'month': month,
           'amount': amount,
           'discount': disc,
@@ -17838,7 +24372,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
   Widget _controls(List<SectionInfo> secs) {
 // only whole classes (1A, 1C ...), not divided sub-sections
     secs = [for (final s in secs) if (!s.isSub) s];
-    final valid = secs.any((s) => s.id == _sectionId);
+    final valid = _sectionId == _allId || secs.any((s) => s.id == _sectionId);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Column(children: [
@@ -17851,6 +24385,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
             isDense: true,
           ),
           items: [
+            const DropdownMenuItem(value: _allId, child: Text('All classes')),
             for (final s in secs)
               DropdownMenuItem(value: s.id, child: Text(s.label)),
           ],
@@ -17933,7 +24468,8 @@ class _FinanceScreenState extends State<FinanceScreen> {
   }
 
   Widget _studentCard(
-      int i, StudentInfo s, double paid, double fee, int status) {
+      int i, StudentInfo s, double paid, double fee, int status,
+      {String? cls}) {
     final c = status == 2
         ? kGreen
         : status == 1
@@ -17960,7 +24496,8 @@ class _FinanceScreenState extends State<FinanceScreen> {
             overflow: TextOverflow.ellipsis,
             style:
             const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600)),
-        subtitle: Text('Paid ${_money(paid)} of ${_money(fee)}'),
+        subtitle: Text(
+            '${cls == null ? '' : '$cls · '}Paid ${_money(paid)} of ${_money(fee)}'),
         trailing: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -17977,29 +24514,40 @@ class _FinanceScreenState extends State<FinanceScreen> {
     );
   }
 
-  Widget _list(SectionInfo sec, List<StudentInfo> students, List<_Pay> pays) {
-    final fee = appSettings.value.monthlyFees[sec.form] ?? 0.0;
-    int statusOf(double paid) => paid <= 0 ? 0 : (paid >= fee ? 2 : 1);
+  Widget _list(List<SectionInfo> secs, List<StudentInfo> students, List<_Pay> pays,
+      {bool all = false}) {
+    final secOf = {for (final x in secs) x.id: x};
+// every student pays the fee of the form of his / her own class
+    double feeOf(StudentInfo s) =>
+        appSettings.value.monthlyFees[secOf[s.sectionId]?.form ?? ''] ?? 0.0;
+    int statusOf(double paid, double fee) =>
+        paid <= 0 ? 0 : (paid >= fee ? 2 : 1);
     final rows = [
       for (var i = 0; i < students.length; i++)
         (
         i: i,
         s: students[i],
+        fee: feeOf(students[i]),
         paid: _paysOf(students[i], pays)
             .fold<double>(0, (a, p) => a + p.amount + p.discount),
         cash: _paysOf(students[i], pays).fold<double>(0, (a, p) => a + p.amount),
         ),
     ];
-    var collected = 0.0, outstanding = 0.0;
+    var expected = 0.0, collected = 0.0, outstanding = 0.0;
     final count = [0, 0, 0];
     for (final r in rows) {
+      expected += r.fee;
       collected += r.cash;
-      outstanding += (fee - r.paid) > 0 ? (fee - r.paid) : 0.0;
-      count[statusOf(r.paid)]++;
+      outstanding += (r.fee - r.paid) > 0 ? (r.fee - r.paid) : 0.0;
+      count[statusOf(r.paid, r.fee)]++;
     }
+    final noFee = [
+      for (final f in {for (final x in secs) x.form})
+        if ((appSettings.value.monthlyFees[f] ?? 0.0) <= 0) f
+    ];
     final shown = [
       for (final r in rows)
-        if ((_filter == -1 || statusOf(r.paid) == _filter) &&
+        if ((_filter == -1 || statusOf(r.paid, r.fee) == _filter) &&
             (_search.isEmpty || r.s.name.toLowerCase().contains(_search)))
           r
     ];
@@ -18011,19 +24559,19 @@ class _FinanceScreenState extends State<FinanceScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
       children: [
-        if (fee <= 0)
+        if (noFee.isNotEmpty)
           Card(
             color: Colors.orange.shade50,
             elevation: 0,
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: Text(
-                  'No monthly fee is set for ${sec.form}. '
+                  'No monthly fee is set for ${noFee.join(', ')}. '
                       'Set it in Settings > Finance.',
                   style: const TextStyle(fontSize: 13)),
             ),
           ),
-        _summaryCard(fee * students.length, collected, outstanding, count),
+        _summaryCard(expected, collected, outstanding, count),
         const SizedBox(height: 8),
         Wrap(spacing: 8, runSpacing: 4, children: [
           chip('All', -1, students.length),
@@ -18039,12 +24587,70 @@ class _FinanceScreenState extends State<FinanceScreen> {
           )
         else
           for (final r in shown)
-            _studentCard(r.i, r.s, r.paid, fee, statusOf(r.paid)),
+            _studentCard(r.i, r.s, r.paid, r.fee, statusOf(r.paid, r.fee),
+                cls: all ? secOf[r.s.sectionId]?.label : null),
       ],
     );
   }
 
+  /// Every class together (the default): the students of all whole classes,
+  /// class by class, each with the fee of his / her own form.
+  Widget _allBody(List<SectionInfo> whole) {
+    if (whole.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('There are no classes yet.', textAlign: TextAlign.center),
+        ),
+      );
+    }
+    final order = {for (var i = 0; i < whole.length; i++) whole[i].id: i};
+    return StreamBuilder<List<StudentInfo>>(
+      stream: _allStudents,
+      builder: (context, st) {
+        if (st.hasError) return Center(child: Text('Error: ${st.error}'));
+        if (!st.hasData) return const Center(child: CircularProgressIndicator());
+        final students = [
+          for (final x in st.data!)
+            if (order.containsKey(x.sectionId)) x
+        ]..sort((a, b) {
+          final c = order[a.sectionId]!.compareTo(order[b.sectionId]!);
+          return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+        if (students.isEmpty) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('There are no students yet.', textAlign: TextAlign.center),
+            ),
+          );
+        }
+        return StreamBuilder<List<_Pay>>(
+          stream: _payStream,
+          builder: (context, ps) {
+            if (ps.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('Could not load payments: ${ps.error}',
+                      textAlign: TextAlign.center),
+                ),
+              );
+            }
+            if (!ps.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            return _list(whole, students, ps.data!, all: true);
+          },
+        );
+      },
+    );
+  }
+
   Widget _body(List<SectionInfo> secs) {
+    if (_sectionId == _allId) {
+      return _allBody([for (final x in secs) if (!x.isSub) x]);
+    }
     SectionInfo? found;
     for (final x in secs) {
       if (!x.isSub && x.id == _sectionId) found = x;
@@ -18089,7 +24695,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
             if (!ps.hasData) {
               return const Center(child: CircularProgressIndicator());
             }
-            return _list(sec, students, ps.data!);
+            return _list([sec], students, ps.data!);
           },
         );
       },
@@ -18101,20 +24707,28 @@ class _FinanceScreenState extends State<FinanceScreen> {
     appBar: AppBar(
       title: const Text('Finance'),
       actions: [
-        IconButton(
+        _BarAction(
+          label: 'Report',
           tooltip: 'Finance report',
-          icon: const Icon(Icons.assessment_outlined),
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+          icon: Icons.assessment_outlined,
+          color: const Color(0xFF1565C0),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
             builder: (_) =>
-                FinanceReportScreen(month: _month, sectionId: _sectionId),
+                FinanceReportScreen(
+                    month: _month,
+                    sectionId: _sectionId == _allId ? null : _sectionId),
           )),
         ),
-        IconButton(
+        _BarAction(
+          label: 'Manual',
           tooltip: 'Manual (printable fee sheet)',
-          icon: const Icon(Icons.edit_note),
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+          icon: Icons.edit_note,
+          color: const Color(0xFFEF6C00),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
             builder: (_) =>
-                ManualReportScreen(month: _month, sectionId: _sectionId),
+                ManualReportScreen(
+                    month: _month,
+                    sectionId: _sectionId == _allId ? null : _sectionId),
           )),
         ),
       ],
@@ -18599,15 +25213,19 @@ class _FinanceReportScreenState extends State<FinanceReportScreen> {
             ),
           )
         else ...[
-          IconButton(
+          _BarAction(
+            label: 'Print',
             tooltip: 'Print',
-            onPressed: () => _export(true),
-            icon: const Icon(Icons.print),
+            icon: Icons.print,
+            color: const Color(0xFF546E7A),
+            onTap: () => _export(true),
           ),
-          IconButton(
+          _BarAction(
+            label: 'PDF',
             tooltip: 'Save as PDF',
-            onPressed: () => _export(false),
-            icon: const Icon(Icons.picture_as_pdf),
+            icon: Icons.picture_as_pdf,
+            color: const Color(0xFFC62828),
+            onTap: () => _export(false),
           ),
         ],
       ],
@@ -18947,15 +25565,19 @@ class _ManualReportScreenState extends State<ManualReportScreen> {
             ),
           )
         else ...[
-          IconButton(
+          _BarAction(
+            label: 'Print',
             tooltip: 'Print',
-            onPressed: () => _export(true),
-            icon: const Icon(Icons.print),
+            icon: Icons.print,
+            color: const Color(0xFF546E7A),
+            onTap: () => _export(true),
           ),
-          IconButton(
+          _BarAction(
+            label: 'PDF',
             tooltip: 'Save as PDF',
-            onPressed: () => _export(false),
-            icon: const Icon(Icons.picture_as_pdf),
+            icon: Icons.picture_as_pdf,
+            color: const Color(0xFFC62828),
+            onTap: () => _export(false),
           ),
         ],
       ],
@@ -20362,21 +26984,28 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
               ),
             )
           else ...[
-            IconButton(
+            _BarAction(
+              label: 'Print',
               tooltip: 'Print',
-              onPressed: () => _export('print'),
-              icon: const Icon(Icons.print),
+              icon: Icons.print,
+              color: const Color(0xFF546E7A),
+              onTap: () => _export('print'),
             ),
             PopupMenuButton<String>(
               tooltip: 'Download',
-              icon: const Icon(Icons.download),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              child: const _BarAction(
+                icon: Icons.download,
+                label: 'Download',
+                color: Color(0xFF00897B),
+              ),
               onSelected: _export,
               itemBuilder: (_) => const [
                 PopupMenuItem(
                   value: 'pdf',
                   child: ListTile(
                     dense: true,
-                    leading: Icon(Icons.picture_as_pdf),
+                    leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
                     title: Text('Download PDF'),
                   ),
                 ),
@@ -20384,22 +27013,27 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
                   value: 'docx',
                   child: ListTile(
                     dense: true,
-                    leading: Icon(Icons.description),
+                    leading: Icon(Icons.description, color: Color(0xFF1565C0)),
                     title: Text('Download Word'),
                   ),
                 ),
               ],
             ),
           ],
-          IconButton(
+          _BarAction(
+            label: 'Delete',
             tooltip: 'Delete report',
-            onPressed: _busy ? null : _deleteReport,
-            icon: const Icon(Icons.delete_outline),
+            icon: Icons.delete_outline,
+            color: const Color(0xFFC62828),
+            enabled: !_busy,
+            onTap: _busy ? null : _deleteReport,
           ),
-          IconButton(
+          _BarAction(
+            label: 'Refresh',
             tooltip: 'Refresh',
-            onPressed: _reload,
-            icon: const Icon(Icons.refresh),
+            icon: Icons.refresh,
+            color: const Color(0xFF2E7D32),
+            onTap: _reload,
           ),
         ],
       ),
@@ -20487,13 +27121,23 @@ bool _isAbsentText(String t) {
   return x == 'absent' || x == 'new' || x == 'cheated';
 }
 
-/// Grade of an average mark. The limits are set in Settings.
-String _gradeOf(double avg) {
+/// Grade of a mark / average mark. The grade limits in Settings (A from 80,
+/// B from 70 ...) are PERCENTAGES, so the mark is turned into a percentage
+/// of [max] first (the highest subject mark of the exam, e.g. 20 -> 12.2 is
+/// 61% = C). With the default max of 100 the mark is used as it is.
+String _gradeOf(double avg, {double max = 100}) {
+  final pct = max > 0 ? avg / max * 100 : avg;
   final limits = appSettings.value.grades;
   for (var i = 0; i < limits.length; i++) {
-    if (avg >= limits[i]) return AppSettings.gradeLetters[i];
+    if (pct >= limits[i] - 1e-9) return AppSettings.gradeLetters[i];
   }
   return 'F';
+}
+
+/// Highest subject mark of [exam] for [form] (100 when not set).
+double _gradeMax(String exam, [String form = '']) {
+  final m = appSettings.value.limitsFor(exam, form).maxMark;
+  return m > 0 ? m : 100.0;
 }
 
 Color _gradeColor(String g) {
@@ -20539,6 +27183,618 @@ class ResultReportGroup {
     required this.sectionLabels,
     required this.results,
   });
+}
+
+
+// =====================================================================
+// COMBINED REPORT: one report that joins the results of several exams,
+// SUBJECT BY SUBJECT (English of every exam, Somali of every exam, ...).
+//  - TOTAL MARKS mode: the marks are simply added (Mid-term 30 + Monthly1 12
+//    = 42). The report shows the total of every subject, the grand total,
+//    what it is out of, the % (used for the grade) and the rank.
+//  - WEIGHTED % mode: every mark becomes a % of that exam's highest mark
+//    (Settings > Exams > Mark limits) and the % are averaged with weights.
+// =====================================================================
+class CombinedRow {
+  final StudentInfo student;
+  final String classLabel;
+  /// subject -> exam -> mark (null = no mark in that exam)
+  final Map<String, Map<String, double?>> subjectRaw;
+  /// subject -> exam -> % of that exam's highest mark
+  final Map<String, Map<String, double?>> subjectPct;
+  /// subject -> total marks (Total mode) or weighted % (Weighted mode)
+  final Map<String, double?> subjectCombined;
+  /// subjects where at least one picked exam had no mark
+  final Set<String> partial;
+  /// grand total of the subjects (Total mode) or mean % (Weighted mode)
+  final double? combined;
+  /// what the grand total is out of (Total mode); 100 in Weighted mode
+  final double totalMax;
+  /// overall % of the student, used for the grade
+  final double? percent;
+  int rank = 0;
+  CombinedRow({
+    required this.student,
+    required this.classLabel,
+    required this.subjectRaw,
+    required this.subjectPct,
+    required this.subjectCombined,
+    required this.partial,
+    required this.combined,
+    required this.totalMax,
+    required this.percent,
+  });
+}
+
+class CombinedGroup {
+  final String title;
+  final bool sumMode;
+  final List<String> subjects; // columns, in the school's subject order
+  final List<CombinedRow> rows; // best first, students without marks last
+  const CombinedGroup({
+    required this.title,
+    required this.sumMode,
+    required this.subjects,
+    required this.rows,
+  });
+}
+
+String _pct1(double v) => v.toStringAsFixed(1);
+String _n1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+/// Joins the results of [exams] subject by subject for the students of every
+/// group. [sumMode] true: the marks are added. false: weighted % ([weights]
+/// are relative numbers such as 10, 10, 30, 50 or 1, 1, 1, 1).
+/// [missingAsZero] true: an exam without a mark counts as 0 (and its highest
+/// mark stays in "out of"); false: it is left out (and the weights re-scaled).
+Future<List<CombinedGroup>> buildCombinedGroups({
+  required List<String> exams,
+  required Map<String, double> weights,
+  required List<ResultReportGroup> groups,
+  bool missingAsZero = false,
+  bool sumMode = true,
+}) async {
+  final svc = ResultService();
+  final perExam = <String, Map<String, ResultMarks>>{};
+  for (final e in exams) {
+    perExam[e] = await svc.watchResults(e).first;
+  }
+
+  final out = <CombinedGroup>[];
+  for (final g in groups) {
+    final rows = <CombinedRow>[];
+    final seen = <String>{}; // subjects that have a mark in this group
+    for (final s in g.students) {
+      final form = SchoolService.formOf(s);
+      final subs = <String>{
+        for (final e in exams) ...(perExam[e]?[s.id]?.marks.keys ?? const <String>[]),
+      };
+      final subjRaw = <String, Map<String, double?>>{};
+      final subjPct = <String, Map<String, double?>>{};
+      final subjComb = <String, double?>{};
+      final subjMax = <String, double>{};
+      final partial = <String>{};
+      for (final sub in subs) {
+        final rawM = <String, double?>{};
+        final pctM = <String, double?>{};
+        var rawSum = 0.0, maxSum = 0.0, wSum = 0.0, pSum = 0.0;
+        var used = 0;
+        for (final e in exams) {
+          final r = perExam[e]?[s.id];
+          final mark = (r == null || r.cheated) ? null : r.marks[sub];
+          final max = maxMarkOf(e, form);
+          final v = (mark == null || max <= 0) ? null : mark / max * 100;
+          final wt = weights[e] ?? 0;
+          rawM[e] = mark;
+          pctM[e] = v;
+          final present = sumMode ? mark != null : v != null;
+          if (present) {
+            used++;
+            if (sumMode) {
+              rawSum += mark!;
+              maxSum += max;
+            } else {
+              pSum += v! * wt;
+              wSum += wt;
+            }
+          } else if (missingAsZero) {
+            if (sumMode) {
+              maxSum += max;
+            } else {
+              wSum += wt;
+            }
+          }
+        }
+        subjRaw[sub] = rawM;
+        subjPct[sub] = pctM;
+        if (used == 0 || (!sumMode && wSum == 0)) {
+          subjComb[sub] = null;
+        } else {
+          subjComb[sub] = sumMode ? rawSum : pSum / wSum;
+          subjMax[sub] = maxSum;
+          seen.add(sub);
+          if (used < exams.length) partial.add(sub);
+        }
+      }
+      final vals = subjComb.values.whereType<double>().toList();
+      double? combined;
+      double totalMax = 100;
+      double? percent;
+      if (vals.isNotEmpty) {
+        final sum = vals.fold(0.0, (a, b) => a + b);
+        if (sumMode) {
+          combined = sum;
+          totalMax = [
+            for (final e in subjComb.entries)
+              if (e.value != null) subjMax[e.key] ?? 0
+          ].fold(0.0, (a, b) => a + b);
+          percent = totalMax > 0 ? sum / totalMax * 100 : null;
+        } else {
+          combined = sum / vals.length;
+          percent = combined;
+        }
+      }
+      rows.add(CombinedRow(
+        student: s,
+        classLabel: g.sectionLabels[s.id] ?? '',
+        subjectRaw: subjRaw,
+        subjectPct: subjPct,
+        subjectCombined: subjComb,
+        partial: partial,
+        combined: combined,
+        totalMax: totalMax,
+        percent: percent,
+      ));
+    }
+    final subjects = <String>[
+      for (final sub in ExamService.subjects)
+        if (seen.contains(sub)) sub,
+      ...(seen.where((x) => !ExamService.subjects.contains(x)).toList()..sort()),
+    ];
+    int byName(CombinedRow a, CombinedRow b) =>
+        a.student.name.toLowerCase().compareTo(b.student.name.toLowerCase());
+    final scored = [for (final r in rows) if (r.combined != null) r]
+      ..sort((a, b) {
+        final c = b.combined!.compareTo(a.combined!);
+        return c != 0 ? c : byName(a, b);
+      });
+    for (var i = 0; i < scored.length; i++) {
+      final same = i > 0 && scored[i].combined == scored[i - 1].combined;
+      scored[i].rank = same ? scored[i - 1].rank : i + 1;
+    }
+    final unscored = [for (final r in rows) if (r.combined == null) r]
+      ..sort(byName);
+    out.add(CombinedGroup(
+        title: g.title,
+        sumMode: sumMode,
+        subjects: subjects,
+        rows: [...scored, ...unscored]));
+  }
+  return out;
+}
+
+/// The combined report as CSV (opens in Excel). For every subject it lists
+/// the mark (or %) of each picked exam and then the combined value.
+/// UTF-8 with a BOM so Arabic and Somali names show correctly.
+Uint8List buildCombinedCsv({
+  required List<String> exams,
+  required Map<String, double> weights,
+  required List<CombinedGroup> groups,
+  required bool missingAsZero,
+  bool detail = false, // also one column per exam
+  bool extras = false, // Total mode: Out of, %, Grade, Rank
+}) {
+  String q(String s) => '"${s.replaceAll('"', '""')}"';
+  final sum = groups.isNotEmpty && groups.first.sumMode;
+  final total = exams.fold(0.0, (a, e) => a + (weights[e] ?? 0));
+  final sb = StringBuffer();
+  sb.writeln(q(sum
+      ? 'Combined result report - total marks per subject'
+      : 'Combined result report - weighted % per subject'));
+  sb.writeln(q(sum
+      ? 'Total of: ${exams.join(' + ')}'
+      : 'Weights: ${[
+    for (final e in exams) '$e ${_pct1((weights[e] ?? 0) / total * 100)}%'
+  ].join(' | ')}'));
+  sb.writeln(q(missingAsZero
+      ? 'A missing exam counts as 0'
+      : 'A missing exam is left out'));
+  for (final g in groups) {
+    sb.writeln();
+    sb.writeln(q(g.title));
+    sb.writeln([
+      q('No.'),
+      q('Student name'),
+      q('ID'),
+      q('Class'),
+      for (final sub in g.subjects) ...[
+        if (detail)
+          for (final e in exams) q(sum ? '$sub - $e' : '$sub - $e (%)'),
+        q(detail ? (sum ? '$sub - TOTAL' : '$sub - COMBINED (%)') : sub),
+      ],
+      if (sum) q('Total') else q('Average (%)'),
+      if (!sum || extras) ...[
+        if (sum) ...[q('Out of'), q('Percent (%)')],
+        q('Grade'),
+        q('Rank'),
+      ],
+    ].join(','));
+    for (var i = 0; i < g.rows.length; i++) {
+      final r = g.rows[i];
+      final c = r.combined;
+      final p = r.percent;
+      sb.writeln([
+        '${i + 1}',
+        q(r.student.name),
+        q(r.student.studentNo),
+        q(r.classLabel),
+        for (final sub in g.subjects) ...[
+          if (detail)
+            for (final e in exams)
+              sum
+                  ? (r.subjectRaw[sub]?[e] == null ? '' : _n1(r.subjectRaw[sub]![e]!))
+                  : (r.subjectPct[sub]?[e] == null ? '' : _pct1(r.subjectPct[sub]![e]!)),
+          r.subjectCombined[sub] == null
+              ? ''
+              : (sum ? _n1(r.subjectCombined[sub]!) : _pct1(r.subjectCombined[sub]!)),
+        ],
+        if (sum)
+          (c == null ? '' : _n1(c))
+        else
+          (c == null ? '' : _pct1(c)),
+        if (!sum || extras) ...[
+          if (sum) ...[
+            c == null ? '' : _n1(r.totalMax),
+            p == null ? '' : _pct1(p),
+          ],
+          p == null ? '' : _gradeOf(p),
+          c == null ? '' : '${r.rank}',
+        ],
+      ].join(','));
+    }
+  }
+  return Uint8List.fromList([0xEF, 0xBB, 0xBF, ...utf8.encode(sb.toString())]);
+}
+
+/// Pick the exams to combine and how, then get the report.
+class _CombinedReportDialog extends StatefulWidget {
+  final String title;
+  final Future<List<ResultReportGroup>> Function() loadGroups;
+  const _CombinedReportDialog(
+      {required this.title, required this.loadGroups});
+
+  @override
+  State<_CombinedReportDialog> createState() => _CombinedReportDialogState();
+}
+
+class _CombinedReportDialogState extends State<_CombinedReportDialog> {
+  late final List<String> _exams = List<String>.of(appSettings.value.examOptions);
+  final Set<String> _picked = {};
+  final Map<String, TextEditingController> _w = {};
+  bool _sum = true; // true: add the marks, false: weighted %
+  bool _zero = false;
+  bool _detail = false;
+  bool _extras = false;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    for (final e in _exams) {
+      _w[e] = TextEditingController(text: '1');
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _w.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  double? _weight(String e) {
+    final v = double.tryParse(_w[e]!.text.trim().replaceAll(',', '.'));
+    return v == null || v <= 0 ? null : v;
+  }
+
+  double get _total => [
+    for (final e in _picked) _weight(e) ?? 0,
+  ].fold(0.0, (a, b) => a + b);
+
+  void _say(String t) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+
+  Future<void> _run(String kind) async {
+    final exams = [for (final e in _exams) if (_picked.contains(e)) e];
+    if (exams.length < 2) {
+      _say('Tick at least two exams to combine.');
+      return;
+    }
+    final weights = <String, double>{};
+    for (final e in exams) {
+      if (_sum) {
+        weights[e] = 1;
+        continue;
+      }
+      final v = _weight(e);
+      if (v == null) {
+        _say('Enter a weight above 0 for "$e".');
+        return;
+      }
+      weights[e] = v;
+    }
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    final nav = Navigator.of(context);
+    try {
+      final groups = await buildCombinedGroups(
+        exams: exams,
+        weights: weights,
+        groups: await widget.loadGroups(),
+        missingAsZero: _zero,
+        sumMode: _sum,
+      );
+      final name = _safeFile('Combined-${widget.title}');
+      if (kind == 'csv') {
+        final bytes = buildCombinedCsv(
+            exams: exams,
+            weights: weights,
+            groups: groups,
+            missingAsZero: _zero,
+            detail: _detail,
+            extras: _extras);
+        final path = await _downloadInBrowser(bytes, '$name.csv', 'text/csv');
+        if (mounted) nav.pop();
+        if (path != null) {
+          messenger.showSnackBar(
+              SnackBar(content: Text('Saved $name.csv (open it with Excel)')));
+        }
+      } else {
+        final bytes = await ExamService().buildCombinedPdf(
+            exams: exams,
+            weights: weights,
+            groups: groups,
+            missingAsZero: _zero,
+            detail: _detail,
+            extras: _extras);
+        if (kind == 'print') {
+          if (mounted) setState(() => _busy = false);
+          await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
+        } else {
+          final path =
+          await _downloadInBrowser(bytes, '$name.pdf', 'application/pdf');
+          if (mounted) nav.pop();
+          if (path != null) {
+            messenger.showSnackBar(SnackBar(content: Text('Saved $name.pdf')));
+          }
+        }
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('$e'.replaceFirst('Exception: ', '')),
+          duration: const Duration(seconds: 6)));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _total;
+    return AlertDialog(
+      title: const Text('Combined report'),
+      content: SizedBox(
+        width: 500,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Scope: ${widget.title}',
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment<bool>(
+                      value: true,
+                      label: Text('Total marks'),
+                      icon: Icon(Icons.add)),
+                  ButtonSegment<bool>(
+                      value: false,
+                      label: Text('Weighted %'),
+                      icon: Icon(Icons.percent)),
+                ],
+                selected: {_sum},
+                onSelectionChanged:
+                _busy ? null : (s) => setState(() => _sum = s.first),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                  _sum
+                      ? 'The marks of the ticked exams are ADDED, subject by '
+                      'subject (e.g. Mid-term 30 + Monthly1 12 = 42), and the '
+                      'subject totals are added to a grand total. The grade '
+                      'uses the total as a % of what it is out of.'
+                      : 'Each mark becomes a % of that exam\'s highest mark, '
+                      'then the exams are averaged with the weights below '
+                      '(1,1,1 = equal; 10,10,30,50 = percentages).',
+                  style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
+              const SizedBox(height: 10),
+              for (final e in _exams)
+                Row(children: [
+                  Checkbox(
+                    value: _picked.contains(e),
+                    onChanged: _busy
+                        ? null
+                        : (v) => setState(() {
+                      if (v == true) {
+                        _picked.add(e);
+                      } else {
+                        _picked.remove(e);
+                      }
+                    }),
+                  ),
+                  Expanded(child: Text(e)),
+                  if (!_sum) ...[
+                    SizedBox(
+                      width: 64,
+                      child: TextField(
+                        controller: _w[e],
+                        enabled: _picked.contains(e) && !_busy,
+                        onChanged: (_) => setState(() {}),
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: 'Weight',
+                            border: OutlineInputBorder()),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 52,
+                      child: Text(
+                          _picked.contains(e) && total > 0 && _weight(e) != null
+                              ? '${_pct1(_weight(e)! / total * 100)}%'
+                              : '',
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                    ),
+                  ],
+                ]),
+              const SizedBox(height: 6),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: const Text('Count a missing exam as 0'),
+                subtitle: Text(_sum
+                    ? (_zero
+                    ? 'A subject without a mark in a ticked exam adds 0 and '
+                    'that exam stays in "Out of".'
+                    : 'A subject without a mark in a ticked exam is left out '
+                    'of its total and of "Out of" (shown with *).')
+                    : (_zero
+                    ? 'A student without a result in a ticked exam gets 0 there.'
+                    : 'A missing exam is left out and the other weights are '
+                    're-scaled (shown with *).')),
+                value: _zero,
+                onChanged: _busy ? null : (v) => setState(() => _zero = v),
+              ),
+              if (_sum)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text('Also show Out of, %, Grade and Rank'),
+                  subtitle: const Text(
+                      'Off = only the subject totals and the Total.'),
+                  value: _extras,
+                  onChanged: _busy ? null : (v) => setState(() => _extras = v),
+                ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: const Text('Show the mark of each exam'),
+                subtitle: Text(_sum
+                    ? 'PDF: small numbers under every subject total. Excel: one '
+                    'column per exam, in the order above.'
+                    : 'PDF: small numbers under the combined % of every subject. '
+                    'Excel: one column per exam, in the order above.'),
+                value: _detail,
+                onChanged: _busy ? null : (v) => setState(() => _detail = v),
+              ),
+              if (_busy)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: LinearProgressIndicator(),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: _busy ? null : () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        TextButton.icon(
+            onPressed: _busy ? null : () => _run('print'),
+            icon: const Icon(Icons.print),
+            label: const Text('Print')),
+        TextButton.icon(
+            onPressed: _busy ? null : () => _run('csv'),
+            icon: const Icon(Icons.table_chart),
+            label: const Text('Excel')),
+        FilledButton.icon(
+            onPressed: _busy ? null : () => _run('pdf'),
+            icon: const Icon(Icons.picture_as_pdf),
+            label: const Text('PDF')),
+      ],
+    );
+  }
+}
+
+/// A clear toolbar button: a coloured rounded tile with the icon on top and a
+/// short text under it. Used for every report / print / download / upload
+/// action so each one says what it does. Pass [onTap] for a normal button;
+/// leave it null when the tile is the child of a PopupMenuButton.
+class _BarAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String? tooltip;
+  final Color color;
+  final VoidCallback? onTap;
+  final bool enabled;
+  const _BarAction({
+    required this.icon,
+    required this.label,
+    this.tooltip,
+    this.color = const Color(0xFF1565C0),
+    this.onTap,
+    this.enabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final on = enabled;
+    final c = on ? color : Theme.of(context).colorScheme.outline;
+    Widget tile = Container(
+      constraints: const BoxConstraints(minWidth: 52),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: c.withAlpha(on ? 28 : 18),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: c.withAlpha(on ? 80 : 40)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 20, color: c),
+          const SizedBox(height: 1),
+          Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.fade,
+              softWrap: false,
+              style: TextStyle(
+                  fontSize: 10.5,
+                  height: 1.1,
+                  fontWeight: FontWeight.w700,
+                  color: c)),
+        ],
+      ),
+    );
+    if (onTap != null) {
+      tile = InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: enabled ? onTap : null,
+        child: tile,
+      );
+    }
+    if (tooltip != null) tile = Tooltip(message: tooltip!, child: tile);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 5),
+      child: Material(type: MaterialType.transparency, child: tile),
+    );
+  }
 }
 
 String _safeFile(String s) => s.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '-');
@@ -20625,35 +27881,43 @@ class _ReportMenuButtonState extends State<_ReportMenuButton> {
             value: 'xlsx',
             child: ListTile(
                 dense: true,
-                leading: Icon(Icons.table_chart),
+                leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
                 title: Text('Download Excel'))),
       if (widget.buildDocx != null)
         const PopupMenuItem(
             value: 'docx',
             child: ListTile(
                 dense: true,
-                leading: Icon(Icons.description),
+                leading: Icon(Icons.description, color: Color(0xFF1565C0)),
                 title: Text('Download Word'))),
       const PopupMenuItem(
           value: 'pdf',
           child: ListTile(
               dense: true,
-              leading: Icon(Icons.picture_as_pdf),
+              leading: Icon(Icons.picture_as_pdf, color: Color(0xFFC62828)),
               title: Text('Download PDF'))),
       const PopupMenuItem(
           value: 'print',
           child: ListTile(
               dense: true,
-              leading: Icon(Icons.print),
+              leading: Icon(Icons.print, color: Color(0xFF546E7A)),
               title: Text('Print'))),
     ];
     if (widget.iconOnly) {
-      return PopupMenuButton<String>(
-        tooltip: 'Report',
-        icon: const Icon(Icons.summarize),
-        enabled: widget.enabled,
-        onSelected: _run,
-        itemBuilder: (_) => items,
+      return Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: PopupMenuButton<String>(
+          tooltip: 'Download or print the report',
+          enabled: widget.enabled,
+          onSelected: _run,
+          itemBuilder: (_) => items,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          child: _BarAction(
+            icon: Icons.summarize,
+            label: 'Report',
+            enabled: widget.enabled,
+          ),
+        ),
       );
     }
     return PopupMenuButton<String>(
@@ -21341,6 +28605,34 @@ class ResultService {
     } catch (_) {}
   }
 
+  /// Administrator: replaces ALL marks of one student for one exam. Unlike
+  /// [saveMany] it also changes subjects that are marked Complete (closed).
+  /// An empty map removes the result. The twin copy is kept in step.
+  Future<void> adminSaveMarks(StudentInfo s, String exam,
+      Map<String, double> marks, String form) async {
+    _checkTotal(exam, s.name, marks, form);
+    final twin = (await twinMap())[s.id];
+    final batch = _db.batch();
+    for (final id in [s.id, if (twin != null) twin]) {
+      final ref = _col.doc(_id(id, exam));
+      if (marks.isEmpty) {
+        batch.delete(ref);
+      } else {
+        batch.set(ref, {
+          'studentId': id,
+          'sectionId': id == s.id ? s.sectionId : (_stuSection[id] ?? s.sectionId),
+          'exam': exam,
+          'marks': marks,
+          'updatedBy': _uid,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+    }
+    await batch.commit().timeout(const Duration(seconds: 30), onTimeout: () {
+      throw Exception('Saving timed out. Check the internet connection.');
+    });
+  }
+
   /// [raw] keeps the marks of cheated subjects (used when editing, so they
   /// are never lost when saving).
   Future<ResultMarks> get(String studentId, String exam,
@@ -21418,14 +28710,18 @@ class ResultService {
       });
     }
 
-    await put(s.id, s.sectionId).timeout(const Duration(seconds: 30), onTimeout: () {
+// the same marks go to the twin copy of the student (whole class <->
+// section): both are written at the same time
+    String? t;
+    try {
+      t = (await twinMap())[s.id];
+    } catch (_) {}
+    await Future.wait([
+      put(s.id, s.sectionId),
+      if (t != null) put(t, _stuSection[t] ?? s.sectionId).catchError((_) {}),
+    ]).timeout(const Duration(seconds: 30), onTimeout: () {
       throw Exception('Saving timed out. Check the internet connection.');
     });
-// the same marks go to the twin copy of the student (whole class <-> section)
-    try {
-      final t = (await twinMap())[s.id];
-      if (t != null) await put(t, _stuSection[t] ?? s.sectionId);
-    } catch (_) {}
   }
 }
 
@@ -22947,6 +30243,18 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
     return groups;
   }
 
+  /// Opens the "Combined report" dialog for what this screen shows
+  /// (the whole school by form, one form, or one class).
+  void _openCombined() {
+    showDialog<void>(
+      context: context,
+      builder: (_) => _CombinedReportDialog(
+        title: _title == 'Result' ? 'School' : _title,
+        loadGroups: () => _reportGroups(),
+      ),
+    );
+  }
+
   Widget _tile(IconData icon, Color color, String title, String subtitle,
       VoidCallback? onTap,
       {Widget? extra}) =>
@@ -23194,6 +30502,14 @@ class _ResultBrowseScreenState extends State<ResultBrowseScreen> {
       appBar: AppBar(
         title: Text(_title),
         actions: [
+          if (!teacherScope.value.scoped)
+            _BarAction(
+              icon: Icons.functions,
+              label: 'Combined',
+              tooltip: 'Combine several exams in one report',
+              color: const Color(0xFF6A1B9A),
+              onTap: _openCombined,
+            ),
           if (!teacherScope.value.scoped)
             _ReportMenuButton(
               iconOnly: true,
@@ -23584,7 +30900,10 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
             final s = shown[i];
             final r = results[s.id];
             final avg = r?.average;
-            final g = avg == null ? null : _gradeOf(avg);
+            final g = avg == null
+                ? null
+                : _gradeOf(avg,
+                max: _gradeMax(_ResultPrefs.exam, SchoolService.formOf(s)));
 // Marks are typed straight in the list (not for a student login).
             final sForm = secOf[s.sectionId]?.form;
             final inlineSubs = teacherScope.value.isStudent
@@ -23696,20 +31015,6 @@ class _ResultStudentsScreenState extends State<ResultStudentsScreen> {
                                       fontSize: 16,
                                       fontWeight: FontWeight.w800)),
                             ]),
-                            const SizedBox(height: 2),
-                            Text(
-                                'Total ${_fmtMark(r.total)} · Pos ${rank[s.id]}'
-                                    '${appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 && r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin ? ' · below min' : ''}',
-                                style: TextStyle(
-                                    fontSize: 11.5,
-                                    fontWeight: appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 &&
-                                        r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin
-                                        ? FontWeight.w700
-                                        : FontWeight.normal,
-                                    color: appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin > 0 &&
-                                        r.total < appSettings.value.limitsFor(_ResultPrefs.exam, SchoolService.formOf(s)).totalMin
-                                        ? const Color(0xFFC62828)
-                                        : Colors.grey.shade600)),
                           ],
                         ),
                     if (!teacherScope.value.isStudent) ...[
@@ -24107,10 +31412,14 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
                               style: const TextStyle(
                                   fontWeight: FontWeight.w800)),
                           const SizedBox(width: 6),
-                          Text(_gradeOf(avg),
+                          Text(
+                              _gradeOf(avg,
+                                  max: _gradeMax(widget.exam, SchoolService.formOf(s))),
                               style: TextStyle(
                                   fontWeight: FontWeight.w800,
-                                  color: _gradeColor(_gradeOf(avg)))),
+                                  color: _gradeColor(_gradeOf(avg,
+                                      max: _gradeMax(
+                                          widget.exam, SchoolService.formOf(s)))))),
                         ]),
                       ),
                     ]),
@@ -24221,6 +31530,13 @@ class _InlineMarksState extends State<_InlineMarks> {
   final Map<String, String> _saved = {}; // subject -> text already saved
   Future<void> _chain = Future.value();
   bool _saving = false, _ok = false;
+  Timer? _typing;
+
+  /// Queue a save now (saves never overlap, so no mark is lost).
+  void _saveNow() {
+    _typing?.cancel();
+    _chain = _chain.then((_) => _run());
+  }
 
   @override
   void initState() {
@@ -24230,7 +31546,7 @@ class _InlineMarksState extends State<_InlineMarks> {
         if (node.hasFocus) {
           widget.onStart();
         } else {
-          _chain = _chain.then((_) => _run());
+          _saveNow();
         }
       });
     });
@@ -24238,6 +31554,7 @@ class _InlineMarksState extends State<_InlineMarks> {
 
   @override
   void dispose() {
+    _typing?.cancel();
     for (final c in _c.values) {
       c.dispose();
     }
@@ -24320,8 +31637,16 @@ class _InlineMarksState extends State<_InlineMarks> {
             ? TextStyle(
             fontSize: 13, fontWeight: FontWeight.w700, color: _lockColor(sub))
             : const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-        onChanged: (_) => setState(() => _ok = false),
-        onSubmitted: (_) => FocusScope.of(context).nextFocus(),
+        onChanged: (_) {
+          setState(() => _ok = false);
+// auto-save a moment after the last key, no need to leave the box
+          _typing?.cancel();
+          _typing = Timer(const Duration(milliseconds: 300), _saveNow);
+        },
+        onSubmitted: (_) {
+          _saveNow();
+          FocusScope.of(context).nextFocus();
+        },
         decoration: InputDecoration(
           isDense: true,
           filled: _lock(sub),
@@ -24428,7 +31753,7 @@ class _ResultViewDialog extends StatelessWidget {
               return const Text('No result yet.');
             }
             final avg = r.average;
-            final g = avg == null ? null : _gradeOf(avg);
+            final g = avg == null ? null : _gradeOf(avg, max: _gradeMax(exam));
             return SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 for (final sub in ExamService.subjects)
@@ -24666,7 +31991,9 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
     final r = _read();
     final total = r.marks.values.fold(0.0, (a, b) => a + b);
     final avg = r.marks.isEmpty ? null : total / r.marks.length;
-    final g = avg == null ? null : _gradeOf(avg);
+    final g = avg == null
+        ? null
+        : _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''));
 
     return AlertDialog(
       title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -24817,6 +32144,8 @@ class _ResultEditorDialogState extends State<_ResultEditorDialog> {
       ]);
 }
 
+String? _activityUid; // last account whose login was written to the log
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
@@ -24826,9 +32155,16 @@ Future<void> main() async {
     FirebaseAuth.instance.authStateChanges().listen((user) {
       if (user == null) {
         appSettings.stop();
+        stopPresence();
+        _activityUid = null;
       } else {
         appSettings.start();
         schoolLogo.start(); // retry if it needed a signed-in user
+        if (_activityUid != user.uid) {
+          _activityUid = user.uid;
+          logActivity('login', user: user); // activity log + online marker
+          startPresence();
+        }
       }
     });
     runApp(const ExamManagerApp());
@@ -25720,7 +33056,7 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                       const Padding(
                         padding: EdgeInsets.only(top: 2),
                         child: Text(
-                            'The pages a new teacher, student or student-affairs account '
+                            'The pages a new teacher, student, finance or student-affairs account '
                                 'can open. You can still change them for each user.',
                             style: TextStyle(fontSize: 12, color: Colors.black54)),
                       ),
@@ -25746,9 +33082,16 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                                   (v) => _run(context,
                                       () => appSettings.update({'studentAccess': v}))),
                           const SizedBox(height: 10),
-                          const Text('Student affairs',
+                          const Text('Finance',
                               style: TextStyle(fontSize: 12)),
                           const SizedBox(height: 4),
+                          _pageChips(
+                              st.financeAccess,
+                                  (v) => _run(context,
+                                      () => appSettings.update({'financeAccess': v}))),
+                          const SizedBox(height: 10),
+                          const Text('Student affairs',
+                              style: TextStyle(fontSize: 12)),
                           const SizedBox(height: 4),
                           _pageChips(
                               st.affairsAccess,
@@ -25996,6 +33339,8 @@ class _PermissionsCardState extends State<_PermissionsCard> {
             '${u.pending ? ' (not signed in yet)' : ''}'
             '${u.approved ? '' : u.rejected ? ' (sign up rejected)' : ' (waiting for approval)'} · '
             '${u.fullAccess ? 'all pages' : eff.isEmpty ? 'no pages' : eff.map((p) => AppPages.labels[p]).join(', ')}'
+            '${u.role == 'finance' ? (u.financeSections.isEmpty ? ' · all classes' : ' · ${u.financeSections.length} class${u.financeSections.length == 1 ? '' : 'es'}') : ''}'
+            '${u.monitorSections.isEmpty ? '' : ' · monitor of ${u.monitorSections.length} class${u.monitorSections.length == 1 ? '' : 'es'}'}'
             '${phone.isEmpty ? '' : u.role == 'student' ? '\nUsername & password: $phone' : '\n\u260E $phone'}'
             '${shownEmail.isEmpty || shownEmail == title ? '' : '\n$shownEmail'}',
         style: const TextStyle(fontSize: 12),
@@ -26051,6 +33396,31 @@ class _PermissionsCardState extends State<_PermissionsCard> {
                   .set({..._base(u), 'access': v}, SetOptions(merge: true))),
           enabled: !isMe && !u.fullAccess,
         ),
+        if (u.role == 'finance') ...[
+          const Divider(height: 24),
+          _FinanceClassesPicker(
+            selected: u.financeSections,
+            enabled: !isMe,
+            onChanged: (v) => _run(
+                context,
+                    () => users.doc(u.uid).set(
+                    {..._base(u), 'financeSections': v}, SetOptions(merge: true))),
+          ),
+        ],
+        if (!u.fullAccess) ...[
+          const Divider(height: 24),
+          _FinanceClassesPicker(
+            title: 'Class monitor: classes this user takes the daily '
+                'attendance of',
+            allowAll: false,
+            selected: u.monitorSections,
+            enabled: !isMe,
+            onChanged: (v) => _run(
+                context,
+                    () => users.doc(u.uid).set(
+                    {..._base(u), 'monitorSections': v}, SetOptions(merge: true))),
+          ),
+        ],
         if (u.role != 'student') ...[
           const Divider(height: 24),
           Text('Teacher / staff details',
@@ -26117,6 +33487,107 @@ class _PermissionsCardState extends State<_PermissionsCard> {
       ],
     );
   }
+}
+
+/// Finance accounts: the classes (1A, 1B ...) the person may manage in
+/// Finance. No class ticked = every class.
+class _FinanceClassesPicker extends StatelessWidget {
+  final List<String> selected;
+  final bool enabled;
+  final ValueChanged<List<String>> onChanged;
+  final String title;
+
+  /// Finance: no class ticked = every class. Class monitor: none = not a monitor.
+  final bool allowAll;
+
+  /// Text under the chips (null = the default text).
+  final String? hint;
+  const _FinanceClassesPicker({
+    required this.selected,
+    required this.enabled,
+    required this.onChanged,
+    this.title = 'Classes this finance user can manage',
+    this.allowAll = true,
+    this.hint,
+  });
+
+  @override
+  Widget build(BuildContext context) =>
+      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance.collection('sections').snapshots(),
+        builder: (context, snap) {
+          if (snap.hasError) {
+            return Text('Could not load the classes: ${snap.error}',
+                style: const TextStyle(color: Colors.red, fontSize: 12));
+          }
+          if (!snap.hasData) {
+            return const Padding(
+              padding: EdgeInsets.all(8),
+              child: LinearProgressIndicator(),
+            );
+          }
+// whole classes only (1A, 1B ...), not the divided sections
+          final all = <SectionInfo>[
+            for (final d in snap.data!.docs)
+              if (!SectionInfo.fromDoc(d).isSub) SectionInfo.fromDoc(d)
+          ];
+          all.sort((a, b) {
+            final c = a.form.compareTo(b.form);
+            return c != 0 ? c : a.name.compareTo(b.name);
+          });
+          final byForm = <String, List<SectionInfo>>{};
+          for (final s in all) {
+            byForm.putIfAbsent(s.form, () => []).add(s);
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 6),
+              if (allowAll)
+                ChoiceChip(
+                  label: const Text('All classes'),
+                  selected: selected.isEmpty,
+                  onSelected: enabled ? (_) => onChanged(const <String>[]) : null,
+                ),
+              for (final e in byForm.entries) ...[
+                const SizedBox(height: 10),
+                Text(e.key,
+                    style: const TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  for (final s in e.value)
+                    FilterChip(
+                      label: Text(s.label),
+                      selected: selected.contains(s.id),
+                      onSelected: enabled
+                          ? (on) => onChanged([
+                        for (final x in all)
+                          if (x.id == s.id ? on : selected.contains(x.id))
+                            x.id
+                      ])
+                          : null,
+                    ),
+                ]),
+              ],
+              const SizedBox(height: 8),
+              Text(
+                  hint ??
+                      (!allowAll
+                          ? (selected.isEmpty
+                          ? 'No class ticked: this user is not a class monitor.'
+                          : 'This user can take the daily attendance of the ticked '
+                          'classes (today only).')
+                          : selected.isEmpty
+                          ? 'No class ticked: this user can open every class.'
+                          : 'Only the ticked classes are shown in Finance '
+                          '(fees, payments and reports).'),
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            ],
+          );
+        },
+      );
 }
 
 // ======================= TEACHERS / STAFF =======================
@@ -26551,6 +34022,9 @@ Future<void> editTeacherDialog(BuildContext context,
             : appSettings.value.teacherAccess))
   ];
   var accessEdited = false;
+// Daily attendance: the classes this person is limited to (none = all)
+  var monitor = <String>[...(up?.monitorSections ?? const <String>[])];
+  var monitorEdited = false;
   final name = TextEditingController(text: t?.name ?? presetName);
   final phone = TextEditingController(text: t?.phone ?? '');
   final email = TextEditingController(text: t?.email ?? presetEmail);
@@ -26626,7 +34100,7 @@ Future<void> editTeacherDialog(BuildContext context,
                     value: acctRole,
                     decoration: const InputDecoration(
                       labelText: 'Account type (access level)',
-                      helperText: 'Only Admin can open everything.',
+                      helperText: 'Only Admin can open everything. Student affairs sees the pages you tick.',
                       border: OutlineInputBorder(),
                     ),
                     items: [
@@ -26649,7 +34123,7 @@ Future<void> editTeacherDialog(BuildContext context,
                   const SizedBox(height: 2),
                   Text(
                       up?.access == null && !accessEdited
-                          ? 'Using the default pages for teachers. Tick to change.'
+                          ? 'Using the default pages for ${acctRole == 'finance' ? 'the Finance role' : acctRole == 'student' ? 'students' : 'teachers'}. Tick to change.'
                           : 'Tick the pages this person can open.',
                       style: TextStyle(
                           fontSize: 12.5, color: Colors.grey.shade700)),
@@ -26668,6 +34142,23 @@ Future<void> editTeacherDialog(BuildContext context,
                         }),
                       ),
                   ]),
+                  if (access.contains(AppPages.daily)) ...[
+                    const SizedBox(height: 14),
+                    _FinanceClassesPicker(
+                      title: 'Daily attendance: classes this person can take',
+                      selected: monitor,
+                      enabled: true,
+                      hint: monitor.isEmpty
+                          ? 'No class ticked: this person sees every class in Daily '
+                          'attendance. Tick classes to show only those.'
+                          : 'This person sees only the ticked classes in Daily '
+                          'attendance (today only).',
+                      onChanged: (v) => setD(() {
+                        monitor = v;
+                        monitorEdited = true;
+                      }),
+                    ),
+                  ],
                 ],
                 const SizedBox(height: 8),
                 SwitchListTile(
@@ -26835,11 +34326,16 @@ Future<void> editTeacherDialog(BuildContext context,
           .doc(up!.uid)
           .set({'role': acctRole}, SetOptions(merge: true));
     }
-    if (showPages && accessEdited) {
+    if (showPages && (accessEdited || monitorEdited)) {
       await FirebaseFirestore.instance
           .collection('users')
           .doc(up?.uid ?? savedId)
-          .set({'access': access}, SetOptions(merge: true));
+          .set({
+        if (accessEdited) 'access': access,
+// no Daily attendance page = no class limit left behind
+        'monitorSections':
+        access.contains(AppPages.daily) ? monitor : <String>[],
+      }, SetOptions(merge: true));
     }
     toast(t == null ? 'Added ${result.name}' : 'Saved ${result.name}');
   } catch (e) {
