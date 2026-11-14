@@ -10866,8 +10866,11 @@ class AppSettings {
   String get currentExam {
     final o = examOptions;
     if (activeExam.isNotEmpty && o.contains(activeExam)) return activeExam;
+    // none chosen yet: prefer the exams that are open (ticked)
+    final open = [for (final e in o) if (isExamOpen(e)) e];
+    final pool = open.isEmpty ? o : open;
     final pref = 'Mid-term ${DateTime.now().year}';
-    return o.contains(pref) ? pref : o.first;
+    return pool.contains(pref) ? pref : pool.first;
   }
 
   /// The mark limits of [exam] (the defaults when none were set).
