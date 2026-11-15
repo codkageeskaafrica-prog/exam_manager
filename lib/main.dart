@@ -31970,6 +31970,119 @@ final Map<String, String> _orig = {}; // 'studentId|subject' -> first text
 bool _loading = true, _saving = false;
 String? _error;
 
+// filters: the class (null = all classes) and how far each student is
+// entered (null = all students; entered | partial | none)
+String? _class;
+String? _stuFilter;
+final Map<String, String> _stuState = {}; // student id -> entered|partial|none
+
+/// The class of a student: a divided class's sections ("1A-A", "1A-B") all
+/// belong to the class "1A".
+String _cls(StudentInfo s) =>
+(widget.sectionLabels[s.id] ?? '').split('-').first.trim();
+
+List<String> get _classes {
+final seen = <String>[];
+for (final s in widget.students) {
+final c = _cls(s);
+if (!seen.contains(c)) seen.add(c);
+}
+return seen;
+}
+
+List<StudentInfo> get _inScope => [
+for (final s in widget.students)
+if (_class == null || _cls(s) == _class) s
+];
+
+List<StudentInfo> get _shown => [
+for (final s in _inScope)
+if (_stuFilter == null || _stuState[s.id] == _stuFilter) s
+];
+
+/// How far each student is entered, from the marks that were saved when the
+/// screen opened: Entered = every box has a mark (or Absent / Cheated / New),
+/// Partially entered = some marks but some boxes empty, Not entered = no
+/// mark at all.
+void _computeStatus() {
+for (final s in widget.students) {
+var real = 0, blank = 0;
+for (final sub in _subjects) {
+final t = _orig['${s.id}|$sub'] ?? '';
+if (double.tryParse(t) != null) {
+real++;
+} else if (t.isEmpty) {
+blank++;
+}
+}
+_stuState[s.id] = blank == 0 ? 'entered' : (real > 0 ? 'partial' : 'none');
+}
+}
+
+Widget _filterBar() {
+final classes = _classes;
+// colour of a class: green = every student entered, red = nobody, else orange
+Color col(String c) {
+final st = [
+for (final s in widget.students)
+if (_cls(s) == c) _stuState[s.id] ?? 'none'
+];
+if (st.every((x) => x == 'entered')) return const Color(0xFF2E7D32);
+if (st.every((x) => x == 'none')) return const Color(0xFFC62828);
+return const Color(0xFFEF6C00);
+}
+
+final scope = _inScope;
+int count(String st) => scope.where((s) => _stuState[s.id] == st).length;
+final stats = <(String?, String, int)>[
+(null, 'All', scope.length),
+('entered', 'Entered', count('entered')),
+('partial', 'Partially entered', count('partial')),
+('none', 'Not entered', count('none')),
+];
+return Padding(
+padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Wrap(
+spacing: 8,
+runSpacing: 4,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [
+const Text('Classes:', style: TextStyle(fontWeight: FontWeight.w700)),
+ChoiceChip(
+label: Text('All classes ${classes.length}'),
+selected: _class == null,
+onSelected: (_) => setState(() => _class = null),
+),
+for (final c in classes)
+ChoiceChip(
+avatar: Icon(Icons.circle, size: 10, color: col(c)),
+label: Text(c.isEmpty ? 'No class' : c),
+selected: _class == c,
+onSelected: (_) => setState(() => _class = _class == c ? null : c),
+),
+],
+),
+const SizedBox(height: 8),
+Wrap(
+spacing: 8,
+runSpacing: 4,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [
+Text(_class == null ? 'All classes:' : '${_class!.isEmpty ? 'No class' : _class}:',
+style: const TextStyle(fontWeight: FontWeight.w700)),
+for (final f in stats)
+ChoiceChip(
+label: Text('${f.$2} ${f.$3}'),
+selected: _stuFilter == f.$1,
+onSelected: (_) => setState(() => _stuFilter = f.$1),
+),
+],
+),
+]),
+);
+}
+
 @override
 void initState() {
 super.initState();
@@ -32013,6 +32126,7 @@ _orig['${s.id}|$sub'] = t;
 _c[s.id] = row;
 _hidden[s.id] = hid;
 }
+_computeStatus();
 if (mounted) setState(() => _loading = false);
 } catch (e) {
 if (mounted) {
@@ -32130,6 +32244,7 @@ Widget build(BuildContext context) {
 const numW = 36.0, nameW = 210.0, cellW = 90.0, avgW = 90.0;
 final multi = widget.sectionLabels.values.toSet().length > 1;
 final changed = _loading ? 0 : _changedRows;
+final shown = _loading ? widget.students : _shown;
 
 Widget body;
 if (_loading) {
@@ -32175,9 +32290,9 @@ width: avgW, child: Text('Average', style: _bulkHead)),
 Expanded(
 child: ListView.builder(
 padding: const EdgeInsets.only(bottom: 24),
-itemCount: widget.students.length,
+itemCount: shown.length,
 itemBuilder: (context, i) {
-final s = widget.students[i];
+final s = shown[i];
 final row = _c[s.id]!;
 final vals = <double>[
 for (final sub in _subjects)
@@ -32335,6 +32450,7 @@ child: Text(
 style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
 ),
 ),
+if (!_loading && _classes.length > 1) _filterBar(),
 if (_error != null)
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
