@@ -32070,7 +32070,8 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
         if (visible.isEmpty)
           const Padding(
             padding: EdgeInsets.only(top: 6),
-            child: Text('No class matches this filter.', style: _hint),
+            child: Text('No class matches this filter.',
+                style: TextStyle(fontSize: 12.5, color: Colors.black54)),
           ),
       ]),
     );
