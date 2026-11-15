@@ -3366,6 +3366,9 @@ class _UploadDialogState extends State<UploadDialog> {
   String? _status;
   bool _busy = false;
 
+  /// Teacher accounts only choose the file; everything else is hidden.
+  bool get _teacherOnly => teacherScope.value.restricted;
+
   @override
   void dispose() {
     _footer.dispose();
@@ -3395,6 +3398,8 @@ class _UploadDialogState extends State<UploadDialog> {
         return;
       }
       setState(() => _file = f);
+      // The OK button is a new dialog box that opens right after choosing.
+      if (mounted) await _confirmAndUpload();
     }
   }
 
@@ -3488,6 +3493,57 @@ class _UploadDialogState extends State<UploadDialog> {
     } catch (e) {
       return 'Notification not sent: $e';
     }
+  }
+
+  /// Opens a small new dialog box; pressing OK there uploads the chosen file.
+  Future<void> _confirmAndUpload() async {
+    final f = _file;
+    if (f == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Upload this file?'),
+        content: Row(children: [
+          const Icon(Icons.attach_file, size: 18),
+          const SizedBox(width: 8),
+          Expanded(child: Text(f.name)),
+        ]),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.check),
+            label: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final r = widget.record;
+    await _run(
+          () => widget.service.upload(
+        current: r,
+        file: f,
+        footer: _footer.text.trim(),
+        teacher: _teacher.text.trim(),
+        teacherId: _teacherId,
+        marks: _marks.text.trim(),
+        allowedTime: _time.text.trim(),
+        addHeading: _addHeading,
+        autoFormat: _autoFormat,
+        numberQuestions: _numberQuestions,
+        onProgress: (p) {
+          if (mounted) setState(() => _progress = p);
+        },
+        onStatus: (t) {
+          if (mounted) setState(() => _status = t);
+        },
+      ),
+      'Uploaded — marked as Received',
+    );
   }
 
   Future<void> _run(Future<void> Function() action, String okMsg) async {
@@ -3599,218 +3655,195 @@ class _UploadDialogState extends State<UploadDialog> {
               const SizedBox(height: 6),
               LinearProgressIndicator(value: _progress),
             ],
-            const Divider(height: 24),
-            StreamBuilder<List<TeacherInfo>>(
-              stream: _teachers,
-              builder: (context, snap) {
-                final all = snap.data ?? const <TeacherInfo>[];
-                // Teachers of this subject + form first; if nobody is
-                // assigned yet, every teaching person of the Teachers tab.
-                final mine = [
-                  for (final t in all)
-                    if (t.isTeaching &&
-                        (t.assignments[r.subject]?.contains(r.form) ?? false))
-                      t
-                ];
-                final list = mine.isNotEmpty
-                    ? mine
-                    : [for (final t in all) if (t.isTeaching) t];
-                String? sel = list.any((t) => t.id == _teacherId)
-                    ? _teacherId
-                    : null;
-                // old record saved with a typed name: match it by name
-                if (sel == null &&
-                    _teacherId.isEmpty &&
-                    _teacher.text.trim().isNotEmpty) {
-                  final m = list.where((t) =>
-                  t.name.trim().toLowerCase() ==
-                      _teacher.text.trim().toLowerCase());
-                  if (m.isNotEmpty) {
-                    sel = m.first.id;
-                    _teacherId = m.first.id;
+            if (!_teacherOnly) ...[
+              const Divider(height: 24),
+              StreamBuilder<List<TeacherInfo>>(
+                stream: _teachers,
+                builder: (context, snap) {
+                  final all = snap.data ?? const <TeacherInfo>[];
+                  // Teachers of this subject + form first; if nobody is
+                  // assigned yet, every teaching person of the Teachers tab.
+                  final mine = [
+                    for (final t in all)
+                      if (t.isTeaching &&
+                          (t.assignments[r.subject]?.contains(r.form) ?? false))
+                        t
+                  ];
+                  final list = mine.isNotEmpty
+                      ? mine
+                      : [for (final t in all) if (t.isTeaching) t];
+                  String? sel = list.any((t) => t.id == _teacherId)
+                      ? _teacherId
+                      : null;
+                  // old record saved with a typed name: match it by name
+                  if (sel == null &&
+                      _teacherId.isEmpty &&
+                      _teacher.text.trim().isNotEmpty) {
+                    final m = list.where((t) =>
+                    t.name.trim().toLowerCase() ==
+                        _teacher.text.trim().toLowerCase());
+                    if (m.isNotEmpty) {
+                      sel = m.first.id;
+                      _teacherId = m.first.id;
+                    }
                   }
-                }
-                final legacy = sel == null && _teacher.text.trim().isNotEmpty;
-                return DropdownButtonFormField<String>(
-                  // ignore: deprecated_member_use
-                  value: sel,
-                  isExpanded: true,
-                  items: [
-                    for (final t in list)
-                      DropdownMenuItem(
-                          value: t.id,
-                          child: Text(t.name, overflow: TextOverflow.ellipsis)),
-                  ],
-                  onChanged: _busy
-                      ? null
-                      : (id) {
-                    final t = list.firstWhere((x) => x.id == id);
-                    setState(() {
-                      _teacherId = t.id;
-                      _teacher.text = t.name;
-                      _footer.text = _buildFooter(t.name);
-                    });
-                  },
-                  decoration: InputDecoration(
-                    labelText: 'Teacher (from the Teachers tab)',
-                    prefixIcon: const Icon(Icons.person),
-                    border: const OutlineInputBorder(),
-                    helperMaxLines: 2,
-                    helperText: !snap.hasData
-                        ? 'Loading teachers...'
-                        : list.isEmpty
-                        ? 'No teacher yet. Add them in Teachers first.'
-                        : legacy
-                        ? '"${_teacher.text}" is not in the Teachers tab. Please pick the teacher.'
-                        : mine.isNotEmpty
-                        ? 'Teachers of ${r.subject} · ${r.form}'
-                        : 'Nobody is assigned to ${r.subject} · ${r.form} yet: showing all teachers',
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _footer,
-              readOnly: true,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Footer (auto-generated)',
-                helperText: 'Built from subject, form and teacher name',
-                filled: true,
-                border: OutlineInputBorder(),
+                  final legacy = sel == null && _teacher.text.trim().isNotEmpty;
+                  return DropdownButtonFormField<String>(
+                    // ignore: deprecated_member_use
+                    value: sel,
+                    isExpanded: true,
+                    items: [
+                      for (final t in list)
+                        DropdownMenuItem(
+                            value: t.id,
+                            child: Text(t.name, overflow: TextOverflow.ellipsis)),
+                    ],
+                    onChanged: _busy
+                        ? null
+                        : (id) {
+                      final t = list.firstWhere((x) => x.id == id);
+                      setState(() {
+                        _teacherId = t.id;
+                        _teacher.text = t.name;
+                        _footer.text = _buildFooter(t.name);
+                      });
+                    },
+                    decoration: InputDecoration(
+                      labelText: 'Teacher (from the Teachers tab)',
+                      prefixIcon: const Icon(Icons.person),
+                      border: const OutlineInputBorder(),
+                      helperMaxLines: 2,
+                      helperText: !snap.hasData
+                          ? 'Loading teachers...'
+                          : list.isEmpty
+                          ? 'No teacher yet. Add them in Teachers first.'
+                          : legacy
+                          ? '"${_teacher.text}" is not in the Teachers tab. Please pick the teacher.'
+                          : mine.isNotEmpty
+                          ? 'Teachers of ${r.subject} · ${r.form}'
+                          : 'Nobody is assigned to ${r.subject} · ${r.form} yet: showing all teachers',
+                    ),
+                  );
+                },
               ),
-            ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _marks,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'Marks',
-                    hintText: _heading?.marks,
-                    border: const OutlineInputBorder(),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _footer,
+                readOnly: true,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Footer (auto-generated)',
+                  helperText: 'Built from subject, form and teacher name',
+                  filled: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _marks,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'Marks',
+                      hintText: _heading?.marks,
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: TextField(
+                    controller: _time,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'Allowed time',
+                      hintText: _heading?.defaultTimeFor(r.subject),
+                      border: const OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ]),
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Leave Marks / Allowed time empty to use the general values.',
+                    style: TextStyle(fontSize: 11, color: Colors.black54),
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: TextField(
-                  controller: _time,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'Allowed time',
-                    hintText: _heading?.defaultTimeFor(r.subject),
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: _addHeading,
+                onChanged: _busy
+                    ? null
+                    : (v) => setState(() => _addHeading = v ?? true),
+                title: const Text('Add exam heading table on the first page'),
               ),
-            ]),
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Leave Marks / Allowed time empty to use the general values.',
-                  style: TextStyle(fontSize: 11, color: Colors.black54),
-                ),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: _autoFormat,
+                onChanged: _busy
+                    ? null
+                    : (v) => setState(() => _autoFormat = v ?? true),
+                title: const Text('Titles and questions bold, options (a, b, c, d) regular'),
               ),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _addHeading,
-              onChanged: _busy
-                  ? null
-                  : (v) => setState(() => _addHeading = v ?? true),
-              title: const Text('Add exam heading table on the first page'),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _autoFormat,
-              onChanged: _busy
-                  ? null
-                  : (v) => setState(() => _autoFormat = v ?? true),
-              title: const Text('Titles and questions bold, options (a, b, c, d) regular'),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _numberQuestions,
-              onChanged: (_busy || !_autoFormat)
-                  ? null
-                  : (v) => setState(() => _numberQuestions = v ?? true),
-              title: const Text('Number the questions 1. 2. 3. in each part'),
-            ),
-            if (_addHeading && preview != null) _headingPreview(preview),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                value: _numberQuestions,
+                onChanged: (_busy || !_autoFormat)
+                    ? null
+                    : (v) => setState(() => _numberQuestions = v ?? true),
+                title: const Text('Number the questions 1. 2. 3. in each part'),
+              ),
+              if (_addHeading && preview != null) _headingPreview(preview),
+            ],
           ]),
         ),
       ),
       actions: [
-        if (r.received)
-          TextButton(
-            onPressed: _busy
-                ? null
-                : () => _run(() => widget.service.markPending(r),
-                'Marked as pending'),
-            child: const Text('Mark pending'),
-          ),
         TextButton(
           onPressed: _busy ? null : () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
-        TextButton(
-          onPressed: _busy
-              ? null
-              : () => _run(
-                () => widget.service.saveDetails(
-                r.subject, r.form, _footer.text.trim(),
-                _teacher.text.trim(),
-                teacherId: _teacherId,
-                marks: _marks.text.trim(),
-                allowedTime: _time.text.trim()),
-            'Saved',
-          ),
-          child: const Text('Save details'),
-        ),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : _preview,
-          icon: const Icon(Icons.visibility),
-          label: const Text('Preview'),
-        ),
-        FilledButton.icon(
-          onPressed: (_busy || _file == null)
-              ? null
-              : () => _run(
-                () => widget.service.upload(
-              current: r,
-              file: _file!,
-              footer: _footer.text.trim(),
-              teacher: _teacher.text.trim(),
-              teacherId: _teacherId,
-              marks: _marks.text.trim(),
-              allowedTime: _time.text.trim(),
-              addHeading: _addHeading,
-              autoFormat: _autoFormat,
-              numberQuestions: _numberQuestions,
-              onProgress: (p) {
-                if (mounted) setState(() => _progress = p);
-              },
-              onStatus: (t) {
-                if (mounted) setState(() => _status = t);
-              },
+        if (!_teacherOnly) ...[
+          if (r.received)
+            TextButton(
+              onPressed: _busy
+                  ? null
+                  : () => _run(() => widget.service.markPending(r),
+                  'Marked as pending'),
+              child: const Text('Mark pending'),
             ),
-            'Uploaded — marked as Received',
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () => _run(
+                  () => widget.service.saveDetails(
+                  r.subject, r.form, _footer.text.trim(),
+                  _teacher.text.trim(),
+                  teacherId: _teacherId,
+                  marks: _marks.text.trim(),
+                  allowedTime: _time.text.trim()),
+              'Saved',
+            ),
+            child: const Text('Save details'),
           ),
-          icon: const Icon(Icons.cloud_upload),
-          label: const Text('Upload'),
-        ),
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _preview,
+            icon: const Icon(Icons.visibility),
+            label: const Text('Preview'),
+          ),
+        ],
       ],
     );
   }
@@ -5703,20 +5736,84 @@ class ExamTableScreen extends StatelessWidget {
                         ),
                       );
                     }
-                    return SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Card(
-                          clipBehavior: Clip.antiAlias,
-                          child: ValueListenableBuilder<AppSettings>(
-                            valueListenable: appSettings,
-                            builder: (_, __, ___) =>
-                                _buildTable(context, service, data, sc),
-                          ),
+                    final table = SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Card(
+                        clipBehavior: Clip.antiAlias,
+                        child: ValueListenableBuilder<AppSettings>(
+                          valueListenable: appSettings,
+                          builder: (_, __, ___) =>
+                              _buildTable(context, service, data, sc),
                         ),
                       ),
                     );
+                    // The exam structure the administrator set for the
+                    // current exam (only the forms this person sees).
+                    final groups =
+                    st.structureGroups(st.currentExam, sc.formList);
+                    if (groups.isEmpty) {
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.all(16),
+                        child: table,
+                      );
+                    }
+                    // One card per structure (forms that differ get their own
+                    // card); forms of this person with no structure are
+                    // listed in a small note card.
+                    final covered = {for (final g in groups) ...g.$1};
+                    final missing = [
+                      for (final f in sc.formList)
+                        if (!covered.contains(f)) f
+                    ];
+                    final cards = <Widget>[
+                      for (final g in groups)
+                        _ExamStructureCard(exam: st.currentExam, groups: [g]),
+                      if (missing.isNotEmpty) _ExamStructureMissing(forms: missing),
+                    ];
+                    Widget stack(List<Widget> ws) => Column(
+                      children: [
+                        for (var i = 0; i < ws.length; i++) ...[
+                          if (i > 0) const SizedBox(height: 12),
+                          ws[i],
+                        ],
+                      ],
+                    );
+                    return LayoutBuilder(builder: (context, box) {
+                      final w = box.maxWidth;
+                      Widget body;
+                      if (w >= 1250 && cards.length > 1) {
+                        // first structure on the left, the others on the
+                        // right blank space of the table
+                        body = Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(width: 320, child: cards.first),
+                            const SizedBox(width: 16),
+                            Flexible(child: table),
+                            const SizedBox(width: 16),
+                            SizedBox(width: 320, child: stack(cards.sublist(1))),
+                          ],
+                        );
+                      } else if (w >= 900) {
+                        body = Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(width: 320, child: stack(cards)),
+                            const SizedBox(width: 16),
+                            Flexible(child: table),
+                          ],
+                        );
+                      } else {
+                        body = Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [stack(cards), const SizedBox(height: 12), table],
+                        );
+                      }
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.all(16),
+                        child: body,
+                      );
+                    });
                   },
                 );
               },
@@ -5889,6 +5986,193 @@ class _SubjectDateCell extends StatelessWidget {
           onPressed: () => _clear(context),
         ),
     ]);
+  }
+}
+
+/// The structure of the current exam's paper (set in Settings > Exams).
+class _ExamStructureCard extends StatelessWidget {
+  final String exam;
+  final List<(List<String>, ExamStructure)> groups;
+  const _ExamStructureCard({required this.exam, required this.groups});
+
+  Widget _paper(ExamStructure s) {
+    String plural(num n, String w) => '${_fmtMark(n.toDouble())} $w${n == 1 ? '' : 's'}';
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (var i = 0; i < s.parts.length; i++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(children: [
+            Container(
+              width: 30,
+              height: 30,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(
+                  color: Color(0x1F3498DB), shape: BoxShape.circle),
+              child: Text('${i + 1}',
+                  style: const TextStyle(
+                      color: kBlue, fontWeight: FontWeight.w800)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(s.parts[i].type,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w700, fontSize: 14)),
+                    const SizedBox(height: 2),
+                    Text(
+                        '${plural(s.parts[i].count, 'question')} × '
+                            '${plural(s.parts[i].each, 'mark')}',
+                        style: const TextStyle(
+                            fontSize: 12.5, color: Colors.black54)),
+                  ]),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFEAF3FB),
+                  borderRadius: BorderRadius.circular(20)),
+              child: Text(_fmtMark(s.parts[i].total),
+                  style: const TextStyle(
+                      color: kBlue, fontWeight: FontWeight.w800)),
+            ),
+          ]),
+        ),
+      if (s.parts.isNotEmpty)
+        Container(
+          margin: const EdgeInsets.only(top: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                colors: [Color(0xFF3498DB), Color(0xFF2B7FBA)]),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(children: [
+            const Text('Total marks',
+                style: TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            Text(_fmtMark(s.total),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800)),
+          ]),
+        ),
+      if (s.note.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.info_outline, size: 16, color: Colors.black45),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(s.note,
+                  style: const TextStyle(
+                      fontSize: 12.5,
+                      fontStyle: FontStyle.italic,
+                      color: Colors.black54)),
+            ),
+          ]),
+        ),
+    ]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF3498DB), Color(0xFF2B7FBA)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Row(children: [
+            const Icon(Icons.account_tree_outlined, color: Colors.white),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text.rich(TextSpan(children: [
+                      const TextSpan(
+                          text: 'Exam structure',
+                          style: TextStyle(color: Colors.white)),
+                      if (groups.length == 1 && groups[0].$1.isNotEmpty)
+                        TextSpan(
+                            text: '  ${groups[0].$1.join(', ')}',
+                            style: const TextStyle(color: Color(0xFFFFE082))),
+                    ]),
+                        style: const TextStyle(
+                            fontSize: 17, fontWeight: FontWeight.w800)),
+                    Text(exam,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12.5)),
+                  ]),
+            ),
+          ]),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            for (var g = 0; g < groups.length; g++) ...[
+              if (g > 0) const Divider(height: 28),
+              if (groups.length > 1 && groups[g].$1.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Wrap(spacing: 6, runSpacing: 4, children: [
+                    for (final f in groups[g].$1)
+                      Chip(
+                        label: Text(f, style: const TextStyle(fontSize: 12)),
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: const Color(0xFFEAF3FB),
+                        side: BorderSide.none,
+                      ),
+                  ]),
+                ),
+              _paper(groups[g].$2),
+            ],
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+/// Small note for the forms that have no exam structure yet.
+class _ExamStructureMissing extends StatelessWidget {
+  final List<String> forms;
+  const _ExamStructureMissing({required this.forms});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      color: const Color(0xFFFFF8E1),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Icon(Icons.info_outline, size: 20, color: Color(0xFFB26A00)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+                'No exam structure yet for ${forms.join(', ')}. '
+                    'Ask the administrator to set it.',
+                style: const TextStyle(fontSize: 13, height: 1.35)),
+          ),
+        ]),
+      ),
+    );
   }
 }
 
@@ -10744,6 +11028,105 @@ class ExamLimits {
           '${totalMin > 0 || totalMax > 0 ? ' · Total ${_fmtMark(totalMin)}-${totalMax > 0 ? _fmtMark(totalMax) : 'no limit'}' : ''}';
 }
 
+/// A signature at the bottom of the report card: its title (empty = hidden)
+/// and, optionally, the name printed under it.
+class ReportSigner {
+  final String label;
+  final String name;
+  const ReportSigner(this.label, [this.name = '']);
+}
+
+const kDefaultSigners = [
+  ReportSigner('Class Teacher'),
+  ReportSigner('Exam Controller'),
+  ReportSigner('Principal'),
+];
+
+/// One part of an exam paper, e.g. "15 Multiple choice questions x 1 mark".
+class ExamPart {
+  final String type;
+  final int count;
+  final double each;
+  const ExamPart({required this.type, required this.count, required this.each});
+
+  double get total => count * each;
+
+  Map<String, Object?> toMap() => {'type': type, 'count': count, 'each': each};
+
+  static ExamPart? fromMap(Object? m) {
+    if (m is! Map) return null;
+    final t = m['type'], c = m['count'], e = m['each'];
+    if (t is! String || t.trim().isEmpty || c is! num || e is! num) return null;
+    return ExamPart(type: t.trim(), count: c.toInt(), each: e.toDouble());
+  }
+}
+
+/// The structure of one exam paper: its parts (the total marks are added up
+/// automatically) and an optional note.
+class ExamStructure {
+  final List<ExamPart> parts;
+  final String note;
+  const ExamStructure({this.parts = const [], this.note = ''});
+
+  bool get isEmpty => parts.isEmpty && note.trim().isEmpty;
+  double get total => parts.fold(0.0, (s, p) => s + p.total);
+
+  /// Same signature = same structure (used to group forms).
+  String get sig {
+    final ps = [for (final p in parts) '${p.type}|${p.count}|${p.each}'];
+    return '${ps.join(';')}#${note.trim()}';
+  }
+
+  Map<String, Object?> toMap() => {
+    'parts': [for (final p in parts) p.toMap()],
+    'note': note.trim(),
+  };
+
+  factory ExamStructure.fromValue(Object? v) {
+    if (v is String) return ExamStructure(note: v.trim()); // older plain text
+    if (v is Map) {
+      final out = <ExamPart>[];
+      final ps = v['parts'];
+      if (ps is List) {
+        for (final e in ps) {
+          final p = ExamPart.fromMap(e);
+          if (p != null) out.add(p);
+        }
+      }
+      return ExamStructure(
+          parts: out, note: v['note'] is String ? (v['note'] as String).trim() : '');
+    }
+    return const ExamStructure();
+  }
+}
+
+/// A part being edited in the structure dialog.
+class _PartDraft {
+  String type;
+  final TextEditingController custom, count, each;
+  _PartDraft({required this.type, String custom = '', String count = '', String each = ''})
+      : custom = TextEditingController(text: custom),
+        count = TextEditingController(text: count),
+        each = TextEditingController(text: each);
+  void dispose() {
+    custom.dispose();
+    count.dispose();
+    each.dispose();
+  }
+}
+
+const _kPartTypes = [
+  'Multiple choice questions',
+  'True / False',
+  'Matching',
+  'Fill in the blanks',
+  'True/False, Matching or Fill',
+  'Short answer questions',
+  'Structure questions',
+  'Essay questions',
+  'Other',
+];
+
 class AppSettings {
   /// First day of the week in the attendance report (DateTime.monday ... sunday).
   final int weekStart;
@@ -10753,6 +11136,11 @@ class AppSettings {
 
   /// The mark limits of each exam (Settings > Exams), by [SchoolService.subjectKey].
   final Map<String, ExamLimits> examLimits;
+
+  /// The structure of each exam paper (free text, e.g. its parts and marks),
+  /// per exam and form, under the same keys as [examLimits]. Set in
+  /// Settings > Exams, shown to teachers in Exam Manager.
+  final Map<String, ExamStructure> examStructure;
 
   /// Lowest average mark for the grades A, B, C, D and E (below E is an F).
   final List<double> grades;
@@ -10800,6 +11188,9 @@ class AppSettings {
   /// Days allowed to return the results of an exam, counted from its date.
   final int resultDays;
 
+  /// The signatures at the bottom of the report card (Settings > Results).
+  final List<ReportSigner> reportSigners;
+
   /// Finance: the text written before every amount (e.g. "USD").
   final String currency;
 
@@ -10813,6 +11204,7 @@ class AppSettings {
     this.weekStart = DateTime.monday,
     this.maxMark = 100.0,
     this.examLimits = const {},
+    this.examStructure = const {},
     this.grades = const [80.0, 70.0, 60.0, 50.0, 40.0],
     this.rateGood = 90.0,
     this.rateWarn = 75.0,
@@ -10839,6 +11231,7 @@ class AppSettings {
     this.uploadNumber = true,
     this.subjectDates = const {},
     this.resultDays = 7,
+    this.reportSigners = kDefaultSigners,
     this.currency = 'USD',
     this.monthlyFees = const {},
     this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
@@ -10886,6 +11279,28 @@ class AppSettings {
     }
     return examLimits[SchoolService.subjectKey(exam)] ??
         ExamLimits(maxMark: maxMark);
+  }
+
+  /// The structure of [exam] for one [form] (empty when none was set).
+  ExamStructure structureFor(String exam, String form) =>
+      examStructure[limitKey(exam, form)] ?? const ExamStructure();
+
+  /// The structure of [exam] for [forms]: forms with the same structure are
+  /// grouped together; forms without a structure are left out.
+  List<(List<String>, ExamStructure)> structureGroups(
+      String exam, List<String> forms) {
+    final groups = <String, (List<String>, ExamStructure)>{};
+    for (final f in forms) {
+      final s = structureFor(exam, f);
+      if (s.isEmpty) continue;
+      final g = groups[s.sig];
+      if (g == null) {
+        groups[s.sig] = ([f], s);
+      } else {
+        g.$1.add(f);
+      }
+    }
+    return groups.values.toList();
   }
 
   /// One line when all forms share the limits, else one line per group.
@@ -10981,6 +11396,13 @@ class AppSettings {
                 e.value as Map, dbl('maxMark', d.maxMark)),
       }
           : d.examLimits,
+      examStructure: m['examStructure'] is Map
+          ? {
+        for (final e in (m['examStructure'] as Map).entries)
+          if (!ExamStructure.fromValue(e.value).isEmpty)
+            '${e.key}': ExamStructure.fromValue(e.value),
+      }
+          : d.examStructure,
       grades: grades,
       rateGood: dbl('rateGood', d.rateGood),
       rateWarn: dbl('rateWarn', d.rateWarn),
@@ -11024,6 +11446,15 @@ class AppSettings {
       resultDays: m['resultDays'] is num
           ? (m['resultDays'] as num).toInt().clamp(0, 365)
           : d.resultDays,
+      reportSigners: m['reportSigners'] is List
+          ? [
+        for (final e in (m['reportSigners'] as List))
+          if (e is Map)
+            ReportSigner(
+                e['label'] is String ? (e['label'] as String).trim() : '',
+                e['name'] is String ? (e['name'] as String).trim() : ''),
+      ]
+          : d.reportSigners,
       currency: m['currency'] is String &&
           (m['currency'] as String).trim().isNotEmpty
           ? (m['currency'] as String).trim()
@@ -11914,6 +12345,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: _fmtMark(g)),
   ];
   final _newExam = TextEditingController();
+  late final _sig = [
+    for (var i = 0; i < 3; i++)
+      (
+      TextEditingController(
+          text: i < appSettings.value.reportSigners.length
+              ? appSettings.value.reportSigners[i].label
+              : ''),
+      TextEditingController(
+          text: i < appSettings.value.reportSigners.length
+              ? appSettings.value.reportSigners[i].name
+              : ''),
+      ),
+  ];
   late final _cur = TextEditingController(text: appSettings.value.currency);
   late final _methods =
   TextEditingController(text: appSettings.value.paymentMethods.join(', '));
@@ -11944,6 +12388,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _good, _warn, _newExam, ..._grade, _cur, _methods, ..._fee.values
     ]) {
       c.dispose();
+    }
+    for (final s in _sig) {
+      s.$1.dispose();
+      s.$2.dispose();
     }
     super.dispose();
   }
@@ -11983,6 +12431,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     await _save(
         {'rateGood': good, 'rateWarn': warn}, 'Attendance colours saved');
+  }
+
+  Future<void> _saveSigners() async {
+    await _save({
+      'reportSigners': [
+        for (final s in _sig)
+          {'label': s.$1.text.trim(), 'name': s.$2.text.trim()}
+      ]
+    }, 'Report card signatures saved');
   }
 
   Future<void> _saveResults() async {
@@ -12222,6 +12679,359 @@ class _SettingsScreenState extends State<SettingsScreen> {
           for (final f in fs) AppSettings.limitKey(exam, f): lim.toMap()
       }
     }, 'Mark limits of "$exam" saved');
+  }
+
+  /// Structure of ONE exam paper, per form. The paper is built from parts
+  /// (type of questions, how many, marks of each); the total is added up
+  /// automatically. The ticked forms share one structure, the others get
+  /// their own (same idea as the mark limits).
+  Future<void> _editStructure(String exam) async {
+    final forms = ExamService.forms;
+    final st = appSettings.value;
+    final cur = st.structureFor(exam, forms.first);
+    final sel = <String>{
+      for (final f in forms)
+        if (st.structureFor(exam, f).sig == cur.sig) f
+    };
+    final firstOther =
+    forms.firstWhere((f) => !sel.contains(f), orElse: () => '');
+    final listA = <_PartDraft>[], listB = <_PartDraft>[];
+    final noteA = TextEditingController(), noteB = TextEditingController();
+
+    void load(List<_PartDraft> list, TextEditingController note,
+        ExamStructure s) {
+      for (final p in list) {
+        p.dispose();
+      }
+      list.clear();
+      for (final p in s.parts) {
+        final preset = _kPartTypes.contains(p.type) && p.type != 'Other';
+        list.add(_PartDraft(
+            type: preset ? p.type : 'Other',
+            custom: preset ? '' : p.type,
+            count: '${p.count}',
+            each: _fmtMark(p.each)));
+      }
+      note.text = s.note;
+    }
+
+    String sigOf(List<_PartDraft> list, TextEditingController note) {
+      final ps = [
+        for (final p in list)
+          '${p.type}|${p.custom.text}|${p.count.text}|${p.each.text}'
+      ];
+      return '${ps.join(';')}#${note.text}';
+    }
+
+    double totalOf(List<_PartDraft> list) {
+      var t = 0.0;
+      for (final p in list) {
+        t += (int.tryParse(p.count.text.trim()) ?? 0) * (_num(p.each) ?? 0.0);
+      }
+      return t;
+    }
+
+    String? check(List<_PartDraft> list, String who) {
+      for (var i = 0; i < list.length; i++) {
+        final p = list[i];
+        if (p.type == 'Other' && p.custom.text.trim().isEmpty) {
+          return '$who: Part ${i + 1} needs a name.';
+        }
+        final c = int.tryParse(p.count.text.trim());
+        if (c == null || c < 1) {
+          return '$who: Part ${i + 1} - enter how many questions.';
+        }
+        final e = _num(p.each);
+        if (e == null || e <= 0) {
+          return '$who: Part ${i + 1} - enter the marks of one question.';
+        }
+      }
+      return null;
+    }
+
+    ExamStructure read(List<_PartDraft> list, TextEditingController note) =>
+        ExamStructure(parts: [
+          for (final p in list)
+            ExamPart(
+                type: p.type == 'Other' ? p.custom.text.trim() : p.type,
+                count: int.parse(p.count.text.trim()),
+                each: _num(p.each)!),
+        ], note: note.text.trim());
+
+    load(listA, noteA, cur);
+    load(listB, noteB,
+        firstOther.isEmpty ? cur : st.structureFor(exam, firstOther));
+    var loadedA = sigOf(listA, noteA);
+    var loadedB = sigOf(listB, noteB);
+    String? err;
+
+    Widget numBox(TextEditingController c, String label, StateSetter setD,
+        {bool decimal = false}) =>
+        TextField(
+          controller: c,
+          onChanged: (_) => setD(() {}),
+          keyboardType: TextInputType.numberWithOptions(decimal: decimal),
+          inputFormatters: [
+            FilteringTextInputFormatter.allow(
+                decimal ? RegExp(r'[0-9.,]') : RegExp(r'[0-9]'))
+          ],
+          decoration: InputDecoration(
+              labelText: label,
+              border: const OutlineInputBorder(),
+              isDense: true),
+        );
+
+    Widget partCard(int i, List<_PartDraft> list, StateSetter setD) {
+      final p = list[i];
+      final double marks = (int.tryParse(p.count.text.trim()) ?? 0) *
+          (_num(p.each) ?? 0.0);
+      return Container(
+        key: ObjectKey(p),
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.fromLTRB(12, 4, 4, 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F6FB),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFD6E4F0)),
+        ),
+        child: Column(children: [
+          Row(children: [
+            Text('Part ${i + 1}',
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+            const Spacer(),
+            Text('= ${_fmtMark(marks)} marks',
+                style: const TextStyle(
+                    color: kBlue, fontWeight: FontWeight.w700)),
+            IconButton(
+              tooltip: 'Remove this part',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.delete_outline, size: 20),
+              onPressed: () => setD(() => list.removeAt(i).dispose()),
+            ),
+          ]),
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Column(children: [
+              DropdownButtonFormField<String>(
+                // ignore: deprecated_member_use
+                value: p.type,
+                isExpanded: true,
+                items: [
+                  for (final t in _kPartTypes)
+                    DropdownMenuItem(value: t, child: Text(t)),
+                ],
+                onChanged: (v) => setD(() => p.type = v ?? p.type),
+                decoration: const InputDecoration(
+                    labelText: 'Type of questions',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+              ),
+              if (p.type == 'Other') ...[
+                const SizedBox(height: 10),
+                TextField(
+                  controller: p.custom,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: const InputDecoration(
+                      labelText: 'Name of this part',
+                      border: OutlineInputBorder(),
+                      isDense: true),
+                ),
+              ],
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: numBox(p.count, 'Questions', setD)),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: numBox(p.each, 'Marks each', setD, decimal: true)),
+              ]),
+            ]),
+          ),
+        ]),
+      );
+    }
+
+    Widget editor(List<_PartDraft> list, TextEditingController note,
+        StateSetter setD) =>
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (list.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 6),
+              child: Text('No parts yet. Tap "Add part".', style: _hint),
+            ),
+          for (var i = 0; i < list.length; i++) partCard(i, list, setD),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () => setD(() => list.add(_PartDraft(
+                  type: _kPartTypes.first, each: '1'))),
+              icon: const Icon(Icons.add),
+              label: const Text('Add part'),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+                color: kBlue, borderRadius: BorderRadius.circular(12)),
+            child: Row(children: [
+              const Icon(Icons.functions, color: Colors.white),
+              const SizedBox(width: 8),
+              const Text('Total marks',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text(_fmtMark(totalOf(list)),
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800)),
+            ]),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: note,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(
+              labelText: 'Note (optional)',
+              hintText: 'e.g. Answer all questions',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        ]);
+
+    final saved = await showDialog<List<(ExamStructure, List<String>)>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          final ticked = [for (final f in forms) if (sel.contains(f)) f];
+          final others = [for (final f in forms) if (!sel.contains(f)) f];
+          return AlertDialog(
+            title: Text('Exam structure - $exam'),
+            content: SizedBox(
+              width: 440,
+              child: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                        'Tick the forms that share the same structure. The '
+                            'forms that are not ticked get their own structure '
+                            'below. Teachers see it in Exam Manager.',
+                        style: _hint),
+                  ),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Wrap(spacing: 8, runSpacing: 4, children: [
+                      for (final f in forms)
+                        FilterChip(
+                          label: Text(f),
+                          selected: sel.contains(f),
+                          onSelected: (on) => setD(() {
+                            final untouchedA = sigOf(listA, noteA) == loadedA;
+                            final untouchedB = sigOf(listB, noteB) == loadedB;
+                            on ? sel.add(f) : sel.remove(f);
+                            final t = [
+                              for (final x in forms) if (sel.contains(x)) x
+                            ];
+                            final o = [
+                              for (final x in forms) if (!sel.contains(x)) x
+                            ];
+                            if (untouchedA && t.isNotEmpty) {
+                              load(listA, noteA, st.structureFor(exam, t.first));
+                              loadedA = sigOf(listA, noteA);
+                            }
+                            if (untouchedB && o.isNotEmpty) {
+                              load(listB, noteB, st.structureFor(exam, o.first));
+                              loadedB = sigOf(listB, noteB);
+                            }
+                          }),
+                        ),
+                    ]),
+                  ),
+                  const SizedBox(height: 14),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                        ticked.isEmpty
+                            ? 'Tick at least one form.'
+                            : 'Structure for ${ticked.join(', ')}',
+                        style: const TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(height: 10),
+                  editor(listA, noteA, setD),
+                  if (others.isNotEmpty && ticked.isNotEmpty) ...[
+                    const SizedBox(height: 18),
+                    const Divider(height: 1),
+                    const SizedBox(height: 14),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Structure for ${others.join(', ')}',
+                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    const SizedBox(height: 10),
+                    editor(listB, noteB, setD),
+                  ],
+                  const SizedBox(height: 8),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('Remove all parts and the note to show no structure.',
+                        style: _hint),
+                  ),
+                  if (err != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(err!,
+                            style: const TextStyle(color: Color(0xFFC62828))),
+                      ),
+                    ),
+                ]),
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel')),
+              FilledButton(
+                onPressed: () {
+                  if (ticked.isEmpty) {
+                    setD(() => err = 'Tick at least one form.');
+                    return;
+                  }
+                  final twoSets = others.isNotEmpty;
+                  final e = check(listA, twoSets ? ticked.join(', ') : 'Structure') ??
+                      (twoSets ? check(listB, others.join(', ')) : null);
+                  if (e != null) {
+                    setD(() => err = e);
+                    return;
+                  }
+                  Navigator.pop(ctx, [
+                    (read(listA, noteA), ticked),
+                    if (twoSets) (read(listB, noteB), others),
+                  ]);
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    for (final p in [...listA, ...listB]) {
+      p.dispose();
+    }
+    noteA.dispose();
+    noteB.dispose();
+    if (saved == null) return;
+    await _save({
+      'examStructure': {
+        for (final (s, fs) in saved)
+          for (final f in fs) AppSettings.limitKey(exam, f): s.toMap()
+      }
+    }, 'Structure of "$exam" saved');
   }
 
   Future<void> _addExam(List<String> current) async {
@@ -12511,6 +13321,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _saveButton('Save results settings', _saveResults),
   ]);
 
+  Widget _signersCard() =>
+      _card('Report card signatures', Icons.edit_note, [
+        const Text(
+            'Shown at the bottom of every report card. Write the title of each '
+                'signature and, if you like, the name printed under it. Leave a '
+                'title empty to hide that signature.',
+            style: _hint),
+        const SizedBox(height: 12),
+        for (var i = 0; i < _sig.length; i++) ...[
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _sig[i].$1,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                    labelText: 'Title ${i + 1}',
+                    border: const OutlineInputBorder(),
+                    isDense: true),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _sig[i].$2,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                    labelText: 'Name (optional)',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 10),
+        ],
+        _saveButton('Save signatures', _saveSigners),
+      ]);
+
   Future<void> _toggleExam(AppSettings s, String exam, bool open) async {
     if (!open && s.openExams.length <= 1) {
       _toast('Keep at least one exam open.');
@@ -12588,7 +13435,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               '(teachers and students no longer see it). At least one exam stays open. '
               'Removing an exam only hides it; its saved marks are kept. Use the '
               'sliders button of an exam to set its own mark limits (lowest '
-              'and highest subject mark, lowest and highest exam total).',
+              'and highest subject mark, lowest and highest exam total) and the '
+              'structure button to write the structure of its paper, which '
+              'teachers see in Exam Manager.',
           style: _hint),
       const SizedBox(height: 6),
       for (final e in list)
@@ -12623,6 +13472,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               tooltip: 'Mark limits',
               icon: const Icon(Icons.tune),
               onPressed: _busy ? null : () => _editLimits(e),
+            ),
+            IconButton(
+              tooltip: 'Exam structure',
+              icon: const Icon(Icons.account_tree_outlined),
+              onPressed: _busy ? null : () => _editStructure(e),
             ),
             IconButton(
               tooltip: 'Remove',
@@ -12788,7 +13642,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (id == 1) {
       return <(String, List<Widget>)>[
         ('Exams', <Widget>[_examsCard(s)]),
-        ('Grades & rules', <Widget>[_resultsCard(), const _ReturnDaysCard()]),
+        ('Grades & rules', <Widget>[_resultsCard(), _signersCard(), const _ReturnDaysCard()]),
         ('Upload', <Widget>[_uploadCard(s)]),
       ];
     }
@@ -18687,23 +19541,37 @@ Future<Uint8List> _buildReportCardPdf(_RcData d) async {
       pw.SizedBox(height: 22),
       pw.Container(height: 0.6, color: line),
       pw.SizedBox(height: 26),
-      pw.Row(children: [
-        for (final s in const ['CLASS TEACHER', 'EXAM CONTROLLER', 'PRINCIPAL'])
-          pw.Expanded(
-            child: pw.Container(
-              margin: const pw.EdgeInsets.symmetric(horizontal: 12),
-              padding: const pw.EdgeInsets.only(top: 4),
-              decoration: const pw.BoxDecoration(
-                  border: pw.Border(top: pw.BorderSide(color: navy, width: 1))),
-              child: pw.Center(
-                  child: pw.Text(s,
-                      style: pw.TextStyle(
-                          fontSize: 9,
-                          fontWeight: pw.FontWeight.bold,
-                          color: navy))),
+      if (appSettings.value.reportSigners.any((s) => s.label.isNotEmpty))
+        pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+          for (final s
+          in appSettings.value.reportSigners.where((s) => s.label.isNotEmpty))
+            pw.Expanded(
+              child: pw.Container(
+                margin: const pw.EdgeInsets.symmetric(horizontal: 12),
+                padding: const pw.EdgeInsets.only(top: 4),
+                decoration: const pw.BoxDecoration(
+                    border:
+                    pw.Border(top: pw.BorderSide(color: navy, width: 1))),
+                child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.center,
+                    children: [
+                      pw.Text(safe(s.label.toUpperCase()),
+                          textAlign: pw.TextAlign.center,
+                          style: pw.TextStyle(
+                              fontSize: 9,
+                              fontWeight: pw.FontWeight.bold,
+                              color: navy)),
+                      if (s.name.isNotEmpty)
+                        pw.Padding(
+                          padding: const pw.EdgeInsets.only(top: 2),
+                          child: pw.Text(safe(s.name),
+                              textAlign: pw.TextAlign.center,
+                              style: const pw.TextStyle(fontSize: 8.5)),
+                        ),
+                    ]),
+              ),
             ),
-          ),
-      ]),
+        ]),
       pw.SizedBox(height: 10),
       pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
         pw.Text('This is a computer generated report card',
@@ -31102,6 +31970,112 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
   bool _loading = true, _saving = false;
   String? _error;
 
+  // filters: fill status of a class (all | filled | partial | none) and class
+  String _status = 'all';
+  String? _class;
+  final Map<String, String> _classStatus = {}; // class label -> status
+
+  String _cls(StudentInfo s) => widget.sectionLabels[s.id] ?? '';
+
+  List<String> get _classes {
+    final seen = <String>[];
+    for (final s in widget.students) {
+      final c = _cls(s);
+      if (!seen.contains(c)) seen.add(c);
+    }
+    return seen;
+  }
+
+  bool _statusOk(String cls) => _status == 'all' || _classStatus[cls] == _status;
+
+  List<StudentInfo> get _shown => [
+    for (final s in widget.students)
+      if ((_class == null || _cls(s) == _class) && _statusOk(_cls(s))) s
+  ];
+
+  /// How far each class is filled, from the marks that were saved when the
+  /// screen opened: Filled = every box that needs a mark has one (or is
+  /// Absent / Cheated), Not filled = no mark at all, otherwise Partially.
+  void _computeStatus() {
+    final need = <String, int>{}, done = <String, int>{}, real = <String, int>{};
+    for (final s in widget.students) {
+      final c = _cls(s);
+      for (final sub in _subjects) {
+        if (!_can(s.id, sub)) continue;
+        final t = _orig['${s.id}|$sub'] ?? '';
+        if (isNewText(t)) continue;
+        need[c] = (need[c] ?? 0) + 1;
+        final isReal = double.tryParse(t) != null || t == kCheatText;
+        if (isReal) real[c] = (real[c] ?? 0) + 1;
+        if (isReal || _isAbsentText(t)) done[c] = (done[c] ?? 0) + 1;
+      }
+    }
+    for (final c in _classes) {
+      final n = need[c] ?? 0, dn = done[c] ?? 0, r = real[c] ?? 0;
+      _classStatus[c] = (n == 0 || dn == n) ? 'filled' : (r == 0 ? 'none' : 'partial');
+    }
+  }
+
+  Widget _filterBar() {
+    final classes = _classes;
+    int count(String st) => st == 'all'
+        ? classes.length
+        : classes.where((c) => _classStatus[c] == st).length;
+    Color col(String st) => st == 'filled'
+        ? const Color(0xFF2E7D32)
+        : st == 'partial'
+        ? const Color(0xFFEF6C00)
+        : const Color(0xFFC62828);
+    final visible = [for (final c in classes) if (_statusOk(c)) c];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            const Text('Classes:', style: TextStyle(fontWeight: FontWeight.w700)),
+            for (final f in const [
+              ('all', 'All'),
+              ('filled', 'Filled'),
+              ('partial', 'Partially filled'),
+              ('none', 'Not filled'),
+            ])
+              ChoiceChip(
+                label: Text('${f.$2} ${count(f.$1)}'),
+                selected: _status == f.$1,
+                onSelected: (_) => setState(() {
+                  _status = f.$1;
+                  if (_class != null && !_statusOk(_class!)) _class = null;
+                }),
+              ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Wrap(spacing: 8, runSpacing: 4, children: [
+          ChoiceChip(
+            label: const Text('All classes'),
+            selected: _class == null,
+            onSelected: (_) => setState(() => _class = null),
+          ),
+          for (final c in visible)
+            ChoiceChip(
+              avatar: Icon(Icons.circle, size: 10, color: col(_classStatus[c] ?? 'none')),
+              label: Text(c.isEmpty ? 'No class' : c),
+              selected: _class == c,
+              onSelected: (_) => setState(() => _class = _class == c ? null : c),
+            ),
+        ]),
+        if (visible.isEmpty)
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text('No class matches this filter.', style: _hint),
+          ),
+      ]),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -31145,6 +32119,7 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
         _c[s.id] = row;
         _hidden[s.id] = hid;
       }
+      _computeStatus();
       if (mounted) setState(() => _loading = false);
     } catch (e) {
       if (mounted) {
@@ -31262,6 +32237,7 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
     const numW = 36.0, nameW = 210.0, cellW = 90.0, avgW = 90.0;
     final multi = widget.sectionLabels.values.toSet().length > 1;
     final changed = _loading ? 0 : _changedRows;
+    final shown = _loading ? widget.students : _shown;
 
     Widget body;
     if (_loading) {
@@ -31307,9 +32283,9 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
             Expanded(
               child: ListView.builder(
                 padding: const EdgeInsets.only(bottom: 24),
-                itemCount: widget.students.length,
+                itemCount: shown.length,
                 itemBuilder: (context, i) {
-                  final s = widget.students[i];
+                  final s = shown[i];
                   final row = _c[s.id]!;
                   final vals = <double>[
                     for (final sub in _subjects)
@@ -31467,6 +32443,7 @@ class _ResultBulkScreenState extends State<ResultBulkScreen> {
                 style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
           ),
         ),
+        if (!_loading && _classes.length > 1) _filterBar(),
         if (_error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
