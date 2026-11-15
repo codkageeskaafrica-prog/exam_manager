@@ -11028,6 +11028,20 @@ class ExamLimits {
           '${totalMin > 0 || totalMax > 0 ? ' · Total ${_fmtMark(totalMin)}-${totalMax > 0 ? _fmtMark(totalMax) : 'no limit'}' : ''}';
 }
 
+/// A signature at the bottom of the report card: its title (empty = hidden)
+/// and, optionally, the name printed under it.
+class ReportSigner {
+  final String label;
+  final String name;
+  const ReportSigner(this.label, [this.name = '']);
+}
+
+const kDefaultSigners = [
+  ReportSigner('Class Teacher'),
+  ReportSigner('Exam Controller'),
+  ReportSigner('Principal'),
+];
+
 /// One part of an exam paper, e.g. "15 Multiple choice questions x 1 mark".
 class ExamPart {
   final String type;
@@ -11174,6 +11188,9 @@ class AppSettings {
   /// Days allowed to return the results of an exam, counted from its date.
   final int resultDays;
 
+  /// The signatures at the bottom of the report card (Settings > Results).
+  final List<ReportSigner> reportSigners;
+
   /// Finance: the text written before every amount (e.g. "USD").
   final String currency;
 
@@ -11214,6 +11231,7 @@ class AppSettings {
     this.uploadNumber = true,
     this.subjectDates = const {},
     this.resultDays = 7,
+    this.reportSigners = kDefaultSigners,
     this.currency = 'USD',
     this.monthlyFees = const {},
     this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
@@ -11428,6 +11446,15 @@ class AppSettings {
       resultDays: m['resultDays'] is num
           ? (m['resultDays'] as num).toInt().clamp(0, 365)
           : d.resultDays,
+      reportSigners: m['reportSigners'] is List
+          ? [
+        for (final e in (m['reportSigners'] as List))
+          if (e is Map)
+            ReportSigner(
+                e['label'] is String ? (e['label'] as String).trim() : '',
+                e['name'] is String ? (e['name'] as String).trim() : ''),
+      ]
+          : d.reportSigners,
       currency: m['currency'] is String &&
           (m['currency'] as String).trim().isNotEmpty
           ? (m['currency'] as String).trim()
@@ -12318,6 +12345,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: _fmtMark(g)),
   ];
   final _newExam = TextEditingController();
+  late final _sig = [
+    for (var i = 0; i < 3; i++)
+      (
+      TextEditingController(
+          text: i < appSettings.value.reportSigners.length
+              ? appSettings.value.reportSigners[i].label
+              : ''),
+      TextEditingController(
+          text: i < appSettings.value.reportSigners.length
+              ? appSettings.value.reportSigners[i].name
+              : ''),
+      ),
+  ];
   late final _cur = TextEditingController(text: appSettings.value.currency);
   late final _methods =
   TextEditingController(text: appSettings.value.paymentMethods.join(', '));
@@ -12348,6 +12388,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _good, _warn, _newExam, ..._grade, _cur, _methods, ..._fee.values
     ]) {
       c.dispose();
+    }
+    for (final s in _sig) {
+      s.$1.dispose();
+      s.$2.dispose();
     }
     super.dispose();
   }
@@ -12387,6 +12431,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     await _save(
         {'rateGood': good, 'rateWarn': warn}, 'Attendance colours saved');
+  }
+
+  Future<void> _saveSigners() async {
+    await _save({
+      'reportSigners': [
+        for (final s in _sig)
+          {'label': s.$1.text.trim(), 'name': s.$2.text.trim()}
+      ]
+    }, 'Report card signatures saved');
   }
 
   Future<void> _saveResults() async {
@@ -13268,6 +13321,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _saveButton('Save results settings', _saveResults),
   ]);
 
+  Widget _signersCard() =>
+      _card('Report card signatures', Icons.edit_note, [
+        const Text(
+            'Shown at the bottom of every report card. Write the title of each '
+                'signature and, if you like, the name printed under it. Leave a '
+                'title empty to hide that signature.',
+            style: _hint),
+        const SizedBox(height: 12),
+        for (var i = 0; i < _sig.length; i++) ...[
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _sig[i].$1,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                    labelText: 'Title ${i + 1}',
+                    border: const OutlineInputBorder(),
+                    isDense: true),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _sig[i].$2,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                    labelText: 'Name (optional)',
+                    border: OutlineInputBorder(),
+                    isDense: true),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 10),
+        ],
+        _saveButton('Save signatures', _saveSigners),
+      ]);
+
   Future<void> _toggleExam(AppSettings s, String exam, bool open) async {
     if (!open && s.openExams.length <= 1) {
       _toast('Keep at least one exam open.');
@@ -13552,7 +13642,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (id == 1) {
       return <(String, List<Widget>)>[
         ('Exams', <Widget>[_examsCard(s)]),
-        ('Grades & rules', <Widget>[_resultsCard(), const _ReturnDaysCard()]),
+        ('Grades & rules', <Widget>[_resultsCard(), _signersCard(), const _ReturnDaysCard()]),
         ('Upload', <Widget>[_uploadCard(s)]),
       ];
     }
@@ -19451,20 +19541,34 @@ pw.Container(height: 0.6, color: line),
 pw.SizedBox(height: 22),
 pw.Container(height: 0.6, color: line),
 pw.SizedBox(height: 26),
-pw.Row(children: [
-for (final s in const ['CLASS TEACHER', 'EXAM CONTROLLER', 'PRINCIPAL'])
+if (appSettings.value.reportSigners.any((s) => s.label.isNotEmpty))
+pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+for (final s
+in appSettings.value.reportSigners.where((s) => s.label.isNotEmpty))
 pw.Expanded(
 child: pw.Container(
 margin: const pw.EdgeInsets.symmetric(horizontal: 12),
 padding: const pw.EdgeInsets.only(top: 4),
 decoration: const pw.BoxDecoration(
-border: pw.Border(top: pw.BorderSide(color: navy, width: 1))),
-child: pw.Center(
-child: pw.Text(s,
+border:
+pw.Border(top: pw.BorderSide(color: navy, width: 1))),
+child: pw.Column(
+crossAxisAlignment: pw.CrossAxisAlignment.center,
+children: [
+pw.Text(safe(s.label.toUpperCase()),
+textAlign: pw.TextAlign.center,
 style: pw.TextStyle(
 fontSize: 9,
 fontWeight: pw.FontWeight.bold,
-color: navy))),
+color: navy)),
+if (s.name.isNotEmpty)
+pw.Padding(
+padding: const pw.EdgeInsets.only(top: 2),
+child: pw.Text(safe(s.name),
+textAlign: pw.TextAlign.center,
+style: const pw.TextStyle(fontSize: 8.5)),
+),
+]),
 ),
 ),
 ]),
