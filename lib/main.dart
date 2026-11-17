@@ -6227,7 +6227,8 @@ class _ExamCell extends StatelessWidget {
 // ======================= ASSIGNMENTS =======================
 //
 // Works like the Exam tab (subject rows x form columns, one button per
-// cell, school letterhead + footer added to every uploaded file), but each
+// cell), but only the school letterhead + footer are added to every uploaded
+// file (no exam heading table, marks, time or exam formatting). Each
 // button holds ANY NUMBER of assignments instead of one file.
 // Firestore: assignments/{id} (details) and assignmentFiles/{id} (the file).
 
@@ -6362,13 +6363,11 @@ class AssignmentService {
 
   /// Saves only the teacher name, footer, marks and time (no file needed).
   Future<void> saveDetails(String subject, String form,
-      {required String teacher, String marks = '', String allowedTime = ''}) {
+      {required String teacher}) {
     return _details.set({
       AssignmentRecord.keyFor(subject, form): {
         'teacherName': teacher,
         'footer': footerFor(subject, form, teacher),
-        'marks': marks,
-        'allowedTime': allowedTime,
       },
     }, SetOptions(merge: true));
   }
@@ -6393,11 +6392,6 @@ class AssignmentService {
     required String title,
     required String teacher,
     required PlatformFile file,
-    String marks = '',
-    String allowedTime = '',
-    bool addHeading = true,
-    bool autoFormat = true,
-    bool numberQuestions = true,
     void Function(String status)? onStatus,
   }) async {
     final letterhead = await exams.getLetterhead();
@@ -6410,24 +6404,19 @@ class AssignmentService {
     final isDocx = (file.extension ?? '').toLowerCase() == 'docx';
     final footer = footerFor(subject, form, teacher);
 
-    onStatus?.call('Adding letterhead, heading and footer...');
-    final ExamHeadingText? heading = addHeading
-        ? (await exams.getHeading())
-        .build(subject, form, marks: marks, time: allowedTime)
-        : null;
+    onStatus?.call('Adding letterhead and footer...');
     final Uint8List stamped = isDocx
         ? await exams.stampDocx(
         docx: bytes,
         letterhead: letterhead,
         footer: footer,
-        heading: heading,
-        autoFormat: autoFormat,
-        numberQuestions: numberQuestions)
+        heading: null,
+        autoFormat: false,
+        numberQuestions: false)
         : await exams.stampDocument(
         file: file,
         letterhead: letterhead,
-        footer: footer,
-        heading: heading);
+        footer: footer);
 
     final baseName = file.name.replaceAll(RegExp(r'\.[^.]+$'), '');
     final fileName = isDocx ? file.name : '$baseName.pdf';
@@ -6459,17 +6448,14 @@ class AssignmentService {
       'title': title,
       'teacherName': teacher,
       'footer': footer,
-      'marks': marks,
-      'allowedTime': allowedTime,
       'fileName': fileName,
       'size': stamped.length,
       'createdBy': uid,
       'createdAt': FieldValue.serverTimestamp(),
     });
-    // Remember the teacher / marks / time for this button (like the exams).
+    // Remember the teacher for this button.
     try {
-      await saveDetails(subject, form,
-          teacher: teacher, marks: marks, allowedTime: allowedTime);
+      await saveDetails(subject, form, teacher: teacher);
     } catch (_) {}
   }
 
@@ -6609,14 +6595,6 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
         title: const Text('Assignments'),
         actions: [
           _AssignmentDownloadAll(service: _service),
-          IconButton(
-            tooltip: 'Exam heading (general)',
-            icon: const Icon(Icons.edit_note),
-            onPressed: () => showDialog(
-              context: context,
-              builder: (_) => ExamHeadingDialog(service: _service.exams),
-            ),
-          ),
           IconButton(
             tooltip: 'School letterhead (general header)',
             icon: const Icon(Icons.image),
@@ -6825,15 +6803,8 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
   final _title = TextEditingController();
   final _teacher = TextEditingController();
   final _footer = TextEditingController();
-  final _marks = TextEditingController();
-  final _time = TextEditingController();
   late final Stream<List<AssignmentRecord>> _stream =
   widget.service.watchFor(widget.subject, widget.form);
-  // The starting ticks come from Settings > Exam upload.
-  bool _addHeading = appSettings.value.uploadHeading;
-  bool _autoFormat = appSettings.value.uploadAutoFormat;
-  bool _numberQuestions = appSettings.value.uploadNumber;
-  ExamHeading? _heading; // general heading, loaded from Firestore
   PlatformFile? _file;
   bool _busy = false;
   String? _status;
@@ -6847,9 +6818,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
   @override
   void initState() {
     super.initState();
-    widget.service.exams.getHeading().then((h) {
-      if (mounted) setState(() => _heading = h);
-    }).catchError((_) {});
     _loadDetails();
   }
 
@@ -6873,8 +6841,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
           _footer.text = AssignmentService.footerFor(
               widget.subject, widget.form, t);
         }
-        if (_marks.text.isEmpty) _marks.text = d.marks;
-        if (_time.text.isEmpty) _time.text = d.allowedTime;
       });
     } catch (_) {}
   }
@@ -6884,8 +6850,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
     _title.dispose();
     _teacher.dispose();
     _footer.dispose();
-    _marks.dispose();
-    _time.dispose();
     super.dispose();
   }
 
@@ -6922,9 +6886,7 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
     final nav = Navigator.of(context);
     try {
       await widget.service.saveDetails(widget.subject, widget.form,
-          teacher: _teacher.text.trim(),
-          marks: _marks.text.trim(),
-          allowedTime: _time.text.trim());
+          teacher: _teacher.text.trim());
       nav.pop();
       messenger.showSnackBar(const SnackBar(content: Text('Saved')));
     } catch (e) {
@@ -6979,11 +6941,9 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
         current: ExamRecord.empty(widget.subject, widget.form),
         file: f,
         footer: _footer.text.trim(),
-        marks: _marks.text.trim(),
-        allowedTime: _time.text.trim(),
-        addHeading: _addHeading,
-        autoFormat: _autoFormat,
-        numberQuestions: _numberQuestions,
+        addHeading: false,
+        autoFormat: false,
+        numberQuestions: false,
       );
       if (!mounted) return;
       if (p.isDocx) {
@@ -7026,11 +6986,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
         title: title,
         teacher: _teacher.text.trim(),
         file: f,
-        marks: _marks.text.trim(),
-        allowedTime: _time.text.trim(),
-        addHeading: _addHeading,
-        autoFormat: _autoFormat,
-        numberQuestions: _numberQuestions,
         onStatus: (t) {
           if (mounted) setState(() => _status = t);
         },
@@ -7121,8 +7076,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final preview = _heading?.build(widget.subject, widget.form,
-        marks: _marks.text, time: _time.text);
     return AlertDialog(
       title: Text('${widget.subject} · ${widget.form}'),
       content: SizedBox(
@@ -7152,75 +7105,6 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
                 border: OutlineInputBorder(),
               ),
             ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _marks,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'Marks',
-                    hintText: _heading?.marks,
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: TextField(
-                  controller: _time,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'Allowed time',
-                    hintText: _heading?.defaultTimeFor(widget.subject),
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-              ),
-            ]),
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Leave Marks / Allowed time empty to use the general values.',
-                  style: TextStyle(fontSize: 11, color: Colors.black54),
-                ),
-              ),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _addHeading,
-              onChanged: _busy
-                  ? null
-                  : (v) => setState(() => _addHeading = v ?? true),
-              title: const Text('Add exam heading table on the first page'),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _autoFormat,
-              onChanged: _busy
-                  ? null
-                  : (v) => setState(() => _autoFormat = v ?? true),
-              title: const Text(
-                  'Titles and questions bold, options (a, b, c, d) regular'),
-            ),
-            CheckboxListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              controlAffinity: ListTileControlAffinity.leading,
-              value: _numberQuestions,
-              onChanged: (_busy || !_autoFormat)
-                  ? null
-                  : (v) => setState(() => _numberQuestions = v ?? true),
-              title: const Text('Number the questions 1. 2. 3. in each part'),
-            ),
-            if (_addHeading && preview != null) _headingPreview(preview),
             const SizedBox(height: 16),
             // The assignments already uploaded for this button.
             StreamBuilder<List<AssignmentRecord>>(
@@ -11191,6 +11075,10 @@ class AppSettings {
   /// The signatures at the bottom of the report card (Settings > Results).
   final List<ReportSigner> reportSigners;
 
+  /// Hides "Don't have an account? Sign up" on the sign-in page (the value the
+  /// sign-in page reads is mirrored in public/login, see _setHideSignUp).
+  final bool hideSignUp;
+
   /// Finance: the text written before every amount (e.g. "USD").
   final String currency;
 
@@ -11232,6 +11120,7 @@ class AppSettings {
     this.subjectDates = const {},
     this.resultDays = 7,
     this.reportSigners = kDefaultSigners,
+    this.hideSignUp = false,
     this.currency = 'USD',
     this.monthlyFees = const {},
     this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
@@ -11446,6 +11335,7 @@ class AppSettings {
       resultDays: m['resultDays'] is num
           ? (m['resultDays'] as num).toInt().clamp(0, 365)
           : d.resultDays,
+      hideSignUp: m['hideSignUp'] is bool ? m['hideSignUp'] as bool : d.hideSignUp,
       reportSigners: m['reportSigners'] is List
           ? [
         for (final e in (m['reportSigners'] as List))
@@ -12432,6 +12322,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _save(
         {'rateGood': good, 'rateWarn': warn}, 'Attendance colours saved');
   }
+
+  /// Hides / shows the Sign up option. The sign-in page is shown before
+  /// anybody is signed in, so the value is also written to public/login,
+  /// which the Firestore rules must allow everyone to read.
+  Future<void> _setHideSignUp(bool hide) async {
+    final ok = await _save({'hideSignUp': hide},
+        hide ? 'Sign up is hidden on the sign-in page' : 'Sign up is shown on the sign-in page');
+    if (!ok) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('public')
+          .doc('login')
+          .set({'hideSignUp': hide}, SetOptions(merge: true));
+    } catch (e) {
+      _toast('Saved, but the sign-in page could not be updated ($e). '
+          'Allow reading and writing public/login in the Firestore rules.');
+    }
+  }
+
+  Widget _signUpCard(AppSettings s) => _card('Sign up', Icons.person_add_alt_1, [
+    SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: const Text('Hide "Sign up" on the sign-in page'),
+      subtitle: const Text(
+          'When on, the "Don\'t have an account? Sign up" option is not shown, '
+              'so nobody can start creating an account from the sign-in page. '
+              'People who already have an account sign in as usual.',
+          style: _hint),
+      value: s.hideSignUp,
+      onChanged: _busy ? null : _setHideSignUp,
+    ),
+  ]);
 
   Future<void> _saveSigners() async {
     await _save({
@@ -13660,6 +13582,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return <(String, List<Widget>)>[
         ('Users', <Widget>[const _PermissionsCard(part: 1)]),
         ('Default access', <Widget>[const _PermissionsCard(part: 2)]),
+        ('Sign up', <Widget>[_signUpCard(s)]),
       ];
     }
     if (id == 6) {
@@ -31972,9 +31895,13 @@ String? _error;
 
 // filters: the class (null = all classes) and how far each student is
 // entered (null = all students; entered | partial | none)
-String? _class;
+final Set<String> _sel = {}; // ticked classes (empty = all classes)
 String? _stuFilter;
 final Map<String, String> _stuState = {}; // student id -> entered|partial|none
+
+/// Only "Absent" (not New / Cheated): shown in grey, not red, so it is not
+/// mixed up with the empty marks.
+bool _isAbsOnly(String t) => t.trim().toLowerCase() == 'absent';
 
 /// The class of a student: a divided class's sections ("1A-A", "1A-B") all
 /// belong to the class "1A".
@@ -31992,7 +31919,7 @@ return seen;
 
 List<StudentInfo> get _inScope => [
 for (final s in widget.students)
-if (_class == null || _cls(s) == _class) s
+if (_sel.isEmpty || _sel.contains(_cls(s))) s
 ];
 
 List<StudentInfo> get _shown => [
@@ -32034,6 +31961,15 @@ return const Color(0xFFEF6C00);
 
 final scope = _inScope;
 int count(String st) => scope.where((s) => _stuState[s.id] == st).length;
+// empty marks (live): boxes without any mark in the shown classes
+var emptyMarks = 0;
+for (final s in scope) {
+final row = _c[s.id];
+if (row == null) continue;
+for (final sub in _subjects) {
+if ((row[sub]?.text ?? '').trim().isEmpty) emptyMarks++;
+}
+}
 final stats = <(String?, String, int)>[
 (null, 'All', scope.length),
 ('entered', 'Entered', count('entered')),
@@ -32049,17 +31985,24 @@ runSpacing: 4,
 crossAxisAlignment: WrapCrossAlignment.center,
 children: [
 const Text('Classes:', style: TextStyle(fontWeight: FontWeight.w700)),
-ChoiceChip(
+FilterChip(
+showCheckmark: true,
 label: Text('All classes ${classes.length}'),
-selected: _class == null,
-onSelected: (_) => setState(() => _class = null),
+selected: _sel.isEmpty,
+onSelected: (_) => setState(() => _sel.clear()),
 ),
 for (final c in classes)
-ChoiceChip(
-avatar: Icon(Icons.circle, size: 10, color: col(c)),
-label: Text(c.isEmpty ? 'No class' : c),
-selected: _class == c,
-onSelected: (_) => setState(() => _class = _class == c ? null : c),
+FilterChip(
+showCheckmark: true,
+label: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(Icons.circle, size: 10, color: col(c)),
+const SizedBox(width: 6),
+Text(c.isEmpty ? 'No class' : c),
+]),
+selected: _sel.contains(c),
+onSelected: (on) => setState(() {
+on ? _sel.add(c) : _sel.remove(c);
+}),
 ),
 ],
 ),
@@ -32069,13 +32012,35 @@ spacing: 8,
 runSpacing: 4,
 crossAxisAlignment: WrapCrossAlignment.center,
 children: [
-Text(_class == null ? 'All classes:' : '${_class!.isEmpty ? 'No class' : _class}:',
+Text(
+_sel.isEmpty
+? 'All classes:'
+    : _sel.length == 1
+? '${_sel.first.isEmpty ? 'No class' : _sel.first}:'
+    : '${_sel.length} classes:',
 style: const TextStyle(fontWeight: FontWeight.w700)),
 for (final f in stats)
 ChoiceChip(
 label: Text('${f.$2} ${f.$3}'),
 selected: _stuFilter == f.$1,
 onSelected: (_) => setState(() => _stuFilter = f.$1),
+),
+Container(
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+decoration: BoxDecoration(
+color: const Color(0xFFFDECEA),
+borderRadius: BorderRadius.circular(20),
+border: Border.all(color: const Color(0xFFC62828)),
+),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+const Icon(Icons.edit_off, size: 14, color: Color(0xFFC62828)),
+const SizedBox(width: 4),
+Text('Empty marks $emptyMarks',
+style: const TextStyle(
+fontSize: 13,
+fontWeight: FontWeight.w700,
+color: Color(0xFFC62828))),
+]),
 ),
 ],
 ),
@@ -32348,7 +32313,11 @@ canRequestFocus: !_isAbsentText(row[sub]!.text),
 textAlign: TextAlign.center,
 style: _isAbsentText(row[sub]!.text)
 ? TextStyle(
-color: isNewText(row[sub]!.text) ? kNewColor : kRed,
+color: isNewText(row[sub]!.text)
+? kNewColor
+    : _isAbsOnly(row[sub]!.text)
+? Colors.grey.shade700
+    : kRed,
 fontWeight: FontWeight.w700,
 fontSize: 13)
     : null,
@@ -32363,20 +32332,35 @@ RegExp(r'[0-9.]')),
 onChanged: (_) => setState(() => _error = null),
 decoration: InputDecoration(
 isDense: true,
-filled: _isAbsentText(row[sub]!.text),
+filled: _isAbsentText(row[sub]!.text) ||
+row[sub]!.text.trim().isEmpty,
 fillColor: isNewText(row[sub]!.text)
 ? const Color(0xFFE3F2FD)
+    : _isAbsOnly(row[sub]!.text)
+? const Color(0xFFEEEEEE)
     : const Color(0xFFFDECEA),
 border: const OutlineInputBorder(),
 enabledBorder: OutlineInputBorder(
 borderSide: BorderSide(
 color: isNewText(row[sub]!.text)
 ? kNewColor
+    : _isAbsOnly(row[sub]!.text)
+? Colors.grey.shade500
     : (_isBad(row[sub]!.text, s.id) ||
-_isAbsentText(row[sub]!.text))
+_isAbsentText(row[sub]!.text) ||
+row[sub]!.text.trim().isEmpty)
 ? Colors.red
     : Colors.grey.shade400,
 width: _isBad(row[sub]!.text, s.id) ? 2 : 1,
+),
+),
+// boxes that cannot be edited (closed subject)
+// are red too when they have no mark
+disabledBorder: OutlineInputBorder(
+borderSide: BorderSide(
+color: row[sub]!.text.trim().isEmpty
+? Colors.red
+    : Colors.grey.shade300,
 ),
 ),
 contentPadding: const EdgeInsets.symmetric(
@@ -33188,9 +33172,36 @@ final _subjects = <String>{}; // teacher: subjects taught
 final _forms = <String>{}; // teacher: forms taught
 String? _studentForm; // student: own form (optional)
 String? _error;
+bool _hideSignUp = false; // set by the administrator (Settings > Users)
+StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _loginSub;
+
+@override
+void initState() {
+super.initState();
+// public/login is readable before signing in; if it cannot be read the
+// Sign up option simply stays visible.
+try {
+_loginSub = FirebaseFirestore.instance
+    .collection('public')
+    .doc('login')
+    .snapshots()
+    .listen((d) {
+final hide = d.data()?['hideSignUp'] == true;
+if (!mounted) return;
+setState(() {
+_hideSignUp = hide;
+if (hide) {
+_signUp = false;
+_step = 0;
+}
+});
+}, onError: (_) {});
+} catch (_) {}
+}
 
 @override
 void dispose() {
+_loginSub?.cancel();
 _email.dispose();
 _password.dispose();
 _name.dispose();
@@ -33787,7 +33798,7 @@ child: CircularProgressIndicator(strokeWidth: 2))
     : (_step == 0 ? 'Next' : 'Create account')),
 ),
 ),
-if (!profileStep)
+if (!profileStep && !_hideSignUp)
 TextButton(
 onPressed: _busy
 ? null
