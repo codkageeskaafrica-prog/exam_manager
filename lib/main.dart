@@ -8857,7 +8857,7 @@ class HomeScreen extends StatelessWidget {
     _HomeItem(
       page: AppPages.attendance,
       title: 'Attendance',
-      subtitle: 'Mark daily attendance for a section',
+      subtitle: 'Mark exam attendance for a section',
       icon: Icons.fact_check,
       color: kGreen,
       builder: (_) => const AttendanceScreen(),
@@ -11239,6 +11239,11 @@ class AppSettings {
   /// hidden in Result for teachers and students. At least one exam stays open.
   final List<String> closedExams;
 
+  /// Exams whose ATTENDANCE was closed in Settings > Exams & results >
+  /// Attendance. Teachers cannot mark or change attendance of a closed exam
+  /// (administrators still can). Every exam is open until it is closed.
+  final List<String> attendanceClosedExams;
+
   /// The exam the administrator made active in Settings > Exams ("" = none
   /// chosen: the default current exam is used).
   final String activeExam;
@@ -11300,6 +11305,7 @@ class AppSettings {
     this.rateWarn = 75.0,
     this.exams = const [],
     this.closedExams = const [],
+    this.attendanceClosedExams = const [],
     this.activeExam = '',
     this.paperBaseExam = '',
     this.sectionSubjects = const [],
@@ -11413,6 +11419,9 @@ class AppSettings {
 
   bool isExamOpen(String e) => !closedExams.contains(e);
 
+  /// True when attendance may be marked for exam [e].
+  bool isAttendanceOpen(String e) => !attendanceClosedExams.contains(e);
+
   /// The exam date of [subject], or null when it was not set.
   /// Key of a subject's exam date in [subjectDates]: the exam dates are kept
   /// per exam (the base exam keeps the plain subject key).
@@ -11473,6 +11482,7 @@ class AppSettings {
     final ex = m['exams'];
     final ss = m['sectionSubjects'];
     final ce = m['closedExams'];
+    final ace = m['attendanceClosedExams'];
     final grades =
     g is List && g.length == gradeLetters.length && g.every((e) => e is num)
         ? [for (final e in g) (e as num).toDouble()]
@@ -11516,6 +11526,12 @@ class AppSettings {
           if (e is String) e,
       ]
           : d.closedExams,
+      attendanceClosedExams: ace is List
+          ? [
+        for (final e in ace)
+          if (e is String) e,
+      ]
+          : d.attendanceClosedExams,
       sectionSubjects: ss is List
           ? [
         for (final e in ss)
@@ -12618,6 +12634,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     ]),
   ]);
+
+  Future<void> _toggleExamAttendance(
+      AppSettings s, String exam, bool open) async {
+    final closed = {...s.attendanceClosedExams};
+    open ? closed.remove(exam) : closed.add(exam);
+    await _save({
+      'attendanceClosedExams': [
+        for (final e in s.examOptions)
+          if (closed.contains(e)) e
+      ]
+    }, open ? 'Attendance of "$exam" opened' : 'Attendance of "$exam" closed');
+  }
+
+  Widget _examAttendanceCard(AppSettings s) =>
+      _card('Exam attendance', Icons.fact_check, [
+        const Text(
+            'Attendance is taken for each exam. Switch an exam on to open its '
+                'attendance: teachers can then mark it. Switch it off to close '
+                'it: teachers can still look at it but cannot change it. '
+                'Every exam is open until you close it.',
+            style: _hint),
+        const SizedBox(height: 6),
+        for (final e in s.examOptions)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(e),
+            subtitle: Text(s.isAttendanceOpen(e) ? 'Open' : 'Closed'),
+            value: s.isAttendanceOpen(e),
+            onChanged:
+            _busy ? null : (v) => _toggleExamAttendance(s, e, v),
+          ),
+      ]);
 
   Future<void> _saveSigners() async {
     await _save({
@@ -13829,6 +13877,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return <(String, List<Widget>)>[
         ('Exams', <Widget>[_examsCard(s)]),
         ('Grades & rules', <Widget>[_resultsCard(), _signersCard(), const _ReturnDaysCard()]),
+        ('Attendance', <Widget>[_examAttendanceCard(s)]),
         ('Upload', <Widget>[_uploadCard(s)]),
       ];
     }
@@ -15972,9 +16021,22 @@ static String formOf(StudentInfo s) => sectionFormById[s.sectionId] ?? '';
 static String subjectKey(String subject) =>
 subject.trim().replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
 
-String _attId(String sectionId, String dateKey, [String subject = '']) {
+/// Attendance is kept PER EXAM. Registers saved before this existed belong
+/// to AppSettings.paperBaseExam and keep their old id; the other exams use
+/// their own ids (and an `exam` field) so they never mix.
+static String _examIdKey(String exam) {
+final base = appSettings.value.paperBaseExam;
+if (exam.isEmpty || base.isEmpty || exam == base) return '';
+return subjectKey(exam);
+}
+
+String _attId(String sectionId, String dateKey,
+[String subject = '', String exam = '']) {
 final k = subjectKey(subject);
-return k.isEmpty ? '${sectionId}_$dateKey' : '${sectionId}_${dateKey}_$k';
+final e = _examIdKey(exam);
+final id =
+k.isEmpty ? '${sectionId}_$dateKey' : '${sectionId}_${dateKey}_$k';
+return e.isEmpty ? id : '${id}__$e';
 }
 
 static Map<String, String> _recordsOf(Object? r) =>
@@ -15982,24 +16044,29 @@ r is Map ? r.map((k, v) => MapEntry('$k', '$v')) : <String, String>{};
 
 /// studentId -> 'present' | 'absent' | 'late'
 Future<Map<String, String>> getAttendance(String sectionId, String dateKey,
-{String subject = ''}) async {
-final d = await _attendance.doc(_attId(sectionId, dateKey, subject)).get();
+{String subject = '', String exam = ''}) async {
+final d =
+await _attendance.doc(_attId(sectionId, dateKey, subject, exam)).get();
 return _recordsOf(d.data()?['records']);
 }
 
 /// studentId -> note written for an absent student ('' = none).
 Future<Map<String, String>> getAttendanceNotes(
 String sectionId, String dateKey,
-{String subject = ''}) async {
-final d = await _attendance.doc(_attId(sectionId, dateKey, subject)).get();
+{String subject = '', String exam = ''}) async {
+final d =
+await _attendance.doc(_attId(sectionId, dateKey, subject, exam)).get();
 return _recordsOf(d.data()?['notes']);
 }
 
 Future<void> saveAttendance(
 String sectionId, String dateKey, Map<String, String> records,
-{String subject = '', Map<String, String> notes = const {}}) {
-return _attendance.doc(_attId(sectionId, dateKey, subject)).set({
+{String subject = '',
+String exam = '',
+Map<String, String> notes = const {}}) {
+return _attendance.doc(_attId(sectionId, dateKey, subject, exam)).set({
 'sectionId': sectionId,
+'exam': exam,
 'date': dateKey,
 'subject': subject.trim(),
 'records': records,
@@ -24079,6 +24146,13 @@ State<AttendanceScreen> createState() => _AttendanceScreenState();
 class _AttendanceScreenState extends State<AttendanceScreen> {
 final _service = SchoolService();
 String? _sectionId;
+// The exam the attendance belongs to (starts on the current exam).
+late String _exam = appSettings.value.currentExam;
+
+/// Administrators (not restricted teachers) may still edit a closed exam.
+bool get _canEdit =>
+appSettings.value.isAttendanceOpen(_exam) ||
+!teacherScope.value.restricted;
 // Selected subjects. Empty = "All subjects" (whole-day register).
 // One or more subjects = the same marks are saved for each of them.
 final Set<String> _subjects = {};
@@ -24118,8 +24192,10 @@ final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
 final merged = <String, String>{};
 final mergedNotes = <String, String>{};
 for (final k in keys) {
-final m = await _service.getAttendance(id, _dateKey, subject: k);
-final n = await _service.getAttendanceNotes(id, _dateKey, subject: k);
+final m = await _service.getAttendance(id, _dateKey,
+subject: k, exam: _exam);
+final n = await _service.getAttendanceNotes(id, _dateKey,
+subject: k, exam: _exam);
 for (final e in m.entries) {
 if (merged[e.key] == 'absent') continue;
 merged[e.key] = e.value;
@@ -24207,6 +24283,11 @@ _dirty = true;
 Future<void> _save(List<StudentInfo> students) async {
 final id = _sectionId;
 if (id == null) return;
+if (!_canEdit) {
+ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+content: Text('Attendance of "$_exam" is closed.')));
+return;
+}
 setState(() => _saving = true);
 final messenger = ScaffoldMessenger.of(context);
 try {
@@ -24223,7 +24304,7 @@ s.id: _notes[s.id]!.trim(),
 final keys = _subjects.isEmpty ? <String>[''] : _subjectOrder;
 for (final k in keys) {
 await _service.saveAttendance(id, _dateKey, records,
-subject: k, notes: notes);
+subject: k, exam: _exam, notes: notes);
 }
 if (!mounted) return;
 setState(() {
@@ -24305,6 +24386,41 @@ AttendanceReportScreen(sectionId: _sectionId, date: _date),
 Widget _controls() => Padding(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
 child: Column(children: [
+ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) {
+final exams = st.examOptions;
+final value = exams.contains(_exam) ? _exam : null;
+return Padding(
+padding: const EdgeInsets.only(bottom: 10),
+child: DropdownButtonFormField<String>(
+value: value,
+isExpanded: true,
+decoration: const InputDecoration(
+labelText: 'Exam',
+border: OutlineInputBorder(),
+isDense: true,
+prefixIcon: Icon(Icons.event_note, size: 20),
+),
+items: [
+for (final e in exams)
+DropdownMenuItem(
+value: e,
+child: Text(
+st.isAttendanceOpen(e) ? e : '$e (closed)',
+overflow: TextOverflow.ellipsis),
+),
+],
+onChanged: (v) async {
+if (v == null || v == _exam) return;
+if (!await _okToLeave() || !mounted) return;
+setState(() => _exam = v);
+_load();
+},
+),
+);
+},
+),
 Row(children: [
 Expanded(
 flex: 5,
@@ -24411,7 +24527,7 @@ return Tooltip(
 message: label,
 child: InkWell(
 borderRadius: BorderRadius.circular(10),
-onTap: _saving
+onTap: (_saving || !_canEdit)
 ? null
     : () => setState(() {
 if (selected) {
@@ -24617,7 +24733,8 @@ padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
 child: SizedBox(
 width: double.infinity,
 child: FilledButton.icon(
-onPressed: (_saving || _loading) ? null : () => _save(students),
+onPressed:
+(_saving || _loading || !_canEdit) ? null : () => _save(students),
 icon: _saving
 ? const SizedBox(
 width: 16,
@@ -24675,6 +24792,33 @@ child: ConstrainedBox(
 constraints: const BoxConstraints(maxWidth: 720),
 child: Column(children: [
 _controls(),
+ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) => st.isAttendanceOpen(_exam)
+? const SizedBox.shrink()
+    : Container(
+width: double.infinity,
+margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+padding: const EdgeInsets.all(10),
+decoration: BoxDecoration(
+color: const Color(0xFFFFF4E5),
+borderRadius: BorderRadius.circular(10),
+border: Border.all(color: const Color(0xFFFFD699)),
+),
+child: Row(children: [
+const Icon(Icons.lock_outline,
+size: 18, color: Color(0xFFB26A00)),
+const SizedBox(width: 8),
+Expanded(
+child: Text(
+'Attendance of "$_exam" is closed. You can look at '
+'it but not change it.',
+style: const TextStyle(
+fontSize: 13, color: Color(0xFF8A5300))),
+),
+]),
+),
+),
 Expanded(child: body),
 ]),
 ),
