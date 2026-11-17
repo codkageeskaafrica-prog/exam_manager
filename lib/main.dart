@@ -5547,8 +5547,10 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('"$exam" is opened for teachers and students and the other '
-                  'exams are closed. The Exam Manager table (papers received, '
-                  'exam dates) is kept separately for each exam.'),
+                  'exams are closed. Attendance of "$exam" is opened too, and '
+                  'attendance of the other exams is closed. The Exam Manager '
+                  'table (papers received, exam dates) is kept separately for '
+                  'each exam.'),
               if (needBase) ...[
                 const SizedBox(height: 14),
                 const Text('The papers saved in Exam Manager so far belong to:',
@@ -5580,10 +5582,15 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
     await appSettings.update({
       'activeExam': exam,
       'closedExams': [for (final e in s.examOptions) if (e != exam) e],
+      // Attendance follows the exam: the active exam's attendance is opened,
+      // the other exams' attendance is closed (same rule as the exams).
+      'attendanceClosedExams': [
+        for (final e in s.examOptions) if (e != exam) e
+      ],
       if (needBase) 'paperBaseExam': base,
     });
-    messenger.showSnackBar(
-        SnackBar(content: Text('"$exam" is now the active exam')));
+    messenger.showSnackBar(SnackBar(
+        content: Text('"$exam" is now the active exam (attendance open)')));
   } catch (e) {
     messenger.showSnackBar(SnackBar(
         content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
