@@ -5537,6 +5537,8 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
   final messenger = ScaffoldMessenger.of(context);
   final needBase = s.paperBaseExam.isEmpty && exam != s.currentExam;
   var base = s.currentExam;
+  // forms hidden from students for this exam (all released by default)
+  final closedForms = <String>{...s.closedFormsOf(exam)};
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => StatefulBuilder(
@@ -5551,6 +5553,17 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
                   'attendance of the other exams is closed. The Exam Manager '
                   'table (papers received, exam dates) is kept separately for '
                   'each exam.'),
+              const SizedBox(height: 14),
+              _FormReleasePicker(
+                closed: closedForms,
+                onToggle: (f, on) =>
+                    setD(() => on ? closedForms.remove(f) : closedForms.add(f)),
+                onSet: (c) => setD(() {
+                  closedForms
+                    ..clear()
+                    ..addAll(c);
+                }),
+              ),
               if (needBase) ...[
                 const SizedBox(height: 14),
                 const Text('The papers saved in Exam Manager so far belong to:',
@@ -5587,6 +5600,12 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
       'attendanceClosedExams': [
         for (final e in s.examOptions) if (e != exam) e
       ],
+      'examFormsClosed': {
+        SchoolService.subjectKey(exam): [
+          for (final f in ExamService.forms)
+            if (closedForms.contains(f)) f
+        ],
+      },
       if (needBase) 'paperBaseExam': base,
     });
     messenger.showSnackBar(SnackBar(
@@ -5594,6 +5613,128 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
   } catch (e) {
     messenger.showSnackBar(SnackBar(
         content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+  }
+}
+
+/// Chips to choose which forms are released to the student users (results
+/// and attendance). Ticked = released, unticked = hidden from that form.
+class _FormReleasePicker extends StatelessWidget {
+  final Set<String> closed;
+  final void Function(String form, bool released) onToggle;
+  // replaces the whole closed set at once (quick buttons)
+  final void Function(Set<String> closed) onSet;
+  const _FormReleasePicker(
+      {required this.closed, required this.onToggle, required this.onSet});
+
+  @override
+  Widget build(BuildContext context) {
+    final forms = ExamService.forms;
+    return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Release to students (results and attendance):',
+              style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          const Text(
+              'Ticked forms can see this exam online. Untick a form to hide '
+                  'the results and attendance from its students.',
+              style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 6, children: [
+            for (final f in forms)
+              FilterChip(
+                label: Text(f),
+                selected: !closed.contains(f),
+                onSelected: (v) => onToggle(f, v),
+              ),
+          ]),
+          const SizedBox(height: 10),
+          const Text('Quick choice:',
+              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Wrap(spacing: 8, runSpacing: 6, children: [
+            ActionChip(
+              avatar: const Icon(Icons.lock_open, size: 16),
+              label: const Text('Open all'),
+              onPressed: () => onSet(<String>{}),
+            ),
+            ActionChip(
+              avatar: const Icon(Icons.lock, size: 16),
+              label: const Text('Close all'),
+              onPressed: () => onSet({...forms}),
+            ),
+            for (final f in forms)
+              ActionChip(
+                label: Text('Only $f'),
+                onPressed: () =>
+                    onSet({for (final g in forms) if (g != f) g}),
+              ),
+          ]),
+        ]);
+  }
+}
+
+/// Lets the administrator choose which forms see [exam] (results and
+/// attendance) on their student accounts, without switching the active exam.
+Future<void> editReleasedForms(BuildContext context, String exam) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final closed = <String>{...appSettings.value.closedFormsOf(exam)};
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: Text('Forms released for "$exam"'),
+        content: _FormReleasePicker(
+          closed: closed,
+          onToggle: (f, on) =>
+              setD(() => on ? closed.remove(f) : closed.add(f)),
+          onSet: (c) => setD(() {
+            closed
+              ..clear()
+              ..addAll(c);
+          }),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save')),
+        ],
+      ),
+    ),
+  );
+  if (ok != true) return;
+  try {
+    await appSettings.update({
+      'examFormsClosed': {
+        SchoolService.subjectKey(exam): [
+          for (final f in ExamService.forms)
+            if (closed.contains(f)) f
+        ],
+      },
+    });
+    messenger.showSnackBar(
+        SnackBar(content: Text('Forms released for "$exam" saved')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+  }
+}
+
+/// The form (Form1...) of a student, from the student's section ('' unknown).
+Future<String> _studentFormOf(String studentId) async {
+  try {
+    final db = FirebaseFirestore.instance;
+    final st = await db.collection('students').doc(studentId).get();
+    final sid = '${st.data()?['sectionId'] ?? ''}';
+    if (sid.isEmpty) return '';
+    final sec = await db.collection('sections').doc(sid).get();
+    return sec.exists ? SectionInfo.fromDoc(sec).form : '';
+  } catch (_) {
+    return '';
   }
 }
 
@@ -11251,6 +11392,11 @@ class AppSettings {
   /// (administrators still can). Every exam is open until it is closed.
   final List<String> attendanceClosedExams;
 
+  /// Forms hidden from STUDENT users for an exam: results and attendance of
+  /// that exam are not released to the students of those forms. Keyed by
+  /// SchoolService.subjectKey(exam). Every form is released until closed.
+  final Map<String, List<String>> examFormsClosed;
+
   /// The exam the administrator made active in Settings > Exams ("" = none
   /// chosen: the default current exam is used).
   final String activeExam;
@@ -11313,6 +11459,7 @@ class AppSettings {
     this.exams = const [],
     this.closedExams = const [],
     this.attendanceClosedExams = const [],
+    this.examFormsClosed = const {},
     this.activeExam = '',
     this.paperBaseExam = '',
     this.sectionSubjects = const [],
@@ -11429,6 +11576,21 @@ class AppSettings {
   /// True when attendance may be marked for exam [e].
   bool isAttendanceOpen(String e) => !attendanceClosedExams.contains(e);
 
+  /// The forms NOT released to students for exam [e].
+  List<String> closedFormsOf(String e) =>
+      examFormsClosed[SchoolService.subjectKey(e)] ?? const [];
+
+  /// True when students of [form] may see the results and attendance of
+  /// exam [e]. An unknown form ('') is never hidden.
+  bool isFormReleased(String e, String form) =>
+      form.isEmpty || !closedFormsOf(e).contains(form);
+
+  /// '\nNot released: Form1, Form3' (empty when every form is released).
+  String closedFormsLine(String e) {
+    final c = [for (final f in ExamService.forms) if (closedFormsOf(e).contains(f)) f];
+    return c.isEmpty ? '' : '\nNot released to students: ${c.join(', ')}';
+  }
+
   /// The exam date of [subject], or null when it was not set.
   /// Key of a subject's exam date in [subjectDates]: the exam dates are kept
   /// per exam (the base exam keeps the plain subject key).
@@ -11490,6 +11652,7 @@ class AppSettings {
     final ss = m['sectionSubjects'];
     final ce = m['closedExams'];
     final ace = m['attendanceClosedExams'];
+    final efc = m['examFormsClosed'];
     final grades =
     g is List && g.length == gradeLetters.length && g.every((e) => e is num)
         ? [for (final e in g) (e as num).toDouble()]
@@ -11539,6 +11702,16 @@ class AppSettings {
           if (e is String) e,
       ]
           : d.attendanceClosedExams,
+      examFormsClosed: efc is Map
+          ? {
+        for (final e in efc.entries)
+          if (e.value is List)
+            '${e.key}': [
+              for (final f in (e.value as List))
+                if (f is String) f,
+            ],
+      }
+          : d.examFormsClosed,
       sectionSubjects: ss is List
           ? [
         for (final e in ss)
@@ -13692,7 +13865,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           subtitle: Text(
               '${e == s.currentExam ? 'ACTIVE - ' : ''}'
                   '${s.isExamOpen(e) ? 'Open' : 'Closed'}\n'
-                  '${s.limitsSummary(e)}'),
+                  '${s.limitsSummary(e)}'
+                  '${s.closedFormsLine(e)}'),
           isThreeLine: true,
           secondary: Row(mainAxisSize: MainAxisSize.min, children: [
             if (e == s.currentExam)
@@ -13709,6 +13883,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onPressed: _busy ? null : () => _makeActive(s, e),
                 child: const Text('Make active'),
               ),
+            IconButton(
+              tooltip: 'Forms released to students',
+              icon: const Icon(Icons.groups_outlined),
+              onPressed: _busy ? null : () => editReleasedForms(context, e),
+            ),
             IconButton(
               tooltip: 'Mark limits',
               icon: const Icon(Icons.tune),
@@ -18820,8 +18999,10 @@ State<_StudentResultsBody> createState() => _StudentResultsBodyState();
 
 class _StudentResultsBodyState extends State<_StudentResultsBody> {
 late Future<Map<String, ResultMarks>> _f = _load();
+String _form = ''; // the student's form (to know what is released)
 
 Future<Map<String, ResultMarks>> _load() async {
+_form = await _studentFormOf(widget.studentId);
 final col = FirebaseFirestore.instance.collection('results');
 // also the marks entered on this student's twin record (class <-> section)
 final twin = (await ResultService().twinMap())[widget.studentId];
@@ -18844,6 +19025,14 @@ for (final e in byExam.entries) e.key: ResultMarks(ResultService._merge(e.value)
 
 @override
 Widget build(BuildContext context) {
+// Rebuilds when the admin changes what is open / released in Settings.
+return ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) => _buildBody(),
+);
+}
+
+Widget _buildBody() {
 return FutureBuilder<Map<String, ResultMarks>>(
 future: _f,
 builder: (context, snap) {
@@ -18864,7 +19053,9 @@ if (e.isNotEmpty && data[e]!.marks.isNotEmpty) e,
 ];
 final exams = [
 for (final e in withMarks)
-if (appSettings.value.isExamOpen(e)) e,
+if (appSettings.value.isExamOpen(e) &&
+appSettings.value.isFormReleased(e, _form))
+e,
 ]..sort((a, b) {
 int i(String x) {
 final k = order.indexOf(x);
@@ -18889,7 +19080,7 @@ padding: const EdgeInsets.all(24),
 child: Center(
 child: Text(
 closedCount > 0
-? 'Your results are not open yet.\nThe administrator has not opened this exam.'
+? 'Your results are not released yet.\nThe administrator has not opened them for your form.'
     : 'No results published yet.',
 textAlign: TextAlign.center)),
 ),
@@ -19250,7 +19441,12 @@ class _StudentAttendanceBodyState extends State<_StudentAttendanceBody> {
 late Future<List<_AttEntry>> _f = _load();
 String _filter = 'all';
 
-Future<List<_AttEntry>> _load() => _loadAttendanceOf(widget.studentId);
+String _form = ''; // the student's form (to know what is released)
+
+Future<List<_AttEntry>> _load() async {
+_form = await _studentFormOf(widget.studentId);
+return _loadAttendanceOf(widget.studentId);
+}
 
 DateTime? _parse(String k) {
 try {
@@ -19281,9 +19477,11 @@ if (!snap.hasData) {
 return const Center(child: CircularProgressIndicator());
 }
 // A student only sees the attendance of the active exam.
+// ... and only when the exam is released to the student's form.
+final released = appSettings.value.isFormReleased(activeExam, _form);
 final all = [
 for (final e in snap.data!)
-if (e.belongsToExam(activeExam)) e,
+if (released && e.belongsToExam(activeExam)) e,
 ];
 final t = _Tally();
 var late = 0;
@@ -19396,8 +19594,10 @@ if (rows.isEmpty)
 Padding(
 padding: const EdgeInsets.all(24),
 child: Center(
-child: Text(
-'No attendance records for "$activeExam".')),
+child: Text(released
+? 'No attendance records for "$activeExam".'
+    : 'Attendance of "$activeExam" is not '
+'released to your class yet.')),
 ),
 ...rows,
 ]),
