@@ -6758,9 +6758,9 @@ class _AssignmentCell extends StatelessWidget {
                 subject: subject, form: form, service: service),
           ),
           icon: Icon(has ? Icons.check : Icons.upload_file, size: 16),
-          label: Text(has
-              ? '${items.length} assignment${items.length == 1 ? '' : 's'}'
-              : 'Pending'),
+          // Shows how many assignments were uploaded (0 when none yet).
+          label: Text(
+              '${items.length} assignment${items.length == 1 ? '' : 's'}'),
           style: ElevatedButton.styleFrom(
             backgroundColor: has ? kGreen : kRed,
             foregroundColor: Colors.white,
