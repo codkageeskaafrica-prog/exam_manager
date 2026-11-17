@@ -5678,30 +5678,32 @@ class ExamTableScreen extends StatelessWidget {
         title: const Text('Exam Manager'),
         actions: [
           const AccountBadge(),
-          _DownloadAllButton(service: service),
-          _UploadAllButton(service: service),
-          if (!teacherScope.value.scoped)
+          // Hidden for teacher (and student) accounts.
+          if (!teacherScope.value.scoped) ...[
+            _DownloadAllButton(service: service),
+            _UploadAllButton(service: service),
             IconButton(
               tooltip: 'Remind the teachers of pending exams',
               icon: const Icon(Icons.notifications_active_outlined),
               onPressed: () => _remindPending(context, service),
             ),
-          IconButton(
-            tooltip: 'School letterhead (general header)',
-            icon: const Icon(Icons.image),
-            onPressed: () => showDialog(
-              context: context,
-              builder: (_) => LetterheadDialog(service: service),
+            IconButton(
+              tooltip: 'School letterhead (general header)',
+              icon: const Icon(Icons.image),
+              onPressed: () => showDialog(
+                context: context,
+                builder: (_) => LetterheadDialog(service: service),
+              ),
             ),
-          ),
-          IconButton(
-            tooltip: 'Exam heading (general)',
-            icon: const Icon(Icons.edit_note),
-            onPressed: () => showDialog(
-              context: context,
-              builder: (_) => ExamHeadingDialog(service: service),
+            IconButton(
+              tooltip: 'Exam heading (general)',
+              icon: const Icon(Icons.edit_note),
+              onPressed: () => showDialog(
+                context: context,
+                builder: (_) => ExamHeadingDialog(service: service),
+              ),
             ),
-          ),
+          ],
           IconButton(
             tooltip: 'Change password',
             icon: const Icon(Icons.lock_reset),
@@ -6709,15 +6711,18 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
                 : const Icon(Icons.print),
             onPressed: _printing ? null : _printReport,
           ),
-          _AssignmentDownloadAll(service: _service),
-          IconButton(
-            tooltip: 'School letterhead (general header)',
-            icon: const Icon(Icons.image),
-            onPressed: () => showDialog(
-              context: context,
-              builder: (_) => LetterheadDialog(service: _service.exams),
+          // Download-all and letterhead are hidden for teacher accounts.
+          if (!teacherScope.value.scoped) ...[
+            _AssignmentDownloadAll(service: _service),
+            IconButton(
+              tooltip: 'School letterhead (general header)',
+              icon: const Icon(Icons.image),
+              onPressed: () => showDialog(
+                context: context,
+                builder: (_) => LetterheadDialog(service: _service.exams),
+              ),
             ),
-          ),
+          ],
           const SizedBox(width: 8),
         ],
       ),
