@@ -6594,9 +6594,104 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
   late final Stream<Map<String, AssignmentDetails>> _detailsStream =
   _service.watchDetails();
   Map<String, AssignmentDetails> _details = const {};
+  Map<String, List<AssignmentRecord>> _lastData = const {};
+  TeacherScope? _lastScope;
+  bool _printing = false;
 
   static const _headStyle =
   TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16);
+
+  /// Prints a report of how many assignments were received per subject/form.
+  Future<void> _printReport() async {
+    final sc = _lastScope;
+    if (sc == null || _printing) return;
+    setState(() => _printing = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final letterhead = await _service.exams.getLetterhead();
+      final head = letterhead == null ? null : pw.MemoryImage(letterhead);
+      int count(String s, String f) =>
+          (_lastData[AssignmentRecord.keyFor(s, f)] ?? const []).length;
+      final forms = sc.formList;
+      final rowsData = <List<String>>[];
+      final colTotals = List<int>.filled(forms.length, 0);
+      var grand = 0;
+      for (final s in sc.subjectList) {
+        var rowTotal = 0;
+        final cells = <String>[s];
+        for (var i = 0; i < forms.length; i++) {
+          if (!sc.allows(s, forms[i])) {
+            cells.add('-');
+            continue;
+          }
+          final n = count(s, forms[i]);
+          rowTotal += n;
+          colTotals[i] += n;
+          cells.add('$n');
+        }
+        grand += rowTotal;
+        cells.add('$rowTotal');
+        rowsData.add(cells);
+      }
+      rowsData.add([
+        'Total',
+        for (final t in colTotals) '$t',
+        '$grand',
+      ]);
+      final doc = pw.Document();
+      doc.addPage(pw.MultiPage(
+        pageTheme: pw.PageTheme(
+            pageFormat: PdfPageFormat.a4,
+            margin: const pw.EdgeInsets.symmetric(horizontal: 28, vertical: 28)),
+        build: (_) => [
+          if (head != null)
+            pw.Image(head, width: double.infinity, fit: pw.BoxFit.fitWidth),
+          pw.SizedBox(height: 12),
+          pw.Center(
+            child: pw.Text('ASSIGNMENTS RECEIVED',
+                style: pw.TextStyle(
+                    fontSize: 18, fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text(
+                'Date: ${DateFormat('dd/MM/yyyy').format(DateTime.now())}',
+                style: const pw.TextStyle(fontSize: 11)),
+          ),
+          pw.SizedBox(height: 14),
+          pw.TableHelper.fromTextArray(
+            headers: ['Subject', ...forms, 'Total'],
+            data: rowsData,
+            border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.6),
+            headerStyle: pw.TextStyle(
+                color: PdfColors.white,
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 12),
+            headerDecoration:
+            const pw.BoxDecoration(color: PdfColors.blue700),
+            cellStyle: const pw.TextStyle(fontSize: 12),
+            cellHeight: 26,
+            cellAlignments: {
+              0: pw.Alignment.centerLeft,
+              for (var i = 1; i <= forms.length + 1; i++)
+                i: pw.Alignment.center,
+            },
+            oddRowDecoration:
+            const pw.BoxDecoration(color: PdfColors.grey200),
+          ),
+        ],
+      ));
+      final bytes = await doc.save();
+      if (mounted) setState(() => _printing = false);
+      await Printing.layoutPdf(
+          name: 'Assignments-received', onLayout: (_) async => bytes);
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => _printing = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -6604,6 +6699,16 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
       appBar: AppBar(
         title: const Text('Assignments'),
         actions: [
+          IconButton(
+            tooltip: 'Print assignments received',
+            icon: _printing
+                ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.print),
+            onPressed: _printing ? null : _printReport,
+          ),
           _AssignmentDownloadAll(service: _service),
           IconButton(
             tooltip: 'School letterhead (general header)',
@@ -6630,9 +6735,11 @@ class _AssignmentScreenState extends State<AssignmentScreen> {
                 return const Center(child: CircularProgressIndicator());
               }
               final data = snap.data!;
+              _lastData = data;
               return ValueListenableBuilder<TeacherScope>(
                 valueListenable: teacherScope,
                 builder: (context, sc, _) {
+                  _lastScope = sc;
                   if (sc.subjectList.isEmpty || sc.formList.isEmpty) {
                     return const Center(
                       child: Padding(
@@ -6760,24 +6867,55 @@ class _AssignmentCell extends StatelessWidget {
               style: const TextStyle(fontSize: 12, color: Colors.black54),
             ),
           ),
-        // The button IS the upload button; it opens the list of assignments.
-        ElevatedButton.icon(
-          onPressed: () => showDialog(
-            context: context,
-            builder: (_) => AssignmentDialog(
-                subject: subject, form: form, service: service),
-          ),
-          icon: Icon(has ? Icons.check : Icons.upload_file, size: 16),
-          // Shows how many assignments were uploaded (0 when none yet).
-          label: Text(
-              '${items.length} assignment${items.length == 1 ? '' : 's'}'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: has ? kGreen : kRed,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            minimumSize: const Size(0, 34),
-            shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        // The pill IS the upload button; it opens the list of assignments.
+        // The round badge shows how many assignments were received.
+        Material(
+          color: has ? const Color(0xFFE8F8EF) : const Color(0xFFFDECEA),
+          shape: StadiumBorder(
+              side: BorderSide(color: has ? kGreen : kRed, width: 1.2)),
+          child: InkWell(
+            customBorder: const StadiumBorder(),
+            onTap: () => showDialog(
+              context: context,
+              builder: (_) => AssignmentDialog(
+                  subject: subject, form: form, service: service),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(5, 5, 12, 5),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  constraints:
+                  const BoxConstraints(minWidth: 26, minHeight: 26),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  decoration: BoxDecoration(
+                    color: has ? kGreen : kRed,
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text('${items.length}',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14)),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  items.length == 1 ? 'Assignment' : 'Assignments',
+                  style: TextStyle(
+                      color: has
+                          ? const Color(0xFF1E8449)
+                          : const Color(0xFFB03A2E),
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13),
+                ),
+                const SizedBox(width: 6),
+                Icon(has ? Icons.add_circle_outline : Icons.upload_file,
+                    size: 16,
+                    color: has
+                        ? const Color(0xFF1E8449)
+                        : const Color(0xFFB03A2E)),
+              ]),
+            ),
           ),
         ),
       ],
