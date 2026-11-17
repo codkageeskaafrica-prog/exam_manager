@@ -4869,6 +4869,13 @@ class LogoDialog extends StatefulWidget {
 class _LogoDialogState extends State<LogoDialog> {
   bool _busy = false;
 
+  @override
+  void initState() {
+    super.initState();
+    // keeps the sign-in page's copy of an already saved logo up to date
+    if (schoolLogo.value.bytes != null) schoolLogo.mirrorToLogin();
+  }
+
   Future<void> _run(Future<void> Function() job, [String? okMsg]) async {
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _busy = true);
@@ -10799,6 +10806,22 @@ class SchoolLogoController extends ValueNotifier<SchoolLogo> {
         throw Exception('Saving timed out. Check the internet connection.');
       });
 
+  /// The sign-in page is shown before anybody is signed in, so it cannot read
+  /// settings/logo. A copy of the image is kept in public/login (the same
+  /// document as hideSignUp and appName). Failures are ignored: the logo is
+  /// still saved, it just will not show on the sign-in page.
+  Future<void> mirrorToLogin([Uint8List? png]) async {
+    final bytes = png ?? value.bytes;
+    try {
+      await FirebaseFirestore.instance.collection('public').doc('login').set({
+        'logoBase64':
+        bytes == null ? FieldValue.delete() : base64Encode(bytes),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('Sign-in page logo could not be saved: $e');
+    }
+  }
+
   /// Stores a new logo (any PNG / JPG; it is saved as a PNG).
   Future<void> setImage(Uint8List picked) async {
     if (picked.length > 1024 * 1024) {
@@ -10820,13 +10843,17 @@ class SchoolLogoController extends ValueNotifier<SchoolLogo> {
       'w': info.w,
       'h': info.h,
     });
+    await mirrorToLogin(info.png);
   }
 
-  Future<void> removeImage() => update({
-    'logoBase64': FieldValue.delete(),
-    'w': FieldValue.delete(),
-    'h': FieldValue.delete(),
-  });
+  Future<void> removeImage() async {
+    await update({
+      'logoBase64': FieldValue.delete(),
+      'w': FieldValue.delete(),
+      'h': FieldValue.delete(),
+    });
+    await mirrorToLogin(null);
+  }
 }
 
 final schoolLogo = SchoolLogoController();
@@ -33424,6 +33451,12 @@ _loginSub = FirebaseFirestore.instance
     .snapshots()
     .listen((d) {
 final hide = d.data()?['hideSignUp'] == true;
+final lb = d.data()?['logoBase64'];
+if (lb is String && lb.isNotEmpty && schoolLogo.value.bytes == null) {
+try {
+schoolLogo.value = SchoolLogo(bytes: base64Decode(lb));
+} catch (_) {}
+}
 final n = d.data()?['appName'];
 if (n is String && n.trim().isNotEmpty) {
 appName.value = n.trim();
@@ -33956,8 +33989,6 @@ child: Column(mainAxisSize: MainAxisSize.min, children: [
 AppLogo(
 place: LogoPlace.login,
 height: profileStep ? 80 : 110,
-fallback: const Icon(Icons.school,
-size: 48, color: Color(0xFF3498DB)),
 ),
 const SizedBox(height: 8),
 ValueListenableBuilder<String>(
