@@ -33416,6 +33416,39 @@ style: const TextStyle(color: Colors.red, fontSize: 16)),
 }
 }
 
+/// Shown at the top of the sign-in page when no school logo is available:
+/// a round gradient badge with a soft glow and a lock-person icon.
+class _LoginBadge extends StatelessWidget {
+final double size;
+const _LoginBadge({required this.size});
+
+@override
+Widget build(BuildContext context) {
+return Container(
+width: size,
+height: size,
+decoration: BoxDecoration(
+shape: BoxShape.circle,
+gradient: const LinearGradient(
+begin: Alignment.topLeft,
+end: Alignment.bottomRight,
+colors: [Color(0xFF5DADE2), Color(0xFF2E6A92)],
+),
+boxShadow: [
+BoxShadow(
+color: const Color(0xFF2E6A92).withOpacity(0.35),
+blurRadius: 18,
+offset: const Offset(0, 8),
+),
+],
+border: Border.all(color: Colors.white, width: 3),
+),
+child: Icon(Icons.lock_person_rounded,
+size: size * 0.52, color: Colors.white),
+);
+}
+}
+
 class LoginScreen extends StatefulWidget {
 const LoginScreen({super.key});
 @override
@@ -33989,6 +34022,7 @@ child: Column(mainAxisSize: MainAxisSize.min, children: [
 AppLogo(
 place: LogoPlace.login,
 height: profileStep ? 80 : 110,
+fallback: _LoginBadge(size: profileStep ? 72 : 92),
 ),
 const SizedBox(height: 8),
 ValueListenableBuilder<String>(
