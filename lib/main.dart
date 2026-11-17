@@ -19262,6 +19262,14 @@ return null;
 
 @override
 Widget build(BuildContext context) {
+// Rebuilds when the admin makes another exam active in Settings.
+return ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (context, st, _) => _buildBody(st.currentExam),
+);
+}
+
+Widget _buildBody(String activeExam) {
 return FutureBuilder<List<_AttEntry>>(
 future: _f,
 builder: (context, snap) {
@@ -19272,7 +19280,11 @@ child: Text('Could not load your attendance: ${snap.error}'));
 if (!snap.hasData) {
 return const Center(child: CircularProgressIndicator());
 }
-final all = snap.data!;
+// A student only sees the attendance of the active exam.
+final all = [
+for (final e in snap.data!)
+if (e.belongsToExam(activeExam)) e,
+];
 final t = _Tally();
 var late = 0;
 for (final e in all) {
@@ -19857,9 +19869,22 @@ State<StudentDetailScreen> createState() => _StudentDetailScreenState();
 
 class _AttEntry {
 final String dateKey, subject, mark, note, docId, sid;
+
+/// The exam this register was saved for ('' = saved before attendance was
+/// kept per exam; those belong to AppSettings.paperBaseExam).
+final String exam;
 const _AttEntry(this.dateKey, this.subject, this.mark,
-[this.note = '', this.docId = '', this.sid = '']);
+[this.note = '', this.docId = '', this.sid = '', this.exam = '']);
 bool get present => mark == 'present' || mark == 'late';
+
+/// True when this register belongs to [examName]. Before a base exam is
+/// chosen, attendance is not split per exam yet, so everything matches.
+bool belongsToExam(String examName) {
+final base = appSettings.value.paperBaseExam;
+if (base.isEmpty) return true;
+final e = exam.trim().isEmpty ? base : exam.trim();
+return e == examName;
+}
 }
 
 /// Every saved register that has a mark for this student. A student can
@@ -19889,6 +19914,7 @@ _AttEntry(
 '${(d.data()['notes'] as Map?)?[sid] ?? ''}'.trim(),
 d.id,
 sid,
+'${d.data()['exam'] ?? ''}'.trim(),
 ),
 ];
 }
@@ -19900,11 +19926,13 @@ try {
 other = await one(twin);
 } catch (_) {}
 }
-final seen = <String>{for (final e in own) '${e.dateKey}|${e.subject}'};
+final seen = <String>{
+for (final e in own) '${e.dateKey}|${e.subject}|${e.exam}'
+};
 final list = <_AttEntry>[
 ...own,
 for (final e in other)
-if (seen.add('${e.dateKey}|${e.subject}')) e,
+if (seen.add('${e.dateKey}|${e.subject}|${e.exam}')) e,
 ]..sort((a, b) {
 final c = b.dateKey.compareTo(a.dateKey);
 return c != 0 ? c : a.subject.compareTo(b.subject);
