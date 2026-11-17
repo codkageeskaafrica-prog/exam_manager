@@ -19337,6 +19337,17 @@ child: ListView(
 physics: const AlwaysScrollableScrollPhysics(),
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
 children: [
+Padding(
+padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+child: Row(children: [
+const Icon(Icons.event_note, size: 18, color: kBlue),
+const SizedBox(width: 6),
+Flexible(
+child: Text('Attendance of $activeExam',
+style: const TextStyle(fontWeight: FontWeight.w700)),
+),
+]),
+),
 Card(
 child: Padding(
 padding: const EdgeInsets.all(16),
@@ -19382,9 +19393,11 @@ onSelected: (_) => setState(() => _filter = f),
 ]),
 ),
 if (rows.isEmpty)
-const Padding(
-padding: EdgeInsets.all(24),
-child: Center(child: Text('No attendance records.')),
+Padding(
+padding: const EdgeInsets.all(24),
+child: Center(
+child: Text(
+'No attendance records for "$activeExam".')),
 ),
 ...rows,
 ]),
