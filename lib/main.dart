@@ -5675,7 +5675,10 @@ class ExamTableScreen extends StatelessWidget {
     final service = ExamService();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Exam Manager'),
+        title: ValueListenableBuilder<String>(
+          valueListenable: appName,
+          builder: (_, name, __) => Text(name),
+        ),
         actions: [
           const AccountBadge(),
           // Hidden for teacher (and student) accounts.
@@ -8914,10 +8917,16 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Row(mainAxisSize: MainAxisSize.min, children: [
-          AppLogo(place: LogoPlace.home, height: 36),
-          SizedBox(width: 10),
-          Text('Exam Manager'),
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          const AppLogo(place: LogoPlace.home, height: 36),
+          const SizedBox(width: 10),
+          Flexible(
+            child: ValueListenableBuilder<String>(
+              valueListenable: appName,
+              builder: (_, name, __) =>
+                  Text(name, overflow: TextOverflow.ellipsis),
+            ),
+          ),
         ]),
         actions: [
           const AccountBadge(),
@@ -11165,6 +11174,15 @@ const _kPartTypes = [
   'Other',
 ];
 
+/// The default name of the app, used until the administrator changes it in
+/// Settings > School > App name.
+const String kDefaultAppName = 'Exam Manager';
+
+/// The name of the app as shown on the sign-in page, the home page and the
+/// Exam table. Signed-in users get it from settings/app; the sign-in page
+/// (shown before anybody is signed in) reads the copy in public/login.
+final ValueNotifier<String> appName = ValueNotifier<String>(kDefaultAppName);
+
 class AppSettings {
   /// First day of the week in the attendance report (DateTime.monday ... sunday).
   final int weekStart;
@@ -11233,6 +11251,9 @@ class AppSettings {
   /// sign-in page reads is mirrored in public/login, see _setHideSignUp).
   final bool hideSignUp;
 
+  /// The name of the app (Settings > School > App name).
+  final String appName;
+
   /// Finance: the text written before every amount (e.g. "USD").
   final String currency;
 
@@ -11275,6 +11296,7 @@ class AppSettings {
     this.resultDays = 7,
     this.reportSigners = kDefaultSigners,
     this.hideSignUp = false,
+    this.appName = kDefaultAppName,
     this.currency = 'USD',
     this.monthlyFees = const {},
     this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
@@ -11490,6 +11512,9 @@ class AppSettings {
           ? (m['resultDays'] as num).toInt().clamp(0, 365)
           : d.resultDays,
       hideSignUp: m['hideSignUp'] is bool ? m['hideSignUp'] as bool : d.hideSignUp,
+      appName: m['appName'] is String && (m['appName'] as String).trim().isNotEmpty
+          ? (m['appName'] as String).trim()
+          : d.appName,
       reportSigners: m['reportSigners'] is List
           ? [
         for (final e in (m['reportSigners'] as List))
@@ -11537,6 +11562,7 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
         final m = d.data() ?? <String, dynamic>{};
         ExamService.applyLists(m); // before parsing: sectionSubjects uses it
         value = AppSettings.fromMap(m);
+        appName.value = value.appName;
       },
       onError: (e) => debugPrint('Settings could not be loaded: $e'),
     );
@@ -11548,6 +11574,7 @@ class AppSettingsController extends ValueNotifier<AppSettings> {
     _sub = null;
     ExamService.resetLists();
     value = const AppSettings();
+    appName.value = kDefaultAppName;
   }
 
   /// Saves only the given fields. The live listener then updates [value].
@@ -12389,6 +12416,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: _fmtMark(g)),
   ];
   final _newExam = TextEditingController();
+  late final _appName = TextEditingController(text: appSettings.value.appName);
   late final _sig = [
     for (var i = 0; i < 3; i++)
       (
@@ -12429,7 +12457,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     for (final c in [
-      _good, _warn, _newExam, ..._grade, _cur, _methods, ..._fee.values
+      _good, _warn, _newExam, _appName, ..._grade, _cur, _methods, ..._fee.values
     ]) {
       c.dispose();
     }
@@ -12507,6 +12535,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
       value: s.hideSignUp,
       onChanged: _busy ? null : _setHideSignUp,
     ),
+  ]);
+
+  /// Saves the app name. The sign-in page is shown before anybody is signed
+  /// in, so the name is also written to public/login (the same document as
+  /// hideSignUp), which the Firestore rules must allow everyone to read.
+  Future<void> _saveAppName() async {
+    final name = _appName.text.trim();
+    if (name.isEmpty) {
+      _toast('Please enter a name.');
+      return;
+    }
+    final ok = await _save({'appName': name}, 'App name saved');
+    if (!ok) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('public')
+          .doc('login')
+          .set({'appName': name}, SetOptions(merge: true));
+    } catch (e) {
+      _toast('Saved, but the sign-in page could not be updated ($e). '
+          'Allow reading and writing public/login in the Firestore rules.');
+    }
+  }
+
+  Widget _appNameCard() => _card('App name', Icons.badge_outlined, [
+    const Text(
+        'The name shown on the sign-in page, the home page and the exam '
+            'table. Everyone sees the new name.',
+        style: _hint),
+    const SizedBox(height: 12),
+    TextField(
+      controller: _appName,
+      textCapitalization: TextCapitalization.words,
+      decoration: const InputDecoration(
+          labelText: 'App name', border: OutlineInputBorder()),
+      onSubmitted: (_) => _busy ? null : _saveAppName(),
+    ),
+    const SizedBox(height: 12),
+    Row(children: [
+      FilledButton.icon(
+        onPressed: _busy ? null : _saveAppName,
+        icon: const Icon(Icons.save),
+        label: const Text('Save'),
+      ),
+      const SizedBox(width: 8),
+      TextButton(
+        onPressed: _busy
+            ? null
+            : () {
+          _appName.text = kDefaultAppName;
+          _saveAppName();
+        },
+        child: const Text('Reset to default'),
+      ),
+    ]),
   ]);
 
   Future<void> _saveSigners() async {
@@ -13705,7 +13788,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<(String, List<Widget>)> _tabsOf(int id, AppSettings s) {
     if (id == 0) {
       return <(String, List<Widget>)>[
-        ('School', <Widget>[_schoolCard(), _subjectsCard(s)]),
+        ('School', <Widget>[_appNameCard(), _schoolCard(), _subjectsCard(s)]),
       ];
     }
     if (id == 7) {
@@ -33341,6 +33424,12 @@ _loginSub = FirebaseFirestore.instance
     .snapshots()
     .listen((d) {
 final hide = d.data()?['hideSignUp'] == true;
+final n = d.data()?['appName'];
+if (n is String && n.trim().isNotEmpty) {
+appName.value = n.trim();
+} else {
+appName.value = kDefaultAppName;
+}
 if (!mounted) return;
 setState(() {
 _hideSignUp = hide;
@@ -33871,9 +33960,14 @@ fallback: const Icon(Icons.school,
 size: 48, color: Color(0xFF3498DB)),
 ),
 const SizedBox(height: 8),
-Text(profileStep ? 'Complete your profile' : 'Exam Manager',
+ValueListenableBuilder<String>(
+valueListenable: appName,
+builder: (_, name, __) => Text(
+profileStep ? 'Complete your profile' : name,
+textAlign: TextAlign.center,
 style: const TextStyle(
 fontSize: 22, fontWeight: FontWeight.bold)),
+),
 const SizedBox(height: 20),
 if (profileStep)
 ..._profileForm()
@@ -33980,8 +34074,15 @@ const ExamManagerApp({super.key});
 
 @override
 Widget build(BuildContext context) {
+return ValueListenableBuilder<String>(
+valueListenable: appName,
+builder: (_, name, __) => _buildApp(name),
+);
+}
+
+Widget _buildApp(String name) {
 return MaterialApp(
-title: 'Exam Manager',
+title: name,
 debugShowCheckedModeBanner: false,
 theme: ThemeData(
 useMaterial3: true,
