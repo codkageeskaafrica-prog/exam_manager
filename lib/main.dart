@@ -634,6 +634,7 @@ class ExamService {
     ExamHeadingText? heading,
     bool autoFormat = false,
     bool numberQuestions = true,
+    bool includeLogo = true,
   }) async {
     // Keep the original PNG/JPEG bytes (fast + small); convert other formats.
     final ({Uint8List data, int w, int h, String kind}) img;
@@ -685,20 +686,20 @@ class ExamService {
 
     // 1) header + footer parts
     files['word/media/school_letterhead.${img.kind}'] = img.data;
-    if (schoolLogo.value.uses(LogoPlace.exam)) {
+    if (includeLogo && schoolLogo.value.uses(LogoPlace.exam)) {
       files['word/media/school_logo.png'] = schoolLogo.value.bytes!;
     }
     files['word/_rels/header_school.xml.rels'] = utf8.encode(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Id="rId1" Type="$relBase/image" Target="media/school_letterhead.${img.kind}"/>'
-            '${docxLogoRel(LogoPlace.exam, 'rId2')}'
-            '${docxWmRel(LogoPlace.exam, 'rId3')}'
+            '${includeLogo ? docxLogoRel(LogoPlace.exam, 'rId2') : ''}'
+            '${includeLogo ? docxWmRel(LogoPlace.exam, 'rId3') : ''}'
             '</Relationships>');
     files['word/header_school.xml'] = utf8.encode(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<w:hdr $ns>${docxLogoPara(LogoPlace.exam, rid: 'rId2', docPrId: 9101)}'
-            '${docxWatermarkPara(LogoPlace.exam, rid: 'rId3', docPrId: 9301)}'
+            '<w:hdr $ns>${includeLogo ? docxLogoPara(LogoPlace.exam, rid: 'rId2', docPrId: 9101) : ''}'
+            '${includeLogo ? docxWatermarkPara(LogoPlace.exam, rid: 'rId3', docPrId: 9301) : ''}'
             '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>'
             '<wp:inline distT="0" distB="0" distL="0" distR="0">'
             '<wp:extent cx="$cx" cy="$cy"/><wp:docPr id="9001" name="School letterhead"/>'
@@ -865,6 +866,7 @@ class ExamService {
     required Uint8List letterhead,
     required String footer,
     ExamHeadingText? heading,
+    bool includeLogo = true,
   }) async {
     final bytes = file.bytes;
     if (bytes == null) throw Exception('Could not read file bytes.');
@@ -899,8 +901,8 @@ class ExamService {
     }
     final headerImg = pw.MemoryImage(headerPng);
     final stampImg = pw.MemoryImage(base64Decode(_footerStampBase64));
-    final logoImg = pdfLogoImage(LogoPlace.exam);
-    final wmBg = pdfWatermark(LogoPlace.exam);
+    final logoImg = includeLogo ? pdfLogoImage(LogoPlace.exam) : null;
+    final wmBg = includeLogo ? pdfWatermark(LogoPlace.exam) : null;
     final arFont = await _arabicFont(heading);
     final out = pw.Document();
     for (var i = 0; i < pages.length; i++) {
@@ -2400,6 +2402,7 @@ class ExamService {
     bool addHeading = true,
     bool autoFormat = true,
     bool numberQuestions = true,
+    bool includeLogo = true,
   }) async {
     footer = footer.replaceAll('Teacher: ', '').replaceAll('Teacher:', '');
     final letterhead = await getLetterhead();
@@ -2421,8 +2424,8 @@ class ExamService {
       }
       final headerImg = pw.MemoryImage(headerPng);
       final stampImg = pw.MemoryImage(base64Decode(_footerStampBase64));
-      final logoImg = pdfLogoImage(LogoPlace.exam);
-      final wmBg = pdfWatermark(LogoPlace.exam);
+      final logoImg = includeLogo ? pdfLogoImage(LogoPlace.exam) : null;
+      final wmBg = includeLogo ? pdfWatermark(LogoPlace.exam) : null;
       final arFont = await _arabicFont(heading);
       final out = pw.Document();
       out.addPage(pw.Page(
@@ -2468,9 +2471,14 @@ class ExamService {
         footer: footer,
         heading: heading,
         autoFormat: autoFormat,
-        numberQuestions: numberQuestions)
+        numberQuestions: numberQuestions,
+        includeLogo: includeLogo)
         : await stampDocument(
-        file: file, letterhead: letterhead, footer: footer, heading: heading);
+        file: file,
+        letterhead: letterhead,
+        footer: footer,
+        heading: heading,
+        includeLogo: includeLogo);
     return (
     bytes: stamped,
     isDocx: isDocx,
@@ -6412,11 +6420,13 @@ class AssignmentService {
         footer: footer,
         heading: null,
         autoFormat: false,
-        numberQuestions: false)
+        numberQuestions: false,
+        includeLogo: false)
         : await exams.stampDocument(
         file: file,
         letterhead: letterhead,
-        footer: footer);
+        footer: footer,
+        includeLogo: false);
 
     final baseName = file.name.replaceAll(RegExp(r'\.[^.]+$'), '');
     final fileName = isDocx ? file.name : '$baseName.pdf';
@@ -6944,6 +6954,7 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
         addHeading: false,
         autoFormat: false,
         numberQuestions: false,
+        includeLogo: false,
       );
       if (!mounted) return;
       if (p.isDocx) {
