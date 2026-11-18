@@ -11397,6 +11397,19 @@ class AppSettings {
   /// SchoolService.subjectKey(exam). Every form is released until closed.
   final Map<String, List<String>> examFormsClosed;
 
+  /// Fail rule chosen by the administrator, per exam (key = subjectKey(exam)):
+  /// {'below': 50, 'basis': 'average' | 'total'}. No rule = failed means
+  /// grade F (average below the lowest grade limit).
+  final Map<String, Map<String, dynamic>> failRules;
+
+  /// (below, isTotal) for [e], or null when the administrator set none.
+  ({double below, bool total})? failRuleOf(String e) {
+    final r = failRules[SchoolService.subjectKey(e)];
+    final b = r?['below'];
+    if (r == null || b is! num) return null;
+    return (below: b.toDouble(), total: r['basis'] == 'total');
+  }
+
   /// The exam the administrator made active in Settings > Exams ("" = none
   /// chosen: the default current exam is used).
   final String activeExam;
@@ -11460,6 +11473,7 @@ class AppSettings {
     this.closedExams = const [],
     this.attendanceClosedExams = const [],
     this.examFormsClosed = const {},
+    this.failRules = const {},
     this.activeExam = '',
     this.paperBaseExam = '',
     this.sectionSubjects = const [],
@@ -11702,6 +11716,13 @@ class AppSettings {
           if (e is String) e,
       ]
           : d.attendanceClosedExams,
+      failRules: m['failRules'] is Map
+          ? {
+        for (final e in (m['failRules'] as Map).entries)
+          if (e.value is Map)
+            '${e.key}': Map<String, dynamic>.from(e.value as Map),
+      }
+          : d.failRules,
       examFormsClosed: efc is Map
           ? {
         for (final e in efc.entries)
@@ -29683,6 +29704,8 @@ StudentInfo(
 id: d.id,
 name: '${d.data()['name'] ?? ''}',
 sectionId: '${d.data()['sectionId'] ?? ''}',
+phone: '${d.data()['phone'] ?? ''}',
+phones: _phoneList(d.data()['phones'], d.data()['phone']),
 studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
 createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
 ];
@@ -31692,6 +31715,232 @@ return groups;
 
 /// Opens the "Combined report" dialog for what this screen shows
 /// (the whole school by form, one form, or one class).
+/// Analysis of the marks entered for the picked exam: per class how many
+/// students are entered / partially entered / not entered / failed, and
+/// how many boxes are still empty. Tap a number to open those students.
+Future<void> _openAnalysis() async {
+final exam = _ResultPrefs.exam;
+final messenger = ScaffoldMessenger.of(context);
+try {
+final sections = await _school.watchSections().first;
+final students = await _service.watchAllStudents().first;
+final results = await _service.watchResults(exam).first;
+if (!mounted) return;
+final secOf = {for (final x in sections) x.id: x};
+final inSec = {
+for (final x in sections)
+if ((widget.form == null || x.form == widget.form) &&
+(widget.classKey == null || x.classKey == widget.classKey))
+x.id
+};
+final scopeIds = {
+for (final st in students)
+if (inSec.contains(st.sectionId)) st.id
+};
+final list = [
+for (final st in students)
+if (scopeIds.contains(st.id) && !_isDupCopy(st, _twins, secOf, scopeIds))
+st
+];
+String clsOf(StudentInfo st) =>
+(secOf[st.sectionId]?.label ?? '').split('-').first.trim();
+
+final rule = appSettings.value.failRuleOf(exam);
+final subs = ExamService.subjects;
+// state: entered | partial | none; failed; empty boxes
+(String, bool, int) analyse(StudentInfo st) {
+final rm = results[st.id];
+final form = secOf[st.sectionId]?.form ?? '';
+var real = 0, blank = 0;
+var sum = 0.0;
+for (final sub in subs) {
+if ((rm?.cheated ?? false) || (rm?.cheatedSubs.contains(sub) ?? false)) {
+continue;
+}
+final v = rm?.marks[sub];
+if (v != null) {
+real++;
+sum += v;
+} else if (studentIsNew(st.createdAt, sub) ||
+(_absent?[st.id]?.contains(sub) ?? false)) {
+// not expected to have a mark
+} else {
+blank++;
+}
+}
+final state = blank == 0 ? 'entered' : (real > 0 ? 'partial' : 'none');
+var failed = false;
+if (real > 0) {
+final avg = sum / real;
+if (rule == null) {
+failed = _gradeOf(avg, max: _gradeMax(exam, form)) == 'F';
+} else if (rule.total) {
+failed = blank == 0 && sum < rule.below - 1e-9;
+} else {
+failed = avg < rule.below - 1e-9;
+}
+}
+return (state, failed, blank);
+}
+
+final order = <String>[];
+final byCls = <String, List<StudentInfo>>{};
+for (final st in list) {
+final c = clsOf(st);
+if (!byCls.containsKey(c)) order.add(c);
+(byCls[c] ??= []).add(st);
+}
+order.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
+List<int> count(List<StudentInfo> l) {
+var e = 0, p = 0, n = 0, f = 0, empty = 0;
+for (final st in l) {
+final r = analyse(st);
+if (r.$1 == 'entered') e++;
+if (r.$1 == 'partial') p++;
+if (r.$1 == 'none') n++;
+if (r.$2) f++;
+empty += r.$3;
+}
+return [l.length, e, p, n, f, empty];
+}
+
+void open(List<StudentInfo> l, Set<String> classes, String title,
+String? filter) {
+_go(ResultBulkScreen(
+title: title,
+exam: exam,
+students: l,
+sectionLabels: {
+for (final st in l) st.id: secOf[st.sectionId]?.label ?? ''
+},
+studentForms: {
+for (final st in l) st.id: secOf[st.sectionId]?.form ?? ''
+},
+initialFilter: filter,
+initialClasses: classes,
+));
+}
+
+const green = Color(0xFF2E7D32),
+orange = Color(0xFFEF6C00),
+red = Color(0xFFC62828);
+await showDialog<void>(
+context: context,
+builder: (ctx) {
+Widget head(String t) => Padding(
+padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+child: Text(t,
+textAlign: TextAlign.center,
+style: const TextStyle(
+color: Colors.white, fontWeight: FontWeight.bold)));
+Widget numCell(int n, Color c, VoidCallback onTap, {bool bold = false}) =>
+InkWell(
+onTap: n == 0 ? null : onTap,
+child: Padding(
+padding:
+const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+child: Text('$n',
+textAlign: TextAlign.center,
+style: TextStyle(
+color: n == 0 ? Colors.grey : c,
+fontWeight:
+bold || n > 0 ? FontWeight.w700 : FontWeight.normal)),
+),
+);
+TableRow row(String name, List<StudentInfo> l, Set<String> classes,
+{bool total = false}) {
+final c = count(l);
+void go(String? f) {
+Navigator.pop(ctx);
+open(l, classes, name, f);
+}
+return TableRow(
+decoration: BoxDecoration(
+color: total ? const Color(0xFFE3F2FD) : null,
+border: const Border(
+bottom: BorderSide(color: Color(0xFFE0E0E0))),
+),
+children: [
+Padding(
+padding:
+const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+child: Text(name,
+style: TextStyle(
+fontWeight:
+total ? FontWeight.w800 : FontWeight.w600))),
+numCell(c[0], Colors.black87, () => go(null), bold: total),
+numCell(c[1], green, () => go('entered'), bold: total),
+numCell(c[2], orange, () => go('partial'), bold: total),
+numCell(c[3], red, () => go('none'), bold: total),
+numCell(c[4], red, () => go('failed'), bold: total),
+numCell(c[5], red, () => go(null), bold: total),
+],
+);
+}
+
+return AlertDialog(
+title: Row(children: [
+const Icon(Icons.insights, color: Color(0xFF00796B)),
+const SizedBox(width: 8),
+Expanded(child: Text('Analysis · $exam')),
+]),
+content: SizedBox(
+width: 720,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(
+'Failed = ${rule == null ? 'grade F' : '${rule.total ? 'total' : 'average'} below ${_fmtMark(rule.below)}'}'
+'. Tap a number to open those students.',
+style: TextStyle(
+fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 10),
+Table(
+columnWidths: const {
+0: FlexColumnWidth(1.6),
+},
+defaultColumnWidth: const FlexColumnWidth(1),
+children: [
+TableRow(
+decoration:
+const BoxDecoration(color: Color(0xFF00796B)),
+children: [
+head('Class'),
+head('Students'),
+head('Entered'),
+head('Partial'),
+head('Not entered'),
+head('Failed'),
+head('Empty boxes'),
+],
+),
+row(widget.classKey != null
+? _title
+    : (widget.form != null ? _title : 'School'),
+list, const {}, total: true),
+for (final c in order)
+row(c.isEmpty ? 'No class' : c, byCls[c]!, {c}),
+],
+),
+]),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Close')),
+],
+);
+},
+);
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Could not load: $e')));
+}
+}
+
 void _openCombined() {
 showDialog<void>(
 context: context,
@@ -31956,6 +32205,14 @@ label: 'Combined',
 tooltip: 'Combine several exams in one report',
 color: const Color(0xFF6A1B9A),
 onTap: _openCombined,
+),
+if (!teacherScope.value.scoped)
+_BarAction(
+icon: Icons.insights,
+label: 'Analysis',
+tooltip: 'Entered, partially entered, not entered and failed',
+color: const Color(0xFF00796B),
+onTap: _openAnalysis,
 ),
 if (!teacherScope.value.scoped)
 _ReportMenuButton(
@@ -32527,6 +32784,11 @@ final String title, exam;
 final List<StudentInfo> students;
 final Map<String, String> sectionLabels; // studentId -> section label
 final Map<String, String> studentForms; // studentId -> form
+
+/// Opened from the Analysis: start with this filter (entered | partial |
+/// none | failed) and these classes ticked.
+final String? initialFilter;
+final Set<String> initialClasses;
 const ResultBulkScreen({
 super.key,
 required this.title,
@@ -32534,6 +32796,8 @@ required this.exam,
 required this.students,
 required this.sectionLabels,
 this.studentForms = const {},
+this.initialFilter,
+this.initialClasses = const {},
 });
 
 @override
@@ -32580,8 +32844,237 @@ if (_sel.isEmpty || _sel.contains(_cls(s))) s
 
 List<StudentInfo> get _shown => [
 for (final s in _inScope)
-if (_stuFilter == null || _stuState[s.id] == _stuFilter) s
+if (_stuFilter == null ||
+(_stuFilter == 'failed' ? _isFailed(s) : _stuState[s.id] == _stuFilter))
+s
 ];
+
+/// Valid marks typed for a student right now (live, from the boxes).
+List<double> _valsOf(StudentInfo s) {
+final row = _c[s.id];
+if (row == null) return const [];
+return [
+for (final sub in _subjects)
+if (!_isBad(row[sub]!.text, s.id) &&
+!_isAbsentText(row[sub]!.text) &&
+row[sub]!.text.trim().isNotEmpty)
+double.parse(row[sub]!.text.trim()),
+];
+}
+
+double? _totalOf(StudentInfo s) {
+final v = _valsOf(s);
+return v.isEmpty ? null : v.fold<double>(0.0, (a, b) => a + b);
+}
+
+double? _avgOf(StudentInfo s) {
+final v = _valsOf(s);
+return v.isEmpty ? null : v.fold<double>(0.0, (a, b) => a + b) / v.length;
+}
+
+String _gradeFor(StudentInfo s, double avg) =>
+_gradeOf(avg, max: _gradeMax(widget.exam, SchoolService.formOf(s)));
+
+/// Failed: by the rule the administrator set for this exam (average or
+/// total below a number); with no rule = grade F (average below the lowest
+/// grade limit in Settings > Grades & rules).
+bool _isFailed(StudentInfo s) {
+final r = appSettings.value.failRuleOf(widget.exam);
+if (r == null) {
+final a = _avgOf(s);
+return a != null && _gradeFor(s, a) == 'F';
+}
+if (r.total) {
+// a total is only fair when every box has a mark (or Absent / New)
+final row = _c[s.id];
+if (row == null || _subjects.any((x) => row[x]!.text.trim().isEmpty)) {
+return false;
+}
+}
+final v = r.total ? _totalOf(s) : _avgOf(s);
+return v != null && v < r.below - 1e-9;
+}
+
+String get _failText {
+final r = appSettings.value.failRuleOf(widget.exam);
+return r == null
+? 'grade F'
+    : '${r.total ? 'total' : 'average'} below ${_fmtMark(r.below)}';
+}
+
+/// Only the administrator (not limited to a subject / class) sets the rule.
+bool get _canSetFail => !teacherScope.value.scoped &&
+!teacherScope.value.isFinance;
+
+Future<void> _editFailRule() async {
+final cur = appSettings.value.failRuleOf(widget.exam);
+final ctrl = TextEditingController(
+text: cur == null ? '' : _fmtMark(cur.below));
+var total = cur?.total ?? false;
+String? err;
+// null = cancel, -1 = back to grade F, else the number
+final res = await showDialog<double>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
+title: const Text('Who is failed?'),
+content: SizedBox(
+width: 360,
+child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment:
+CrossAxisAlignment.start, children: [
+Text('Exam: ${widget.exam}',
+style: const TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 10),
+SegmentedButton<bool>(
+segments: const [
+ButtonSegment(value: false, label: Text('Average')),
+ButtonSegment(value: true, label: Text('Total')),
+],
+selected: {total},
+onSelectionChanged: (v) => setD(() => total = v.first),
+),
+const SizedBox(height: 12),
+TextField(
+controller: ctrl,
+autofocus: true,
+keyboardType:
+const TextInputType.numberWithOptions(decimal: true),
+inputFormatters: [
+FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+],
+decoration: InputDecoration(
+labelText: 'Failed if ${total ? 'total' : 'average'} is below',
+helperText: total
+? 'Only students with every box filled are counted.'
+    : 'For example 10 when each subject is out of 20.',
+errorText: err,
+border: const OutlineInputBorder(),
+),
+),
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Cancel')),
+TextButton(
+onPressed: () => Navigator.pop(ctx, -1.0),
+child: const Text('Use grade F')),
+FilledButton(
+onPressed: () {
+final v = double.tryParse(ctrl.text.trim());
+if (v == null || v <= 0) {
+setD(() => err = 'Enter a number above 0.');
+return;
+}
+Navigator.pop(ctx, v);
+},
+child: const Text('Save'),
+),
+],
+),
+),
+);
+ctrl.dispose();
+if (res == null || !mounted) return;
+final key = SchoolService.subjectKey(widget.exam);
+try {
+await appSettings.update({
+'failRules': {
+key: res < 0
+? FieldValue.delete()
+    : {'below': res, 'basis': total ? 'total' : 'average'},
+},
+});
+if (mounted) setState(() => _error = null);
+} catch (e) {
+if (mounted) setState(() => _error = 'Could not save: $e');
+}
+}
+
+Future<void> _printFailed() async {
+final failed = [for (final s in _inScope) if (_isFailed(s)) s];
+if (failed.isEmpty) {
+setState(() => _error = 'No failed students to print.');
+return;
+}
+try {
+var phoneById = <String, StudentInfo>{};
+try {
+phoneById = await SchoolService().getAllStudents();
+} catch (_) {} // no access: use the numbers already loaded
+String phoneOf(StudentInfo x) {
+final a = x.phoneText;
+return a.isNotEmpty ? a : (phoneById[x.id]?.phoneText ?? '');
+}
+
+final doc = pw.Document();
+final theme = pw.ThemeData.withFont(
+base: pw.Font.times(), bold: pw.Font.timesBold());
+final scopeText = _sel.isEmpty
+? 'All classes'
+    : (_sel.toList()..sort()).map((c) => c.isEmpty ? 'No class' : c).join(', ');
+pw.Widget cell(String t, {bool bold = false}) => pw.Padding(
+padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+child: pw.Text(t,
+style: pw.TextStyle(
+fontSize: 10,
+fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)));
+final rows = <pw.TableRow>[
+pw.TableRow(
+decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+children: [
+for (final h in ['#', 'Student', 'Class', 'Total', 'Subjects', 'Phone'])
+cell(h, bold: true),
+],
+),
+for (var i = 0; i < failed.length; i++)
+pw.TableRow(children: [
+cell('${i + 1}'),
+cell(failed[i].name),
+cell(widget.sectionLabels[failed[i].id] ?? ''),
+cell(_fmtMark(double.parse(_totalOf(failed[i])!.toStringAsFixed(1)))),
+cell('${_valsOf(failed[i]).length}'),
+cell(phoneOf(failed[i]).isEmpty ? '-' : phoneOf(failed[i])),
+]),
+];
+doc.addPage(pw.MultiPage(
+theme: theme,
+pageFormat: PdfPageFormat.a4,
+margin: const pw.EdgeInsets.all(28),
+header: (_) => pw.Padding(
+padding: const pw.EdgeInsets.only(bottom: 10),
+child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+pw.Text('Failed students - ${widget.exam}',
+style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold)),
+pw.SizedBox(height: 3),
+pw.Text('$scopeText  |  ${failed.length} student'
+'${failed.length == 1 ? '' : 's'}  |  Failed = $_failText',
+style: const pw.TextStyle(fontSize: 10)),
+]),
+),
+build: (_) => [
+pw.Table(
+border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+columnWidths: const {
+0: pw.FixedColumnWidth(26),
+1: pw.FlexColumnWidth(3.2),
+2: pw.FlexColumnWidth(1.1),
+3: pw.FlexColumnWidth(1),
+4: pw.FlexColumnWidth(1),
+5: pw.FlexColumnWidth(2.4),
+},
+children: rows,
+),
+],
+));
+final bytes = await doc.save();
+await Printing.layoutPdf(
+name: 'Failed-students-${widget.exam}', onLayout: (_) async => bytes);
+} catch (e) {
+if (mounted) setState(() => _error = 'Could not print: $e');
+}
+}
 
 /// How far each student is entered, from the marks that were saved when the
 /// screen opened: Entered = every box has a mark (or Absent / Cheated / New),
@@ -32602,6 +33095,13 @@ _stuState[s.id] = blank == 0 ? 'entered' : (real > 0 ? 'partial' : 'none');
 }
 }
 
+String _filterName(String f) => switch (f) {
+'entered' => 'Entered',
+'partial' => 'Partially entered',
+'none' => 'Not entered',
+_ => 'Failed ($_failText)',
+};
+
 Widget _filterBar() {
 final classes = _classes;
 // colour of a class: green = every student entered, red = nobody, else orange
@@ -32616,7 +33116,6 @@ return const Color(0xFFEF6C00);
 }
 
 final scope = _inScope;
-int count(String st) => scope.where((s) => _stuState[s.id] == st).length;
 // empty marks (live): boxes without any mark in the shown classes
 var emptyMarks = 0;
 for (final s in scope) {
@@ -32626,12 +33125,6 @@ for (final sub in _subjects) {
 if ((row[sub]?.text ?? '').trim().isEmpty) emptyMarks++;
 }
 }
-final stats = <(String?, String, int)>[
-(null, 'All', scope.length),
-('entered', 'Entered', count('entered')),
-('partial', 'Partially entered', count('partial')),
-('none', 'Not entered', count('none')),
-];
 return Padding(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -32675,11 +33168,12 @@ _sel.isEmpty
 ? '${_sel.first.isEmpty ? 'No class' : _sel.first}:'
     : '${_sel.length} classes:',
 style: const TextStyle(fontWeight: FontWeight.w700)),
-for (final f in stats)
-ChoiceChip(
-label: Text('${f.$2} ${f.$3}'),
-selected: _stuFilter == f.$1,
-onSelected: (_) => setState(() => _stuFilter = f.$1),
+if (_stuFilter != null)
+InputChip(
+avatar: const Icon(Icons.filter_alt, size: 16),
+label: Text('Showing: ${_filterName(_stuFilter!)} '
+'${_loading ? '' : _shown.length}'),
+onDeleted: () => setState(() => _stuFilter = null),
 ),
 Container(
 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -32704,9 +33198,16 @@ color: Color(0xFFC62828))),
 );
 }
 
+void _onSettings() {
+if (mounted) setState(() {});
+}
+
 @override
 void initState() {
 super.initState();
+appSettings.addListener(_onSettings);
+_stuFilter = widget.initialFilter;
+_sel.addAll(widget.initialClasses);
 _load();
 }
 
@@ -32761,6 +33262,7 @@ _error = 'Could not load: $e';
 
 @override
 void dispose() {
+appSettings.removeListener(_onSettings);
 for (final row in _c.values) {
 for (final c in row.values) {
 c.dispose();
@@ -32905,7 +33407,7 @@ child: Text(sub,
 overflow: TextOverflow.ellipsis, style: _bulkHead)),
 ])),
 const SizedBox(
-width: avgW, child: Text('Average', style: _bulkHead)),
+width: avgW, child: Text('Total', style: _bulkHead)),
 ]),
 ),
 Expanded(
@@ -32915,16 +33417,8 @@ itemCount: shown.length,
 itemBuilder: (context, i) {
 final s = shown[i];
 final row = _c[s.id]!;
-final vals = <double>[
-for (final sub in _subjects)
-if (!_isBad(row[sub]!.text, s.id) &&
-!_isAbsentText(row[sub]!.text) &&
-row[sub]!.text.trim().isNotEmpty)
-double.parse(row[sub]!.text.trim()),
-];
-final avg = vals.isEmpty
-? null
-    : vals.fold(0.0, (a, b) => a + b) / vals.length;
+final total = _totalOf(s);
+final avg = _avgOf(s);
 return Container(
 decoration: BoxDecoration(
 color: i.isOdd ? Colors.white : const Color(0xFFF8FAFC),
@@ -33027,11 +33521,11 @@ horizontal: 6, vertical: 10),
 ),
 SizedBox(
 width: avgW,
-child: avg == null
+child: (avg == null || total == null)
 ? const Text('–')
     : Row(children: [
 Text(
-_fmtMark(double.parse(avg.toStringAsFixed(1))),
+_fmtMark(double.parse(total.toStringAsFixed(1))),
 style: const TextStyle(
 fontWeight: FontWeight.w800)),
 const SizedBox(width: 6),
@@ -33059,6 +33553,24 @@ return Scaffold(
 appBar: AppBar(
 title: Text('${widget.title} · ${widget.exam}'),
 actions: [
+if (!_loading && _canSetFail)
+IconButton(
+tooltip: 'Set who is failed ($_failText)',
+onPressed: _editFailRule,
+icon: const Icon(Icons.tune),
+),
+if (!_loading && _subjects.isNotEmpty)
+Padding(
+padding: const EdgeInsets.only(right: 8),
+child: Center(
+child: OutlinedButton.icon(
+onPressed: _printFailed,
+icon: const Icon(Icons.print),
+label: Text('Print failed'
+'${_inScope.where(_isFailed).isEmpty ? '' : ' (${_inScope.where(_isFailed).length})'}'),
+),
+),
+),
 Padding(
 padding: const EdgeInsets.only(right: 12),
 child: Center(
@@ -33090,7 +33602,7 @@ child: Text(
 style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700)),
 ),
 ),
-if (!_loading && _classes.length > 1) _filterBar(),
+if (!_loading) _filterBar(),
 if (_error != null)
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
