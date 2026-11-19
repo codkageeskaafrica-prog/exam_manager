@@ -36699,27 +36699,12 @@ fontSize: 11, fontWeight: FontWeight.w700, color: c)),
 ]),
 );
 
-Widget _contact(IconData icon, String text) => Padding(
-padding: const EdgeInsets.only(top: 3),
-child: Row(mainAxisSize: MainAxisSize.min, children: [
-Icon(icon, size: 15, color: Colors.black45),
-const SizedBox(width: 6),
-Flexible(
-child: Text(text,
-maxLines: 1,
-overflow: TextOverflow.ellipsis,
-style: const TextStyle(fontSize: 13, color: Colors.black87)),
-),
-]),
-);
-
 Widget _card(TeacherInfo t, double width) {
 final cs = Theme.of(context).colorScheme;
 final ac = _avatarColor(t.name);
 final rs = _roleStyle(t.role);
 final subjectChips = <Widget>[];
-String fs(List<String> l) =>
-l.map((f) => f.replaceFirst(RegExp(r'^Form\s*'), 'F')).join(', ');
+String fs(List<String> l) => l.join(', ');
 if (t.assignments.isNotEmpty) {
 for (final sub in ExamService.subjects) {
 final f = t.assignments[sub];
@@ -36735,6 +36720,23 @@ for (final f in t.forms) {
 subjectChips.add(_chip(f, null, const Color(0xFF00897B)));
 }
 }
+final roleBadge = Container(
+padding: const EdgeInsets.symmetric(
+horizontal: 9, vertical: 3),
+decoration: BoxDecoration(
+color: rs.color.withAlpha(26),
+borderRadius: BorderRadius.circular(20),
+),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(rs.icon, size: 14, color: rs.color),
+const SizedBox(width: 4),
+Text(t.role,
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w700,
+color: rs.color)),
+]),
+);
 return SizedBox(
 width: width,
 child: Card(
@@ -36783,30 +36785,41 @@ overflow: TextOverflow.ellipsis,
 style: const TextStyle(
 fontSize: 16.5, fontWeight: FontWeight.w700)),
 const SizedBox(height: 4),
-Container(
-padding: const EdgeInsets.symmetric(
-horizontal: 9, vertical: 3),
-decoration: BoxDecoration(
-color: rs.color.withAlpha(26),
-borderRadius: BorderRadius.circular(20),
+// role + subject + form: one line
+Wrap(
+spacing: 6,
+runSpacing: 6,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [roleBadge, ...subjectChips],
 ),
-child: Row(mainAxisSize: MainAxisSize.min, children: [
-Icon(rs.icon, size: 14, color: rs.color),
-const SizedBox(width: 4),
-Text(t.role,
-style: TextStyle(
-fontSize: 12,
-fontWeight: FontWeight.w700,
-color: rs.color)),
+if (t.phone.isNotEmpty || t.email.isNotEmpty)
+Padding(
+padding: const EdgeInsets.only(top: 8),
+child: Row(children: [
+if (t.phone.isNotEmpty) ...[
+const Icon(Icons.phone_outlined,
+size: 15, color: Colors.black45),
+const SizedBox(width: 5),
+Text(t.phone,
+style: const TextStyle(
+fontSize: 13, color: Colors.black87)),
+],
+if (t.phone.isNotEmpty && t.email.isNotEmpty)
+const SizedBox(width: 14),
+if (t.email.isNotEmpty) ...[
+const Icon(Icons.mail_outline,
+size: 15, color: Colors.black45),
+const SizedBox(width: 5),
+Flexible(
+child: Text(t.email,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 13, color: Colors.black87)),
+),
+],
 ]),
 ),
-const SizedBox(height: 4),
-if (t.phone.isNotEmpty) _contact(Icons.phone_outlined, t.phone),
-if (t.email.isNotEmpty) _contact(Icons.mail_outline, t.email),
-if (subjectChips.isNotEmpty) ...[
-const SizedBox(height: 10),
-Wrap(spacing: 6, runSpacing: 6, children: subjectChips),
-],
 ],
 ),
 ),
