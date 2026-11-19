@@ -8385,6 +8385,24 @@ List<String> formsOfAssignments(Map<String, List<String>> a) => [
     if (a.values.any((l) => l.contains(f))) f
 ];
 
+/// form -> the classes (A, B ...) a teacher is limited to inside that form.
+/// A form that is not in the map = every class of the form.
+Map<String, List<String>> parseFormClasses(Map? m) {
+  final out = <String, List<String>>{};
+  final v = m?['formClasses'];
+  if (v is Map) {
+    for (final f in ExamService.forms) {
+      final l = v[f];
+      if (l is List) {
+        final ks = [for (final e in l) if (e is String && e.isNotEmpty) e.toUpperCase()]
+          ..sort();
+        if (ks.isNotEmpty) out[f] = ks;
+      }
+    }
+  }
+  return out;
+}
+
 /// "Islamic (Form3, Form4) · Maths (Form4)"
 String assignmentsText(Map<String, List<String>> a) => [
   for (final s in ExamService.subjects)
@@ -8406,6 +8424,10 @@ class TeacherScope {
   /// subject -> the forms in which this teacher teaches that subject.
   final Map<String, List<String>> assignments;
 
+  /// form -> the only classes of that form this teacher teaches (a form that
+  /// is missing = every class of it).
+  final Map<String, List<String>> formClasses;
+
   /// A student account: sees only the own record (see [_LinkStudentBody]).
   final bool isStudent;
   final String studentId, sectionId;
@@ -8419,6 +8441,7 @@ class TeacherScope {
     this.subjects = const [],
     this.forms = const [],
     this.assignments = const {},
+    this.formClasses = const {},
     this.isStudent = false,
     this.studentId = '',
     this.sectionId = '',
@@ -8464,7 +8487,14 @@ class TeacherScope {
       return [for (final s in l) if (keys.contains('${s.form}|${s.classKey}')) s];
     }
     if (allSections) return l;
-    return restricted ? [for (final s in l) if (forms.contains(s.form)) s] : l;
+    if (!restricted) return l;
+    return [
+      for (final s in l)
+        if (forms.contains(s.form) &&
+            (formClasses[s.form] == null ||
+                formClasses[s.form]!.contains(s.classKey)))
+          s
+    ];
   }
 }
 
@@ -8526,6 +8556,7 @@ class _ScopeGateState extends State<_ScopeGate> {
                 'subjects': t.subjects,
                 'forms': t.forms,
                 'assignments': t.assignments,
+                'formClasses': t.formClasses,
               };
             }
           } catch (_) {}
@@ -8597,7 +8628,8 @@ class _ScopeGateState extends State<_ScopeGate> {
               if (asg.containsKey(s)) s
           ],
           forms: formsOfAssignments(asg),
-          assignments: asg);
+          assignments: asg,
+          formClasses: parseFormClasses(_teacher));
     } else {
       teacherScope.value = TeacherScope.open;
     }
@@ -35821,7 +35853,11 @@ final bool allSections;
 
 /// subject -> the forms in which this person teaches it.
 final Map<String, List<String>> assignments;
+
+/// form -> only these classes of the form (missing = the whole form).
+final Map<String, List<String>> formClasses;
 const TeacherInfo({
+this.formClasses = const {},
 this.allSections = false,
 required this.id,
 required this.name,
@@ -35867,6 +35903,7 @@ subjects: asg.isEmpty
     : [for (final s in ExamService.subjects) if (asg.containsKey(s)) s],
 forms: asg.isEmpty ? list('forms') : formsOfAssignments(asg),
 assignments: asg,
+formClasses: parseFormClasses(m),
 allSections: m['allSections'] == true,
 );
 }
@@ -36169,6 +36206,7 @@ await ref.set({
 'subjects': t.subjects,
 'forms': t.forms,
 'assignments': t.assignments,
+'formClasses': t.formClasses,
 'allSections': t.allSections,
 'updatedBy': FirebaseAuth.instance.currentUser?.uid,
 'updatedAt': FieldValue.serverTimestamp(),
@@ -36176,7 +36214,7 @@ await ref.set({
 // keep a subject that was just removed.
 }, SetOptions(mergeFields: [
 'name', 'role', 'phone', 'email', 'subjects', 'forms', 'assignments',
-'allSections', 'updatedBy', 'updatedAt',
+'formClasses', 'allSections', 'updatedBy', 'updatedAt',
 ]));
 await _ensureUser(ref.id, t);
 return ref.id;
@@ -36255,6 +36293,25 @@ for (final e in (t?.assignments ?? const <String, List<String>>{}).entries)
 e.key: {...e.value},
 };
 String? error, assignError;
+// form -> the classes (A, B ...) that exist in it, read from the sections
+final classKeys = <String, List<String>>{};
+try {
+final qs = await FirebaseFirestore.instance.collection('sections').get();
+final tmp = <String, Set<String>>{};
+for (final d in qs.docs) {
+final sec = SectionInfo.fromDoc(d);
+if (sec.classKey.isNotEmpty) (tmp[sec.form] ??= <String>{}).add(sec.classKey);
+}
+for (final e in tmp.entries) {
+classKeys[e.key] = e.value.toList()..sort();
+}
+} catch (_) {}
+if (!context.mounted) return;
+// form -> the classes this person is limited to (empty = the whole form)
+final fcl = <String, Set<String>>{
+for (final e in (t?.formClasses ?? const <String, List<String>>{}).entries)
+e.key: {...e.value},
+};
 
 final result = await showDialog<TeacherInfo>(
 context: context,
@@ -36476,6 +36533,62 @@ on
 ),
 ),
 ],
+// optional: limit a form to some classes (e.g. Form1 -> 1A only)
+if (assign.isNotEmpty &&
+formsOfAssignments({
+for (final e in assign.entries) e.key: e.value.toList()
+}).any((f) => (classKeys[f] ?? const <String>[]).isNotEmpty)) ...[
+const SizedBox(height: 8),
+const Text('Classes (optional)',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 2),
+Text(
+'Leave "All classes" to teach the whole form, or tick '
+'only the classes this person teaches (for example '
+'Form1: 1A).',
+style: TextStyle(
+fontSize: 12.5, color: Colors.grey.shade700)),
+const SizedBox(height: 8),
+for (final f in formsOfAssignments({
+for (final e in assign.entries) e.key: e.value.toList()
+}))
+if ((classKeys[f] ?? const <String>[]).isNotEmpty)
+Container(
+width: double.infinity,
+margin: const EdgeInsets.only(bottom: 8),
+padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+decoration: BoxDecoration(
+border: Border.all(color: Colors.grey.shade300),
+borderRadius: BorderRadius.circular(10),
+),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(f,
+style: const TextStyle(
+fontWeight: FontWeight.w700)),
+const SizedBox(height: 6),
+Wrap(spacing: 6, runSpacing: 6, children: [
+FilterChip(
+label: const Text('All classes'),
+selected: (fcl[f] ?? const <String>{}).isEmpty,
+onSelected: (_) => setD(() => fcl.remove(f)),
+),
+for (final k in classKeys[f]!)
+FilterChip(
+label: Text(SectionInfo.code(f, k)),
+selected: fcl[f]?.contains(k) ?? false,
+onSelected: (on) => setD(() {
+final set = fcl.putIfAbsent(f, () => <String>{});
+on ? set.add(k) : set.remove(k);
+if (set.isEmpty) fcl.remove(f);
+}),
+),
+]),
+],
+),
+),
+],
 if (assignError != null)
 Padding(
 padding: const EdgeInsets.only(top: 4),
@@ -36523,6 +36636,13 @@ email: email.text.trim(),
 subjects: asg.keys.toList(),
 forms: formsOfAssignments(asg),
 assignments: asg,
+formClasses: {
+// only forms still taught; all classes ticked = no limit
+for (final f in formsOfAssignments(asg))
+if ((fcl[f] ?? const <String>{}).isNotEmpty &&
+(fcl[f]!.length < (classKeys[f]?.length ?? 0)))
+f: (fcl[f]!.toList()..sort()),
+},
 allSections: allSec,
 ),
 );
@@ -36704,7 +36824,12 @@ final cs = Theme.of(context).colorScheme;
 final ac = _avatarColor(t.name);
 final rs = _roleStyle(t.role);
 final subjectChips = <Widget>[];
-String fs(List<String> l) => l.join(', ');
+String fs(List<String> l) => l.map((f) {
+final k = t.formClasses[f];
+return k == null || k.isEmpty
+? f
+    : '$f (${k.map((c) => SectionInfo.code(f, c)).join(', ')})';
+}).join(', ');
 if (t.assignments.isNotEmpty) {
 for (final sub in ExamService.subjects) {
 final f = t.assignments[sub];
