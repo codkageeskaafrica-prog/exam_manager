@@ -5587,6 +5587,8 @@ class ExamLayoutService {
   /// Puts every class back to "zero sections": the divided sections
   /// (1A-A, 1A-B ...) are removed and all their students go to the whole
   /// class (1A), which is created again when dividing had removed it.
+  /// A student who already has a copy in the whole class is NOT moved again,
+  /// so the number of students of a class never grows.
   /// Used for an exam that has no saved sections of its own yet, so it does
   /// not inherit the sections of the exam that was just left (those stay
   /// saved in that exam's own layout). Returns how many students moved.
@@ -5624,13 +5626,37 @@ class ExamLayoutService {
       await _step('writing collection "sections"', () => cb.commit());
     }
 
-    // 2) the students of every divided section go back to their class
+    // 2) the students of every divided section go back to their class,
+    //    but NEVER twice: a student that already has a copy in the whole
+    //    class (same form + class + name) is left alone, so nobody is
+    //    duplicated. Only students that have no whole-class copy are moved.
+    String norm(String n) {
+      final w = n
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+          .split(RegExp(r'\s+'))
+          .where((x) => x.isNotEmpty)
+          .toList()
+        ..sort();
+      return w.join(' ');
+    }
+
+    final inWhole = <String>{};
+    for (final x in stu.docs) {
+      final c = byId['${x.data()['sectionId'] ?? ''}'];
+      if (c == null || c.isSub) continue;
+      inWhole.add('${c.form}|${c.classKey}|${norm('${x.data()['name'] ?? ''}')}');
+    }
     final moves = <(DocumentReference<Map<String, dynamic>>, String)>[];
     for (final x in stu.docs) {
       final cur = byId['${x.data()['sectionId'] ?? ''}'];
       if (cur == null || !cur.isSub) continue;
       final to = whole['${cur.form}|${cur.classKey}'];
-      if (to != null) moves.add((x.reference, to));
+      if (to == null) continue;
+      final k = '${cur.form}|${cur.classKey}|${norm('${x.data()['name'] ?? ''}')}';
+      if (inWhole.contains(k)) continue; // already in the class: no duplicate
+      inWhole.add(k); // two section copies of one person: move only one
+      moves.add((x.reference, to));
     }
     for (var i = 0; i < moves.length; i += 400) {
       final b = _db.batch();
