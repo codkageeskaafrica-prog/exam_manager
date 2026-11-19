@@ -5533,13 +5533,23 @@ class _UploadAllButtonState extends State<_UploadAllButton> {
 /// active, the sections of the exam being left are saved, and the saved
 /// sections of the new exam are brought back: the section documents
 /// (classes and divided sections) and the section of every student.
-/// A new exam that has no saved sections yet starts with the current ones.
+/// A new exam that has no saved sections yet starts with NO divided sections:
+/// every class is whole again (each exam must have its own sections).
 /// Stored in examLayouts/{exam} (the lists are saved as text).
 class ExamLayoutService {
   static final _db = FirebaseFirestore.instance;
 
   static DocumentReference<Map<String, dynamic>> _ref(String exam) =>
       _db.collection('examLayouts').doc(SchoolService.subjectKey(exam));
+
+  /// Runs [f]; if it fails, the error says which step failed.
+  static Future<T> _step<T>(String what, Future<T> Function() f) async {
+    try {
+      return await f();
+    } catch (e) {
+      throw Exception('$what failed ($e)');
+    }
+  }
 
   /// True when [exam] already has its own saved sections.
   static Future<bool> has(String exam) async {
@@ -5553,9 +5563,11 @@ class ExamLayoutService {
   /// Saves the current sections and the section of every student as the
   /// layout of [exam].
   static Future<void> save(String exam) async {
-    final secs = await _db.collection('sections').get();
-    final stu = await _db.collection('students').get();
-    await _ref(exam).set({
+    final secs = await _step('reading collection "sections"',
+            () => _db.collection('sections').get());
+    final stu = await _step('reading collection "students"',
+            () => _db.collection('students').get());
+    await _step('writing collection "examLayouts"', () => _ref(exam).set({
       'exam': exam,
       'sections': jsonEncode([
         for (final d in secs.docs)
@@ -5569,14 +5581,87 @@ class ExamLayoutService {
         for (final d in stu.docs) d.id: '${d.data()['sectionId'] ?? ''}'
       }),
       'savedAt': FieldValue.serverTimestamp(),
-    });
+    }));
+  }
+
+  /// Puts every class back to "zero sections": the divided sections
+  /// (1A-A, 1A-B ...) are removed and all their students go to the whole
+  /// class (1A), which is created again when dividing had removed it.
+  /// Used for an exam that has no saved sections of its own yet, so it does
+  /// not inherit the sections of the exam that was just left (those stay
+  /// saved in that exam's own layout). Returns how many students moved.
+  static Future<int> resetToUndivided() async {
+    final secsCol = _db.collection('sections');
+    final secs = await _step('reading collection "sections"', () => secsCol.get());
+    final stu = await _step('reading collection "students"',
+            () => _db.collection('students').get());
+    final infos = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
+    final byId = {for (final i in infos) i.id: i};
+
+    // "form|classKey" -> id of its whole-class document (existing or new)
+    final whole = <String, String>{};
+    for (final i in infos) {
+      if (!i.isSub) whole['${i.form}|${i.classKey}'] = i.id;
+    }
+
+    // 1) a whole-class document for every class that only has sections
+    final cb = _db.batch();
+    var created = 0;
+    for (final i in infos) {
+      if (!i.isSub) continue;
+      final key = '${i.form}|${i.classKey}';
+      if (whole.containsKey(key)) continue;
+      final ref = secsCol.doc();
+      whole[key] = ref.id;
+      cb.set(ref, {
+        'form': i.form,
+        'name': i.classKey,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      created++;
+    }
+    if (created > 0) {
+      await _step('writing collection "sections"', () => cb.commit());
+    }
+
+    // 2) the students of every divided section go back to their class
+    final moves = <(DocumentReference<Map<String, dynamic>>, String)>[];
+    for (final x in stu.docs) {
+      final cur = byId['${x.data()['sectionId'] ?? ''}'];
+      if (cur == null || !cur.isSub) continue;
+      final to = whole['${cur.form}|${cur.classKey}'];
+      if (to != null) moves.add((x.reference, to));
+    }
+    for (var i = 0; i < moves.length; i += 400) {
+      final b = _db.batch();
+      for (final mv in moves.skip(i).take(400)) {
+        b.update(mv.$1, {'sectionId': mv.$2});
+      }
+      await _step('updating collection "students"', () => b.commit());
+    }
+
+    // 3) the divided sections are removed (they stay saved in the layout of
+    //    the exam they belong to)
+    final subs = [
+      for (final d in secs.docs)
+        if (byId[d.id]!.isSub) d.reference
+    ];
+    for (var i = 0; i < subs.length; i += 400) {
+      final b = _db.batch();
+      for (final r in subs.skip(i).take(400)) {
+        b.delete(r);
+      }
+      await _step('deleting from collection "sections"', () => b.commit());
+    }
+    return moves.length;
   }
 
   /// Brings back the saved layout of [exam]. Returns null when [exam] has no
   /// saved layout (the current sections then stay as they are), otherwise
   /// how many students changed section.
   static Future<int?> restore(String exam) async {
-    final d = await _ref(exam).get();
+    final d = await _step(
+        'reading collection "examLayouts"', () => _ref(exam).get());
     if (!d.exists) return null;
     final m = d.data()!;
     final tSecs = <Map<String, dynamic>>[
@@ -5589,8 +5674,10 @@ class ExamLayoutService {
     };
     final tIds = {for (final t in tSecs) '${t['id']}'};
     final secsCol = _db.collection('sections');
-    final curSecs = await secsCol.get();
-    final curStu = await _db.collection('students').get();
+    final curSecs =
+    await _step('reading collection "sections"', () => secsCol.get());
+    final curStu = await _step('reading collection "students"',
+            () => _db.collection('students').get());
     final curInfo = {for (final x in curSecs.docs) x.id: SectionInfo.fromDoc(x)};
 
     // 1) the section documents of that exam (same ids as when saved)
@@ -5606,7 +5693,7 @@ class ExamLayoutService {
             },
             SetOptions(merge: true));
       }
-      await b.commit();
+      await _step('writing collection "sections"', () => b.commit());
     }
 
     // 2) every student goes to the section he / she had in that exam; a
@@ -5660,7 +5747,7 @@ class ExamLayoutService {
       for (final mv in moves.skip(i).take(400)) {
         b.update(mv.$1, {'sectionId': mv.$2});
       }
-      await b.commit();
+      await _step('updating collection "students"', () => b.commit());
     }
 
     // 3) sections that are not part of that exam's layout are removed (they
@@ -5680,7 +5767,7 @@ class ExamLayoutService {
       for (final r in extra.skip(i).take(400)) {
         b.delete(r);
       }
-      await b.commit();
+      await _step('deleting from collection "sections"', () => b.commit());
     }
     return moves.length;
   }
@@ -5727,9 +5814,11 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
                         'sections of "$exam" (classes, divided sections and '
                         'the section of every student) are brought back.'
                         : '"$exam" has no sections of its own yet, so it starts '
-                        'as a copy of the sections of "$leaving". After that '
-                        'each exam keeps its own sections: changes you make '
-                        'while "$exam" is active do not change "$leaving".',
+                        'with ZERO divided sections: every class is whole '
+                        'again and you can divide the classes for "$exam". '
+                        'The sections of "$leaving" stay saved and come back '
+                        'when you switch to it. Each exam keeps its own '
+                        'sections.',
                     style: const TextStyle(fontSize: 12.5)),
               ],
               const SizedBox(height: 14),
@@ -5788,10 +5877,14 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
     try {
       await ExamLayoutService.save(leaving);
       final moved = await ExamLayoutService.restore(exam);
-      // a new exam gets its own saved copy right away
-      if (moved == null) await ExamLayoutService.save(exam);
+      if (moved == null) {
+        // a new exam has no sections yet: start from zero (undivided
+        // classes) and save that as its own layout right away
+        await ExamLayoutService.resetToUndivided();
+        await ExamLayoutService.save(exam);
+      }
       layoutNote = moved == null
-          ? 'Sections: "$exam" starts with the current sections'
+          ? 'Sections: "$exam" starts with no divided sections'
           : 'Sections of "$exam" restored';
       nav.pop();
     } catch (e) {
