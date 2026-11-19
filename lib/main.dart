@@ -36621,6 +36621,225 @@ t.role.toLowerCase().contains(q) ||
 t.subjects.any((s) => s.toLowerCase().contains(q));
 }
 
+static const _palette = [
+Color(0xFF1E88E5), Color(0xFF8E24AA), Color(0xFF00897B), Color(0xFFF4511E),
+Color(0xFF3949AB), Color(0xFFC0CA33), Color(0xFFD81B60), Color(0xFF6D4C41),
+];
+
+Color _avatarColor(String name) =>
+_palette[name.codeUnits.fold<int>(0, (a, b) => a + b) % _palette.length];
+
+({Color color, IconData icon}) _roleStyle(String role) => switch (role) {
+'Head teacher' => (color: const Color(0xFF6A1B9A), icon: Icons.workspace_premium),
+'Deputy head' => (color: const Color(0xFF3949AB), icon: Icons.military_tech),
+'Staff' => (color: const Color(0xFFEF6C00), icon: Icons.badge_outlined),
+_ => (color: const Color(0xFF1565C0), icon: Icons.school_outlined),
+};
+
+Widget _stat(String label, int n, IconData icon, String value) {
+final on = _filter == value;
+return Expanded(
+child: InkWell(
+borderRadius: BorderRadius.circular(16),
+onTap: () => setState(() => _filter = value),
+child: AnimatedContainer(
+duration: const Duration(milliseconds: 180),
+padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+decoration: BoxDecoration(
+color: on ? Colors.white : Colors.white.withAlpha(40),
+borderRadius: BorderRadius.circular(16),
+border: Border.all(
+color: Colors.white.withAlpha(on ? 255 : 90), width: 1.2),
+),
+child: Row(children: [
+Icon(icon,
+size: 26, color: on ? const Color(0xFF1565C0) : Colors.white),
+const SizedBox(width: 10),
+Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Text('$n',
+style: TextStyle(
+fontSize: 22,
+height: 1.05,
+fontWeight: FontWeight.w800,
+color: on ? const Color(0xFF0D47A1) : Colors.white)),
+Text(label,
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w600,
+color: on ? const Color(0xFF455A64) : Colors.white70)),
+]),
+]),
+),
+),
+);
+}
+
+Widget _chip(String text, String? sub, Color c) => Container(
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+decoration: BoxDecoration(
+color: c.withAlpha(24),
+borderRadius: BorderRadius.circular(20),
+border: Border.all(color: c.withAlpha(70)),
+),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Text(text,
+style: TextStyle(
+fontSize: 12.5, fontWeight: FontWeight.w700, color: c)),
+if (sub != null && sub.isNotEmpty) ...[
+const SizedBox(width: 6),
+Container(
+padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+decoration: BoxDecoration(
+color: c.withAlpha(36), borderRadius: BorderRadius.circular(10)),
+child: Text(sub,
+style: TextStyle(
+fontSize: 11, fontWeight: FontWeight.w700, color: c)),
+),
+],
+]),
+);
+
+Widget _contact(IconData icon, String text) => Padding(
+padding: const EdgeInsets.only(top: 3),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(icon, size: 15, color: Colors.black45),
+const SizedBox(width: 6),
+Flexible(
+child: Text(text,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(fontSize: 13, color: Colors.black87)),
+),
+]),
+);
+
+Widget _card(TeacherInfo t, double width) {
+final cs = Theme.of(context).colorScheme;
+final ac = _avatarColor(t.name);
+final rs = _roleStyle(t.role);
+final subjectChips = <Widget>[];
+String fs(List<String> l) =>
+l.map((f) => f.replaceFirst(RegExp(r'^Form\s*'), 'F')).join(', ');
+if (t.assignments.isNotEmpty) {
+for (final sub in ExamService.subjects) {
+final f = t.assignments[sub];
+if (f != null && f.isNotEmpty) {
+subjectChips.add(_chip(sub, fs(f), cs.primary));
+}
+}
+} else {
+for (final sub in t.subjects) {
+subjectChips.add(_chip(sub, null, cs.primary));
+}
+for (final f in t.forms) {
+subjectChips.add(_chip(f, null, const Color(0xFF00897B)));
+}
+}
+return SizedBox(
+width: width,
+child: Card(
+elevation: 0,
+margin: EdgeInsets.zero,
+clipBehavior: Clip.antiAlias,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(20),
+side: BorderSide(color: cs.outlineVariant.withAlpha(140)),
+),
+child: InkWell(
+onTap: () => _edit(t),
+child: IntrinsicHeight(
+child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+Container(width: 5, color: ac), // colour edge
+Expanded(
+child: Padding(
+padding: const EdgeInsets.fromLTRB(14, 14, 6, 14),
+child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Container(
+width: 52,
+height: 52,
+alignment: Alignment.center,
+decoration: BoxDecoration(
+shape: BoxShape.circle,
+gradient: LinearGradient(
+colors: [ac, ac.withAlpha(190)],
+begin: Alignment.topLeft,
+end: Alignment.bottomRight,
+),
+),
+child: Text(t.initials,
+style: const TextStyle(
+color: Colors.white,
+fontSize: 18,
+fontWeight: FontWeight.w800)),
+),
+const SizedBox(width: 14),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(t.name,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 16.5, fontWeight: FontWeight.w700)),
+const SizedBox(height: 4),
+Container(
+padding: const EdgeInsets.symmetric(
+horizontal: 9, vertical: 3),
+decoration: BoxDecoration(
+color: rs.color.withAlpha(26),
+borderRadius: BorderRadius.circular(20),
+),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(rs.icon, size: 14, color: rs.color),
+const SizedBox(width: 4),
+Text(t.role,
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w700,
+color: rs.color)),
+]),
+),
+const SizedBox(height: 4),
+if (t.phone.isNotEmpty) _contact(Icons.phone_outlined, t.phone),
+if (t.email.isNotEmpty) _contact(Icons.mail_outline, t.email),
+if (subjectChips.isNotEmpty) ...[
+const SizedBox(height: 10),
+Wrap(spacing: 6, runSpacing: 6, children: subjectChips),
+],
+],
+),
+),
+Column(mainAxisSize: MainAxisSize.min, children: [
+IconButton(
+tooltip: 'Edit',
+visualDensity: VisualDensity.compact,
+style: IconButton.styleFrom(
+backgroundColor: cs.primary.withAlpha(22)),
+icon: Icon(Icons.edit_outlined, size: 20, color: cs.primary),
+onPressed: () => _edit(t),
+),
+const SizedBox(height: 6),
+IconButton(
+tooltip: 'Remove',
+visualDensity: VisualDensity.compact,
+style: IconButton.styleFrom(
+backgroundColor: const Color(0xFFC62828).withAlpha(22)),
+icon: const Icon(Icons.delete_outline,
+size: 20, color: Color(0xFFC62828)),
+onPressed: () => _remove(t),
+),
+]),
+]),
+),
+),
+]),
+),
+),
+),
+);
+}
+
 @override
 Widget build(BuildContext context) {
 final cs = Theme.of(context).colorScheme;
@@ -36644,11 +36863,52 @@ final teachingN = all.where((t) => t.isTeaching).length;
 return Align(
 alignment: Alignment.topCenter,
 child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 760),
-child: Column(children: [
-Padding(
-padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-child: TextField(
+constraints: const BoxConstraints(maxWidth: 1100),
+child: LayoutBuilder(builder: (context, box) {
+final cols = box.maxWidth >= 900 ? 2 : 1;
+const gap = 12.0;
+final cardW = (box.maxWidth - 32 - gap * (cols - 1)) / cols;
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+children: [
+// header with the three counters (they also filter)
+Container(
+padding: const EdgeInsets.all(14),
+decoration: BoxDecoration(
+borderRadius: BorderRadius.circular(22),
+gradient: const LinearGradient(
+colors: [Color(0xFF1565C0), Color(0xFF00897B)],
+begin: Alignment.topLeft,
+end: Alignment.bottomRight,
+),
+boxShadow: [
+BoxShadow(
+color: const Color(0xFF1565C0).withAlpha(60),
+blurRadius: 14,
+offset: const Offset(0, 6)),
+],
+),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+const Padding(
+padding: EdgeInsets.fromLTRB(4, 0, 4, 10),
+child: Text('Our team',
+style: TextStyle(
+color: Colors.white,
+fontSize: 18,
+fontWeight: FontWeight.w800)),
+),
+Row(children: [
+_stat('All', all.length, Icons.groups, 'All'),
+const SizedBox(width: 10),
+_stat('Teaching', teachingN, Icons.school, 'Teaching'),
+const SizedBox(width: 10),
+_stat('Staff', all.length - teachingN,
+Icons.badge, 'Staff'),
+]),
+]),
+),
+const SizedBox(height: 14),
+TextField(
 controller: _search,
 onChanged: (_) => setState(() {}),
 decoration: InputDecoration(
@@ -36660,107 +36920,48 @@ suffixIcon: _search.text.isEmpty
 icon: const Icon(Icons.clear),
 onPressed: () => setState(_search.clear),
 ),
-border: const OutlineInputBorder(),
-isDense: true,
+filled: true,
+fillColor: cs.surfaceContainerHighest.withAlpha(120),
+contentPadding: const EdgeInsets.symmetric(vertical: 14),
+border: OutlineInputBorder(
+borderRadius: BorderRadius.circular(16),
+borderSide: BorderSide.none,
 ),
 ),
 ),
 Padding(
-padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-child: Row(children: [
-Wrap(spacing: 8, children: [
-for (final f in const ['All', 'Teaching', 'Staff'])
-ChoiceChip(
-label: Text(f),
-selected: _filter == f,
-onSelected: (_) => setState(() => _filter = f),
-),
-]),
-const Spacer(),
-Text(
-'${all.length} total · $teachingN teaching · '
-'${all.length - teachingN} staff',
-style: const TextStyle(
-fontSize: 12, color: Colors.black54)),
-]),
-),
-Expanded(
-child: shown.isEmpty
-? Center(
-child: Padding(
-padding: const EdgeInsets.all(24),
+padding: const EdgeInsets.fromLTRB(4, 12, 4, 10),
 child: Text(
+'${shown.length} ${shown.length == 1 ? 'person' : 'people'}'
+'${_filter == 'All' ? '' : ' · $_filter'}',
+style: const TextStyle(
+fontSize: 12.5,
+fontWeight: FontWeight.w600,
+color: Colors.black54)),
+),
+if (shown.isEmpty)
+Padding(
+padding: const EdgeInsets.all(32),
+child: Column(children: [
+Icon(Icons.person_search,
+size: 54, color: cs.outline),
+const SizedBox(height: 8),
+Text(
 all.isEmpty
 ? 'No teachers or staff yet. Tap Add.'
     : 'Nobody matches your search.',
 textAlign: TextAlign.center),
-),
-)
-    : ListView.builder(
-padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
-itemCount: shown.length,
-itemBuilder: (context, i) {
-final t = shown[i];
-final info = [
-t.role,
-if (t.phone.isNotEmpty) t.phone,
-if (t.email.isNotEmpty) t.email,
-].join(' · ');
-return Card(
-child: ListTile(
-onTap: () => _edit(t),
-isThreeLine:
-t.subjects.isNotEmpty || t.forms.isNotEmpty,
-leading: CircleAvatar(
-backgroundColor: cs.primaryContainer,
-child: Text(t.initials),
-),
-title: Text(t.name),
-subtitle: Column(
-crossAxisAlignment: CrossAxisAlignment.start,
-children: [
-Text(info),
-if (t.subjects.isNotEmpty ||
-t.forms.isNotEmpty)
-Padding(
-padding: const EdgeInsets.only(top: 4),
-child: Text(
-t.assignments.isNotEmpty
-? assignmentsText(t.assignments)
-    : [
-if (t.subjects.isNotEmpty)
-t.subjects.join(', '),
-if (t.forms.isNotEmpty)
-t.forms.join(', '),
-].join('  |  '),
-style: TextStyle(
-color: cs.primary,
-fontWeight: FontWeight.w600),
-),
-),
-],
-),
-trailing: Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-IconButton(
-tooltip: 'Edit',
-icon: const Icon(Icons.edit_outlined),
-onPressed: () => _edit(t),
-),
-IconButton(
-tooltip: 'Remove',
-icon: const Icon(Icons.delete_outline),
-onPressed: () => _remove(t),
-),
-],
-),
-),
-);
-},
-),
-),
 ]),
+)
+else
+Wrap(
+spacing: gap,
+runSpacing: gap,
+children: [for (final t in shown) _card(t, cardW)],
+),
+],
+);
+}),
 ),
 );
 },
