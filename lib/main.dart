@@ -5560,6 +5560,54 @@ class ExamLayoutService {
     }
   }
 
+  /// True when the saved layout of [exam] is damaged: the same student
+  /// (form + class + name) sits TWICE in the whole class. A good layout has
+  /// at most one copy in the whole class (the other copy is in a section).
+  /// Such a layout was saved by an earlier version and would bring the
+  /// duplicates back, so it must not be restored.
+  static Future<bool> isDuplicated(String exam) async {
+    try {
+      final d = await _ref(exam).get();
+      if (!d.exists) return false;
+      final m = d.data()!;
+      final secs = {
+        for (final e in jsonDecode('${m['sections']}') as List)
+          '${(e as Map)['id']}': SectionInfo(
+              id: '${e['id']}', form: '${e['form']}', name: '${e['name']}')
+      };
+      final tStu = <String, String>{
+        for (final e in (jsonDecode('${m['students']}') as Map).entries)
+          '${e.key}': '${e.value}'
+      };
+      final stu = await _db.collection('students').get();
+      String norm(String n) {
+        final w = n
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+            .split(RegExp(r'\s+'))
+            .where((x) => x.isNotEmpty)
+            .toList()
+          ..sort();
+        return w.join(' ');
+      }
+
+      final seen = <String>{};
+      for (final x in stu.docs) {
+        final sec = secs[tStu[x.id] ?? ''];
+        if (sec == null || sec.isSub) continue;
+        final k = '${sec.form}|${sec.classKey}|${norm('${x.data()['name'] ?? ''}')}';
+        if (!seen.add(k)) return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Deletes the saved layout of [exam] (it then starts again from zero).
+  static Future<void> discard(String exam) =>
+      _step('deleting collection "examLayouts"', () => _ref(exam).delete());
+
   /// Saves the current sections and the section of every student as the
   /// layout of [exam].
   static Future<void> save(String exam) async {
@@ -5813,7 +5861,10 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
   final closedForms = <String>{...s.closedFormsOf(exam)};
   // the sections ALWAYS follow the exam
   final leaving = s.currentExam;
-  final hasLayout = leaving != exam && await ExamLayoutService.has(exam);
+  final layoutExists = leaving != exam && await ExamLayoutService.has(exam);
+  // a saved layout that holds duplicated students is never used
+  final layoutBad = layoutExists && await ExamLayoutService.isDuplicated(exam);
+  final hasLayout = layoutExists && !layoutBad;
   if (!context.mounted) return;
   final ok = await showDialog<bool>(
     context: context,
@@ -5902,6 +5953,7 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
     );
     try {
       await ExamLayoutService.save(leaving);
+      if (layoutBad) await ExamLayoutService.discard(exam);
       final moved = await ExamLayoutService.restore(exam);
       if (moved == null) {
         // a new exam has no sections yet: start from zero (undivided
