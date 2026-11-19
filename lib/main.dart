@@ -5604,6 +5604,70 @@ class ExamLayoutService {
     }
   }
 
+  /// Finds students that sit TWICE in the same whole class (same form +
+  /// class + name). Returns the records that are the extra copies (the copy
+  /// with a login / a real student number is the one that is kept). With
+  /// [remove] true the extra copies are copied to the collection
+  /// "deletedStudents" (a backup) and then deleted.
+  static Future<int> removeDuplicateStudents({required bool remove}) async {
+    final secs = await _step('reading collection "sections"',
+            () => _db.collection('sections').get());
+    final stu = await _step('reading collection "students"',
+            () => _db.collection('students').get());
+    final info = {for (final d in secs.docs) d.id: SectionInfo.fromDoc(d)};
+    String norm(String n) {
+      final w = n
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+          .split(RegExp(r'\s+'))
+          .where((x) => x.isNotEmpty)
+          .toList()
+        ..sort();
+      return w.join(' ');
+    }
+
+    final groups = <String, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
+    for (final x in stu.docs) {
+      final c = info['${x.data()['sectionId'] ?? ''}'];
+      if (c == null || c.isSub) continue;
+      final nm = norm('${x.data()['name'] ?? ''}');
+      if (nm.isEmpty) continue;
+      groups.putIfAbsent('${c.form}|${c.classKey}|$nm', () => []).add(x);
+    }
+    int score(QueryDocumentSnapshot<Map<String, dynamic>> x) {
+      final m = x.data();
+      var v = 0;
+      if ('${m['accountUid'] ?? ''}'.isNotEmpty) v += 4;
+      if ('${m['studentNo'] ?? ''}'.isNotEmpty && m['studentNoAuto'] != true) v += 2;
+      if ('${m['phone'] ?? ''}'.isNotEmpty) v += 1;
+      return v;
+    }
+
+    final extra = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    for (final g in groups.values) {
+      if (g.length < 2) continue;
+      g.sort((a, b) {
+        final c = score(b).compareTo(score(a));
+        return c != 0 ? c : a.id.compareTo(b.id);
+      });
+      extra.addAll(g.skip(1));
+    }
+    if (!remove) return extra.length;
+    for (var i = 0; i < extra.length; i += 200) {
+      final b = _db.batch();
+      for (final x in extra.skip(i).take(200)) {
+        b.set(_db.collection('deletedStudents').doc(x.id), {
+          ...x.data(),
+          'deletedReason': 'duplicate',
+          'deletedAt': FieldValue.serverTimestamp(),
+        });
+        b.delete(x.reference);
+      }
+      await _step('removing duplicate students', () => b.commit());
+    }
+    return extra.length;
+  }
+
   /// Deletes the saved layout of [exam] (it then starts again from zero).
   static Future<void> discard(String exam) =>
       _step('deleting collection "examLayouts"', () => _ref(exam).delete());
@@ -17801,6 +17865,59 @@ State<_SectionsTools> createState() => _SectionsToolsState();
 class _SectionsToolsState extends State<_SectionsTools> {
 bool _busy = false;
 
+/// Removes students that appear twice in the same class (the extra copy
+/// is first saved in the "deletedStudents" backup collection).
+Future<void> _fixDuplicates() async {
+final messenger = ScaffoldMessenger.of(context);
+setState(() => _busy = true);
+int n;
+try {
+n = await ExamLayoutService.removeDuplicateStudents(remove: false);
+} catch (e) {
+if (mounted) setState(() => _busy = false);
+messenger.showSnackBar(SnackBar(
+content: Text('${'$e'.replaceFirst('Exception: ', '')}')));
+return;
+}
+if (mounted) setState(() => _busy = false);
+if (n == 0) {
+messenger.showSnackBar(
+const SnackBar(content: Text('No duplicate students found.')));
+return;
+}
+if (!mounted) return;
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Remove duplicate students?'),
+content: Text('$n students appear twice in the same class. One copy '
+'of each is kept (the one with a login or a student number) and '
+'the extra copy is removed. The removed copies are saved in the '
+'backup collection "deletedStudents".'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: Text('Remove $n')),
+],
+),
+);
+if (ok != true || !mounted) return;
+setState(() => _busy = true);
+try {
+final r = await ExamLayoutService.removeDuplicateStudents(remove: true);
+messenger.showSnackBar(
+SnackBar(content: Text('Removed $r duplicate students')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
 Future<void> _download() async {
 setState(() => _busy = true);
 final messenger = ScaffoldMessenger.of(context);
@@ -18046,6 +18163,13 @@ tooltip: 'Print sections',
 icon: Icons.print,
 color: const Color(0xFF546E7A),
 onTap: _printAll,
+),
+_BarAction(
+label: 'Fix duplicates',
+tooltip: 'Remove students that appear twice in a class',
+icon: Icons.content_copy,
+color: const Color(0xFFEF6C00),
+onTap: _fixDuplicates,
 ),
 _BarAction(
 label: 'Delete all',
