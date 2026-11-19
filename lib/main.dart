@@ -22947,6 +22947,23 @@ if (teacherScope.value.scoped) {
 throw Exception('Only an administrator can create the report.');
 }
 final key = DateFormat('yyyy-MM-dd');
+// leave periods: a student on leave counts as "Leave" on those days
+final leaves = <Map<String, String>>[];
+try {
+final lq = await FirebaseFirestore.instance.collection('studentLeaves').get();
+for (final d in lq.docs) {
+final m = d.data();
+leaves.add({
+'studentId': '${m['studentId'] ?? ''}',
+'from': '${m['from'] ?? ''}',
+'to': '${m['to'] ?? ''}',
+});
+}
+} catch (_) {}
+bool onLeave(String sid, String date) => leaves.any((l) =>
+l['studentId'] == sid &&
+l['from']!.compareTo(date) <= 0 &&
+l['to']!.compareTo(date) >= 0);
 final snap = await FirebaseFirestore.instance
     .collection('dailyAttendance')
     .where('date', isGreaterThanOrEqualTo: key.format(from))
@@ -23048,8 +23065,16 @@ return c != 0
     : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
 });
 
-Map<String, dynamic> marksOf(Map<String, dynamic> r) =>
-r['marks'] is Map ? Map<String, dynamic>.from(r['marks'] as Map) : {};
+Map<String, dynamic> marksOf(Map<String, dynamic> r) {
+final m = r['marks'] is Map
+? Map<String, dynamic>.from(r['marks'] as Map)
+    : <String, dynamic>{};
+// a student on leave that day is shown as Leave
+for (final s in students) {
+if (onLeave(s['id']!, '${r['date']}')) m[s['id']!] = 'l';
+}
+return m;
+}
 
 if (single) {
 final bySession = {
@@ -23060,7 +23085,7 @@ for (final s in students) {
 var pr = 0, ab = 0;
 for (final sh in shifts) {
 final v = bySession[sh]?[s['id']];
-if (v == null) continue;
+if (v == null || v == 'l') continue;
 if (v == 'a') {
 ab++;
 } else {
@@ -23076,7 +23101,9 @@ s['phone']!.isEmpty ? '-' : s['phone']!,
 for (final sh in shifts)
 bySession[sh] == null || bySession[sh]![s['id']] == null
 ? '-'
-    : (bySession[sh]![s['id']] == 'a' ? 'Absent' : 'Present'),
+    : (bySession[sh]![s['id']] == 'a'
+? 'Absent'
+    : (bySession[sh]![s['id']] == 'l' ? 'Leave' : 'Present')),
 ]);
 }
 if (rows.isEmpty) continue;
@@ -23087,8 +23114,11 @@ if (m == null) {
 notes.add('${_shiftName[sh]}: attendance was not taken.');
 } else {
 final ab = students.where((s) => m[s['id']] == 'a').length;
-final pr = students.where((s) => m[s['id']] != null).length - ab;
-notes.add('${_shiftName[sh]}: Present $pr, Absent $ab');
+final lv = students.where((s) => m[s['id']] == 'l').length;
+final pr =
+students.where((s) => m[s['id']] != null).length - ab - lv;
+notes.add('${_shiftName[sh]}: Present $pr, Absent $ab'
+'${lv > 0 ? ', Leave $lv' : ''}');
 }
 }
 if (status.isNotEmpty) {
@@ -23115,11 +23145,15 @@ final rows = <List<String>>[];
 mine.sort((x, y) => '${x['date']}${x['session']}'
     .compareTo('${y['date']}${y['session']}'));
 for (final s in students) {
-var pr = 0, ab = 0;
+var pr = 0, ab = 0, lv = 0;
 final absentOn = <String, List<String>>{}; // date -> shifts
 for (final r in mine) {
 final v = marksOf(r)[s['id']];
 if (v == null) continue;
+if (v == 'l') {
+lv++;
+continue;
+}
 if (v == 'a') {
 ab++;
 absentOn
@@ -23144,6 +23178,7 @@ s['no']!.isEmpty ? '-' : s['no']!,
 s['phone']!.isEmpty ? '-' : s['phone']!,
 '$pr',
 '$ab',
+'$lv',
 '${pr + ab}',
 absentText.isEmpty ? '-' : absentText,
 ]);
@@ -23160,13 +23195,14 @@ headers: const [
 'Phone',
 'Present',
 'Absent',
+'Leave',
 'Sessions',
 'Absent on (shift)'
 ],
 rows: rows,
-weights: const [0.7, 3.4, 1.4, 2.1, 1.0, 1.0, 1.1, 3.8],
-left: const {1, 7},
-text: const {1, 2, 3, 7},
+weights: const [0.7, 3.3, 1.3, 2.0, 1.0, 1.0, 0.9, 1.1, 3.6],
+left: const {1, 8},
+text: const {1, 2, 3, 8},
 notes: [
 'Registers taken: ${mine.length} (Shift A: $a, Shift B: $b)',
 'Class attendance: ${pct(tp, tn)}',
@@ -23259,7 +23295,9 @@ color: tb.rows[r][c] == 'Absent'
 ? PdfColors.red800
     : (tb.rows[r][c] == 'Present'
 ? PdfColors.green800
-    : null)),
+    : (tb.rows[r][c] == 'Leave'
+? PdfColors.blue800
+    : null))),
 ]),
 ],
 ),
@@ -23529,7 +23567,9 @@ jc: tb.left.contains(c) ? 'left' : 'center',
 zebraRow: r.isOdd,
 color: tb.rows[r][c] == 'Absent'
 ? 'C62828'
-    : (tb.rows[r][c] == 'Present' ? '2E7D32' : null)),
+    : (tb.rows[r][c] == 'Present'
+? '2E7D32'
+    : (tb.rows[r][c] == 'Leave' ? '1565C0' : null))),
 ]));
 }
 body.write('</w:tbl>');
@@ -23624,6 +23664,207 @@ late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
 _db.collection('students').snapshots();
 
 String? _classId;
+
+// ---- leave periods (studentLeaves) ----
+// each: id, studentId, from, to (yyyy-MM-dd), reason
+List<Map<String, String>> _leaves = [];
+StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _leaveSub;
+Set<String> _leaveIds = {}; // students on leave on the shown day
+static const _leaveColor = Color(0xFF1565C0);
+
+@override
+void initState() {
+super.initState();
+_leaveSub = _db.collection('studentLeaves').snapshots().listen((q) {
+if (!mounted) return;
+setState(() {
+_leaves = [
+for (final d in q.docs)
+{
+'id': d.id,
+'studentId': '${d.data()['studentId'] ?? ''}',
+'from': '${d.data()['from'] ?? ''}',
+'to': '${d.data()['to'] ?? ''}',
+'reason': '${d.data()['reason'] ?? ''}',
+}
+];
+});
+}, onError: (_) {});
+}
+
+@override
+void dispose() {
+_leaveSub?.cancel();
+super.dispose();
+}
+
+Map<String, String>? _leaveOf(String sid) {
+final k = _dateKey;
+for (final l in _leaves) {
+if (l['studentId'] == sid &&
+l['from']!.compareTo(k) <= 0 &&
+l['to']!.compareTo(k) >= 0) {
+return l;
+}
+}
+return null;
+}
+
+String _shortDay(String key) {
+final dt = DateTime.tryParse(key);
+return dt == null ? key : DateFormat('EEE d MMM yyyy').format(dt);
+}
+
+/// Gives a student leave for a period (the days then show as Leave).
+Future<void> _leaveDialog(Map<String, String> stu) async {
+final fmt = DateFormat('yyyy-MM-dd');
+var from = _date, to = _date;
+final reason = TextEditingController();
+String? err;
+await showDialog<void>(
+context: context,
+builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+final mine = _leaves.where((l) => l['studentId'] == stu['id']).toList()
+..sort((a, b) => b['from']!.compareTo(a['from']!));
+Future<void> pick(bool isFrom) async {
+final p = await showDatePicker(
+context: ctx,
+initialDate: isFrom ? from : to,
+firstDate: DateTime(2020),
+lastDate: DateTime.now().add(const Duration(days: 400)),
+);
+if (p == null) return;
+setD(() {
+final d = DateTime(p.year, p.month, p.day);
+if (isFrom) {
+from = d;
+if (to.isBefore(d)) to = d;
+} else {
+to = d;
+if (from.isAfter(d)) from = d;
+}
+});
+}
+
+return AlertDialog(
+title: Row(children: [
+const Icon(Icons.event_busy, color: _leaveColor),
+const SizedBox(width: 8),
+Expanded(child: Text('Leave · ${stu['name']}')),
+]),
+content: SizedBox(
+width: 420,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+if (mine.isNotEmpty) ...[
+const Text('Leave of this student',
+style: TextStyle(fontWeight: FontWeight.w700)),
+for (final l in mine)
+ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+title: Text(l['from'] == l['to']
+? _shortDay(l['from']!)
+    : '${_shortDay(l['from']!)}  -  ${_shortDay(l['to']!)}'),
+subtitle: l['reason']!.isEmpty
+? null
+    : Text(l['reason']!),
+trailing: IconButton(
+tooltip: 'Cancel this leave',
+icon: const Icon(Icons.delete_outline,
+color: _absentColor),
+onPressed: () async {
+try {
+await _db
+    .collection('studentLeaves')
+    .doc(l['id'])
+    .delete();
+_leaves.removeWhere((x) => x['id'] == l['id']);
+setD(() {});
+if (mounted) setState(() {});
+} catch (e) {
+setD(() => err = 'Could not cancel: $e');
+}
+},
+),
+),
+const Divider(),
+],
+const Text('Give a new leave',
+style: TextStyle(fontWeight: FontWeight.w700)),
+const SizedBox(height: 8),
+Wrap(spacing: 10, runSpacing: 10, children: [
+OutlinedButton.icon(
+onPressed: () => pick(true),
+icon: const Icon(Icons.calendar_today, size: 18),
+label: Text('From ${DateFormat('EEE d MMM yyyy').format(from)}'),
+),
+OutlinedButton.icon(
+onPressed: () => pick(false),
+icon: const Icon(Icons.event, size: 18),
+label: Text('To ${DateFormat('EEE d MMM yyyy').format(to)}'),
+),
+]),
+const SizedBox(height: 10),
+TextField(
+controller: reason,
+decoration: const InputDecoration(
+labelText: 'Reason (optional)',
+border: OutlineInputBorder(),
+isDense: true,
+),
+),
+if (err != null)
+Padding(
+padding: const EdgeInsets.only(top: 8),
+child: Text(err!,
+style: const TextStyle(color: Colors.red)),
+),
+]),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Close')),
+FilledButton.icon(
+icon: const Icon(Icons.save, size: 18),
+label: const Text('Give leave'),
+onPressed: () async {
+try {
+final ref = await _db.collection('studentLeaves').add({
+'studentId': stu['id'],
+'studentName': stu['name'],
+'sectionId': _classId,
+'from': fmt.format(from),
+'to': fmt.format(to),
+'reason': reason.text.trim(),
+'byUid': FirebaseAuth.instance.currentUser?.uid,
+'createdAt': FieldValue.serverTimestamp(),
+});
+_leaves.add({
+'id': ref.id,
+'studentId': stu['id']!,
+'from': fmt.format(from),
+'to': fmt.format(to),
+'reason': reason.text.trim(),
+});
+if (mounted) setState(() => _dirty = true);
+if (ctx.mounted) Navigator.pop(ctx);
+} catch (e) {
+setD(() => err = 'Could not save: $e');
+}
+},
+),
+],
+);
+}),
+);
+reason.dispose();
+}
 
 // ---- report (admin) ----
 DateTime _rFrom = _monday(DateTime.now());
@@ -23823,7 +24064,7 @@ _exists = d.exists;
 _marks = {
 if (m is Map)
 for (final e in m.entries)
-if ('${e.value}' != 'p') '${e.key}': 'a'
+if ('${e.value}' != 'p' && '${e.value}' != 'l') '${e.key}': 'a'
 };
 _loading = false;
 });
@@ -23845,9 +24086,10 @@ await _db.collection('dailyAttendance').doc(_docId).set({
 'sectionId': id,
 'date': _dateKey,
 'session': _session,
-// every student of the class: p = ticked, a = unticked
+// every student of the class: p = ticked, a = unticked, l = on leave
 'marks': {
-for (final sid in _current) sid: _marks[sid] == 'a' ? 'a' : 'p'
+for (final sid in _current)
+sid: _leaveIds.contains(sid) ? 'l' : (_marks[sid] == 'a' ? 'a' : 'p')
 },
 'byUid': me.uid,
 'byName': me.name.isEmpty ? me.email : me.name,
@@ -24147,8 +24389,17 @@ return c != 0
 ? c
     : a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase());
 });
-final absent = students.where((r) => _marks[r['id']] == 'a').length;
-final present = students.length - absent;
+final leaveOf = <String, Map<String, String>>{
+for (final r in students)
+if (_leaveOf(r['id']!) != null) r['id']!: _leaveOf(r['id']!)!
+};
+_leaveIds = leaveOf.keys.toSet();
+String stOf(Map<String, String> r) => leaveOf.containsKey(r['id'])
+? 'l'
+    : (_marks[r['id']] == 'a' ? 'a' : 'p');
+final onLeave = leaveOf.length;
+final absent = students.where((r) => stOf(r) == 'a').length;
+final present = students.length - absent - onLeave;
 // how many numbers are vacant (a removed student)
 final usedNos = {for (final r in students) noOf[r['id']]!};
 final vacantTotal = usedNos.isEmpty
@@ -24165,8 +24416,7 @@ for (var g = prevNo + 1; g < n; g++) {
 items.add(-g);
 }
 }
-if (_show == 'all' ||
-(_show == 'a') == (_marks[students[i]['id']] == 'a')) {
+if (_show == 'all' || stOf(students[i]) == _show) {
 items.add(i);
 }
 if (n > prevNo) prevNo = n;
@@ -24278,6 +24528,20 @@ fontWeight: FontWeight.w600,
 fontSize: 12)),
 onSelected: (_) => setState(() => _show = 'a'),
 ),
+if (onLeave > 0 || _show == 'l')
+ChoiceChip(
+visualDensity: VisualDensity.compact,
+showCheckmark: false,
+selected: _show == 'l',
+selectedColor: _leaveColor.withOpacity(0.2),
+side: const BorderSide(color: _leaveColor),
+label: Text('Leave $onLeave',
+style: const TextStyle(
+color: _leaveColor,
+fontWeight: FontWeight.w600,
+fontSize: 12)),
+onSelected: (_) => setState(() => _show = 'l'),
+),
 if (_exists)
 const Chip(
 visualDensity: VisualDensity.compact,
@@ -24295,28 +24559,56 @@ _removeAllVacant(cid, noOf, students, vacantTotal),
 ]),
 const SizedBox(height: 10),
 Row(children: [
-TextButton.icon(
-onPressed: !canEdit || students.isEmpty
-? null
-    : () => setState(() {
-_marks.clear();
-_dirty = true;
-}),
-icon: const Icon(Icons.check_box, size: 18),
-label: const Text('Tick all'),
-),
-TextButton.icon(
-onPressed: !canEdit || students.isEmpty
-? null
-    : () => setState(() {
-for (final r in students) {
+// ONE checkbox for the whole class: ticked = everybody present
+// (green), unticked = everybody absent (red). Students on leave
+// are not touched.
+Builder(builder: (_) {
+final eligible = [
+for (final r in students)
+if (!leaveOf.containsKey(r['id'])) r
+];
+final nAbs = eligible.where((r) => _marks[r['id']] == 'a').length;
+final bool? allVal = eligible.isEmpty
+? false
+    : (nAbs == 0 ? true : (nAbs == eligible.length ? false : null));
+final col = allVal == true
+? _presentColor
+    : (allVal == false ? _absentColor : Colors.orange.shade700);
+void toggle() => setState(() {
+if (allVal == true) {
+for (final r in eligible) {
 _marks[r['id']!] = 'a';
 }
+} else {
+for (final r in eligible) {
+_marks.remove(r['id']);
+}
+}
 _dirty = true;
-}),
-icon: const Icon(Icons.check_box_outline_blank, size: 18),
-label: const Text('Untick all'),
+});
+final on = canEdit && eligible.isNotEmpty;
+return InkWell(
+borderRadius: BorderRadius.circular(8),
+onTap: on ? toggle : null,
+child: Padding(
+padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Checkbox(
+tristate: true,
+value: allVal,
+activeColor: col,
+side: BorderSide(color: col, width: 2),
+onChanged: on ? (_) => toggle() : null,
 ),
+Text('All',
+style: TextStyle(
+fontWeight: FontWeight.w700,
+fontSize: 14.5,
+color: col)),
+]),
+),
+);
+}),
 const Spacer(),
 FilledButton.icon(
 onPressed: !canEdit || _saving || (_exists && !_dirty)
@@ -24343,7 +24635,9 @@ _msg('This class has no students yet.')
 else if (items.isEmpty)
 _msg(_show == 'a'
 ? 'No student is absent.'
-    : 'No student is present.')
+    : (_show == 'l'
+? 'No student is on leave on this day.'
+    : 'No student is present.'))
 else
 for (final i in items)
 if (i < 0)
@@ -24408,7 +24702,33 @@ style: const TextStyle(
 fontSize: 11.5, color: Colors.black54)),
 ]),
 ),
-Text(_marks[students[i]['id']] == 'a' ? 'Absent' : 'Present',
+if (leaveOf.containsKey(students[i]['id'])) ...[
+Column(
+crossAxisAlignment: CrossAxisAlignment.end,
+children: [
+const Text('Leave',
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w700,
+color: _leaveColor)),
+Text(
+'until ${DateFormat('d MMM').format(DateTime.tryParse(leaveOf[students[i]['id']]!['to']!) ?? _date)}',
+style: const TextStyle(
+fontSize: 10.5,
+color: Colors.black54)),
+]),
+IconButton(
+tooltip: 'Edit or cancel this leave',
+visualDensity: VisualDensity.compact,
+icon: const Icon(Icons.event_busy,
+color: _leaveColor),
+onPressed: () => _leaveDialog(students[i]),
+),
+] else ...[
+Text(
+_marks[students[i]['id']] == 'a'
+? 'Absent'
+    : 'Present',
 style: TextStyle(
 fontSize: 12,
 fontWeight: FontWeight.w600,
@@ -24418,6 +24738,11 @@ color: _marks[students[i]['id']] == 'a'
 Checkbox(
 value: _marks[students[i]['id']] != 'a',
 activeColor: _presentColor,
+side: BorderSide(
+color: _marks[students[i]['id']] == 'a'
+? _absentColor
+    : _presentColor,
+width: 2),
 onChanged: !canEdit
 ? null
     : (on) => setState(() {
@@ -24429,6 +24754,15 @@ _marks[students[i]['id']!] = 'a';
 _dirty = true;
 }),
 ),
+if (canEdit)
+IconButton(
+tooltip: 'Give leave for a period',
+visualDensity: VisualDensity.compact,
+icon: const Icon(Icons.event_busy_outlined,
+color: Colors.black38),
+onPressed: () => _leaveDialog(students[i]),
+),
+],
 ]),
 ),
 ),
@@ -37121,6 +37455,7 @@ Firestore:
     match /teachers/{doc} { allow read, write: if request.auth != null; }
     match /users/{doc} { allow read, write: if request.auth != null; }
     match /attendance/{doc} { allow read, write: if request.auth != null; }
+    match /studentLeaves/{doc} { allow read, write: if request.auth != null; }
     match /assignments/{doc} { allow read, write: if request.auth != null; }
     match /assignmentFiles/{doc} { allow read, write: if request.auth != null; }
     match /results/{doc} { allow read, write: if request.auth != null; } } }
