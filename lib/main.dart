@@ -5527,6 +5527,165 @@ class _UploadAllButtonState extends State<_UploadAllButton> {
 }
 
 
+/// The sections of the school are kept FOR EACH EXAM (Monthly1, Mid-term,
+/// Monthly2, Final...). The sections you see (Sections tab, attendance,
+/// results...) are the ones of the active exam. When another exam is made
+/// active, the sections of the exam being left are saved, and the saved
+/// sections of the new exam are brought back: the section documents
+/// (classes and divided sections) and the section of every student.
+/// A new exam that has no saved sections yet starts with the current ones.
+/// Stored in examLayouts/{exam} (the lists are saved as text).
+class ExamLayoutService {
+  static final _db = FirebaseFirestore.instance;
+
+  static DocumentReference<Map<String, dynamic>> _ref(String exam) =>
+      _db.collection('examLayouts').doc(SchoolService.subjectKey(exam));
+
+  /// True when [exam] already has its own saved sections.
+  static Future<bool> has(String exam) async {
+    try {
+      return (await _ref(exam).get()).exists;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Saves the current sections and the section of every student as the
+  /// layout of [exam].
+  static Future<void> save(String exam) async {
+    final secs = await _db.collection('sections').get();
+    final stu = await _db.collection('students').get();
+    await _ref(exam).set({
+      'exam': exam,
+      'sections': jsonEncode([
+        for (final d in secs.docs)
+          {
+            'id': d.id,
+            'form': '${d.data()['form'] ?? ''}',
+            'name': '${d.data()['name'] ?? ''}',
+          }
+      ]),
+      'students': jsonEncode({
+        for (final d in stu.docs) d.id: '${d.data()['sectionId'] ?? ''}'
+      }),
+      'savedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// Brings back the saved layout of [exam]. Returns null when [exam] has no
+  /// saved layout (the current sections then stay as they are), otherwise
+  /// how many students changed section.
+  static Future<int?> restore(String exam) async {
+    final d = await _ref(exam).get();
+    if (!d.exists) return null;
+    final m = d.data()!;
+    final tSecs = <Map<String, dynamic>>[
+      for (final e in jsonDecode('${m['sections']}') as List)
+        Map<String, dynamic>.from(e as Map)
+    ];
+    final tStu = <String, String>{
+      for (final e in (jsonDecode('${m['students']}') as Map).entries)
+        '${e.key}': '${e.value}'
+    };
+    final tIds = {for (final t in tSecs) '${t['id']}'};
+    final secsCol = _db.collection('sections');
+    final curSecs = await secsCol.get();
+    final curStu = await _db.collection('students').get();
+    final curInfo = {for (final x in curSecs.docs) x.id: SectionInfo.fromDoc(x)};
+
+    // 1) the section documents of that exam (same ids as when saved)
+    for (var i = 0; i < tSecs.length; i += 400) {
+      final b = _db.batch();
+      for (final t in tSecs.skip(i).take(400)) {
+        b.set(
+            secsCol.doc('${t['id']}'),
+            {
+              'form': t['form'],
+              'name': t['name'],
+              'updatedAt': FieldValue.serverTimestamp(),
+            },
+            SetOptions(merge: true));
+      }
+      await b.commit();
+    }
+
+    // 2) every student goes to the section he / she had in that exam; a
+    //    student who is new since then stays where he / she is, or goes to
+    //    the class (or the smallest section of the class) in that layout
+    final plan = <String, String>{};
+    final sizes = {for (final id in tIds) id: 0};
+    final pending = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    for (final x in curStu.docs) {
+      final now = '${x.data()['sectionId'] ?? ''}';
+      final want = tStu[x.id];
+      if (want != null && tIds.contains(want)) {
+        plan[x.id] = want;
+        sizes[want] = sizes[want]! + 1;
+      } else if (tIds.contains(now)) {
+        plan[x.id] = now;
+        sizes[now] = sizes[now]! + 1;
+      } else {
+        pending.add(x);
+      }
+    }
+    for (final x in pending) {
+      final now = '${x.data()['sectionId'] ?? ''}';
+      final from = curInfo[now];
+      if (from == null) continue;
+      final cands = [
+        for (final t in tSecs)
+          if ('${t['form']}' == from.form &&
+              SectionInfo(id: '', form: '${t['form']}', name: '${t['name']}')
+                  .classKey ==
+                  from.classKey)
+            t
+      ];
+      if (cands.isEmpty) continue;
+      final whole = cands.where((t) => !'${t['name']}'.contains('-')).toList();
+      final pick = whole.isNotEmpty
+          ? '${whole.first['id']}'
+          : ([...cands]..sort((a, b) =>
+          sizes['${a['id']}']!.compareTo(sizes['${b['id']}']!)))
+          .first['id'] as String;
+      plan[x.id] = pick;
+      sizes[pick] = sizes[pick]! + 1;
+    }
+    final moves = [
+      for (final x in curStu.docs)
+        if (plan[x.id] != null && plan[x.id] != '${x.data()['sectionId'] ?? ''}')
+          (x.reference, plan[x.id]!)
+    ];
+    for (var i = 0; i < moves.length; i += 400) {
+      final b = _db.batch();
+      for (final mv in moves.skip(i).take(400)) {
+        b.update(mv.$1, {'sectionId': mv.$2});
+      }
+      await b.commit();
+    }
+
+    // 3) sections that are not part of that exam's layout are removed (they
+    //    stay saved in the layout of the exam they belong to)
+    //    (a section a student still belongs to, e.g. a student who could
+    //    not be placed, is kept so nobody is left without a section)
+    final usedNow = <String>{
+      for (final x in curStu.docs)
+        plan[x.id] ?? '${x.data()['sectionId'] ?? ''}'
+    };
+    final extra = [
+      for (final x in curSecs.docs)
+        if (!tIds.contains(x.id) && !usedNow.contains(x.id)) x.reference
+    ];
+    for (var i = 0; i < extra.length; i += 400) {
+      final b = _db.batch();
+      for (final r in extra.skip(i).take(400)) {
+        b.delete(r);
+      }
+      await b.commit();
+    }
+    return moves.length;
+  }
+}
+
 /// Makes [exam] the active exam (asks first). It is opened, the other exams
 /// are closed, and the Exam Manager table shows the papers and exam dates of
 /// that exam. The first time, the admin says which exam the papers saved so
@@ -5539,6 +5698,10 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
   var base = s.currentExam;
   // forms hidden from students for this exam (all released by default)
   final closedForms = <String>{...s.closedFormsOf(exam)};
+  // the sections ALWAYS follow the exam
+  final leaving = s.currentExam;
+  final hasLayout = leaving != exam && await ExamLayoutService.has(exam);
+  if (!context.mounted) return;
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => StatefulBuilder(
@@ -5553,6 +5716,22 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
                   'attendance of the other exams is closed. The Exam Manager '
                   'table (papers received, exam dates) is kept separately for '
                   'each exam.'),
+              if (leaving != exam) ...[
+                const SizedBox(height: 10),
+                const Text('Sections switch with the exam',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(
+                    hasLayout
+                        ? 'The sections of "$leaving" are saved and the '
+                        'sections of "$exam" (classes, divided sections and '
+                        'the section of every student) are brought back.'
+                        : '"$exam" has no sections of its own yet, so it starts '
+                        'as a copy of the sections of "$leaving". After that '
+                        'each exam keeps its own sections: changes you make '
+                        'while "$exam" is active do not change "$leaving".',
+                    style: const TextStyle(fontSize: 12.5)),
+              ],
               const SizedBox(height: 14),
               _FormReleasePicker(
                 closed: closedForms,
@@ -5591,6 +5770,38 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
     ),
   );
   if (ok != true) return;
+  String? layoutNote;
+  if (leaving != exam) {
+    if (!context.mounted) return;
+    final nav = Navigator.of(context, rootNavigator: true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(children: [
+          CircularProgressIndicator(),
+          SizedBox(width: 18),
+          Expanded(child: Text('Switching the sections...')),
+        ]),
+      ),
+    );
+    try {
+      await ExamLayoutService.save(leaving);
+      final moved = await ExamLayoutService.restore(exam);
+      // a new exam gets its own saved copy right away
+      if (moved == null) await ExamLayoutService.save(exam);
+      layoutNote = moved == null
+          ? 'Sections: "$exam" starts with the current sections'
+          : 'Sections of "$exam" restored';
+      nav.pop();
+    } catch (e) {
+      nav.pop();
+      messenger.showSnackBar(SnackBar(
+          content: Text('Could not switch the sections: '
+              '${'$e'.replaceFirst('Exception: ', '')}. The exam was not changed.')));
+      return;
+    }
+  }
   try {
     await appSettings.update({
       'activeExam': exam,
@@ -5609,7 +5820,8 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
       if (needBase) 'paperBaseExam': base,
     });
     messenger.showSnackBar(SnackBar(
-        content: Text('"$exam" is now the active exam (attendance open)')));
+        content: Text('"$exam" is now the active exam (attendance open)'
+            '${layoutNote == null ? '' : '. $layoutNote'}')));
   } catch (e) {
     messenger.showSnackBar(SnackBar(
         content: Text('Failed: ${'$e'.replaceFirst('Exception: ', '')}')));
@@ -16684,7 +16896,18 @@ Widget build(BuildContext context) {
 final service = _service;
 return Scaffold(
 appBar: AppBar(
-title: const Text('Sections'),
+title: ValueListenableBuilder<AppSettings>(
+valueListenable: appSettings,
+builder: (_, st, __) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Text('Sections'),
+Text('Sections of ${st.currentExam}',
+style: const TextStyle(
+fontSize: 12.5, fontWeight: FontWeight.w500)),
+],
+),
+),
 actions: [
 _SectionsTools(service: service),
 const SizedBox(width: 8),
@@ -37456,6 +37679,7 @@ Firestore:
     match /users/{doc} { allow read, write: if request.auth != null; }
     match /attendance/{doc} { allow read, write: if request.auth != null; }
     match /studentLeaves/{doc} { allow read, write: if request.auth != null; }
+    match /examLayouts/{doc} { allow read, write: if request.auth != null; }
     match /assignments/{doc} { allow read, write: if request.auth != null; }
     match /assignmentFiles/{doc} { allow read, write: if request.auth != null; }
     match /results/{doc} { allow read, write: if request.auth != null; } } }
