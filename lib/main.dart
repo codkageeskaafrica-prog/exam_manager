@@ -6023,10 +6023,6 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
         // a new exam has no sections yet: start from zero (undivided
         // classes) and save that as its own layout right away
         await ExamLayoutService.resetToUndivided();
-        // an undivided class must hold only its actual students: a student
-        // that sits twice in the same class is cleaned (the extra copy is
-        // kept in the backup collection "deletedStudents")
-        await ExamLayoutService.removeDuplicateStudents(remove: true);
         await ExamLayoutService.save(exam);
       }
       layoutNote = moved == null
@@ -16528,20 +16524,43 @@ class SchoolService {
             studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
             createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
     ];
+    // the same student saved twice in this section is listed once
+    final seen = <String>{};
+    l.removeWhere((x) {
+      final k = _personKey(x.name);
+      return k.isNotEmpty && !seen.add(k);
+    });
     l.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     return l;
   });
 
   /// sectionId -> number of students
+  /// A person is counted ONCE in a section, even when the same student was
+  /// saved twice there (same name), so a class shows its actual number.
   Stream<Map<String, int>> watchStudentCounts() =>
       _students.snapshots().map((s) {
-        final out = <String, int>{};
+        final people = <String, Set<String>>{};
         for (final d in s.docs) {
           final id = d.data()['sectionId'] as String?;
-          if (id != null) out[id] = (out[id] ?? 0) + 1;
+          if (id == null) continue;
+          final nm = _personKey('${d.data()['name'] ?? ''}');
+          // a student without a name is always counted
+          people.putIfAbsent(id, () => <String>{}).add(nm.isEmpty ? 'id:${d.id}' : nm);
         }
-        return out;
+        return {for (final e in people.entries) e.key: e.value.length};
       });
+
+  /// Same person = same words of the name, in any order and case.
+  static String _personKey(String n) {
+    final w = n
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+        .split(RegExp(r'\s+'))
+        .where((x) => x.isNotEmpty)
+        .toList()
+      ..sort();
+    return w.join(' ');
+  }
 
   /// The next free generated Student IDs: ST0001, ST0002 ...
   Future<List<String>> freshStudentNos(int n) async {
@@ -18189,13 +18208,6 @@ tooltip: 'Print sections',
 icon: Icons.print,
 color: const Color(0xFF546E7A),
 onTap: _printAll,
-),
-_BarAction(
-label: 'Fix duplicates',
-tooltip: 'Remove students that appear twice in a class',
-icon: Icons.content_copy,
-color: const Color(0xFFEF6C00),
-onTap: _fixDuplicates,
 ),
 _BarAction(
 label: 'Delete all',
