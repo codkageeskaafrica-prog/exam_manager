@@ -6023,6 +6023,10 @@ Future<void> switchActiveExam(BuildContext context, String exam) async {
         // a new exam has no sections yet: start from zero (undivided
         // classes) and save that as its own layout right away
         await ExamLayoutService.resetToUndivided();
+        // an undivided class must hold only its actual students: a student
+        // that sits twice in the same class is cleaned (the extra copy is
+        // kept in the backup collection "deletedStudents")
+        await ExamLayoutService.removeDuplicateStudents(remove: true);
         await ExamLayoutService.save(exam);
       }
       layoutNote = moved == null
