@@ -17137,9 +17137,31 @@ builder: (_, st, __) => Column(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
 const Text('Sections'),
+// choose which exam's sections to work with (the sections
+// switch with the exam)
+PopupMenuButton<String>(
+tooltip: 'Choose the exam whose sections you want',
+padding: EdgeInsets.zero,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(12)),
+onSelected: (e) {
+if (e != st.currentExam) switchActiveExam(context, e);
+},
+itemBuilder: (_) => [
+for (final e in st.examOptions)
+CheckedPopupMenuItem<String>(
+value: e,
+checked: e == st.currentExam,
+child: Text(e),
+),
+],
+child: Row(mainAxisSize: MainAxisSize.min, children: [
 Text('Sections of ${st.currentExam}',
 style: const TextStyle(
 fontSize: 12.5, fontWeight: FontWeight.w500)),
+const Icon(Icons.arrow_drop_down, size: 20),
+]),
+),
 ],
 ),
 ),
