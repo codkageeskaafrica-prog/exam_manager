@@ -15203,14 +15203,20 @@ class StudentAccounts {
               fails = 0;
               break;
             } on FirebaseAuthException catch (e) {
-              if (e.code == 'too-many-requests' && attempt < 3) {
-                await Future.delayed(const Duration(seconds: 20));
-                continue;
+              if (e.code == 'too-many-requests') {
+                // Firebase allows about 100 NEW accounts per hour from one
+                // internet connection. Stop at once (waiting does not help
+                // for a long time) and say how many were created.
+                res.failed++;
+                res.error ??= 'Firebase allows only about 100 new accounts per '
+                    'hour from one internet connection. ${res.created} '
+                    'created now. Press Logins again after an hour to create '
+                    'the rest, or use the bulk script.';
+                stop = true;
+                break;
               }
               res.failed++;
-              res.error ??= e.code == 'too-many-requests'
-                  ? 'Firebase is limiting new accounts. Try again in a few minutes.'
-                  : (e.message ?? e.code);
+              res.error ??= (e.message ?? e.code);
               fails++;
               break;
             } catch (e) {
@@ -37261,7 +37267,8 @@ Expanded(child: Text(v.isEmpty ? '-' : v)),
 ]),
 );
 
-void _details(String name, String role, String email, TeacherInfo? t) {
+void _details(String name, String role, String email, TeacherInfo? t,
+{bool hideEmail = false}) {
 showDialog(
 context: context,
 builder: (ctx) => AlertDialog(
@@ -37276,7 +37283,7 @@ width: 380,
 child: SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
 _row(Icons.badge_outlined, 'Role', role),
-_row(Icons.email_outlined, 'Email', email),
+if (!hideEmail) _row(Icons.email_outlined, 'Email', email),
 if (t != null) ...[
 _row(Icons.phone_outlined, 'Phone', t.phone),
 if (t.isTeaching || t.assignments.isNotEmpty) ...[
@@ -37323,9 +37330,17 @@ var name = (t?.name.isNotEmpty ?? false)
 if (name.isEmpty) name = email.split('@').first;
 final role = t?.role ??
 (p == null || p.legacy ? '' : UserProfile.roleLabel(p.role));
+// Students sign in with a generated email (phone number) that
+// should not be shown, so only their role is displayed.
+final isStudent = p?.role == 'student' ||
+email.endsWith('@$kStudentEmailDomain');
+final subtitle = isStudent
+? (role.isEmpty ? 'Student' : role)
+    : (role.isEmpty ? email : '$role · $email');
 return InkWell(
 borderRadius: BorderRadius.circular(8),
-onTap: () => _details(name, role, email, t),
+onTap: () =>
+_details(name, role, email, t, hideEmail: isStudent),
 child: ConstrainedBox(
 constraints: const BoxConstraints(maxWidth: 230),
 child: Padding(
@@ -37340,7 +37355,7 @@ maxLines: 1,
 overflow: TextOverflow.ellipsis,
 style: const TextStyle(
 fontSize: 13, fontWeight: FontWeight.w600)),
-Text(role.isEmpty ? email : '$role · $email',
+Text(subtitle,
 maxLines: 1,
 overflow: TextOverflow.ellipsis,
 style: const TextStyle(fontSize: 11)),
