@@ -18740,6 +18740,152 @@ _toast('Failed: ${_err(e)}');
 }
 }
 
+/// How many students have a login account and how many do not: the whole
+/// school, or one class (choose it in the list). Each student is counted
+/// once, even when the same student is saved in a class and in a section.
+Future<void> _showAccounts(
+List<SectionInfo> secs, List<StudentInfo> all) async {
+final secById = {for (final x in secs) x.id: x};
+String code(StudentInfo st) {
+final x = secById[st.sectionId]!;
+return SectionInfo.code(x.form, x.classKey);
+}
+
+String key(StudentInfo st) =>
+'${code(st)}|${st.name.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
+
+// one entry per person: the whole-class copy is preferred, and the person
+// has an account when ANY of the copies has one
+final person = <String, StudentInfo>{};
+final hasAcc = <String, bool>{};
+for (final st in all) {
+final sec = secById[st.sectionId];
+if (sec == null) continue;
+final k = key(st);
+hasAcc[k] = (hasAcc[k] ?? false) || st.accountUid.isNotEmpty;
+final cur = person[k];
+if (cur == null || (secById[cur.sectionId]!.isSub && !sec.isSub)) {
+person[k] = st;
+}
+}
+// classes in the order of the forms
+int formIx(String c) {
+final i = ExamService.forms.indexWhere((f) => c.startsWith(f.replaceAll(RegExp(r'[^0-9]'), '')));
+return i < 0 ? 99 : i;
+}
+
+final classes = <String>{for (final st in person.values) code(st)}.toList()
+..sort((a, b) {
+final c = formIx(a).compareTo(formIx(b));
+return c != 0 ? c : a.compareTo(b);
+});
+
+var sel = 'All';
+if (!mounted) return;
+await showDialog<void>(
+context: context,
+builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+final list = [
+for (final e in person.entries)
+if (sel == 'All' || code(e.value) == sel) e
+];
+final withAcc = list.where((e) => hasAcc[e.key] == true).length;
+final without = list.length - withAcc;
+Widget chip(String label, int n, Color c) => Container(
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+decoration: BoxDecoration(
+color: c.withOpacity(0.10),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: c.withOpacity(0.4))),
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+Text('$n',
+style: TextStyle(
+fontSize: 20, fontWeight: FontWeight.w800, color: c)),
+Text(label, style: const TextStyle(fontSize: 12)),
+]),
+);
+// rows of the table (all classes) or the students without account
+final rows = <Widget>[];
+if (sel == 'All') {
+for (final c in classes) {
+final inClass = person.entries.where((e) => code(e.value) == c);
+final w = inClass.where((e) => hasAcc[e.key] == true).length;
+final n = inClass.length;
+rows.add(ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+onTap: () => setD(() => sel = c),
+title: Text(c, style: const TextStyle(fontWeight: FontWeight.w700)),
+subtitle: Text('$w with account  -  ${n - w} without account'),
+trailing: Text('$n', style: const TextStyle(fontWeight: FontWeight.w700)),
+));
+}
+} else {
+final miss = [
+for (final e in list)
+if (hasAcc[e.key] != true) e.value
+]..sort((a, b) => a.name.compareTo(b.name));
+if (miss.isEmpty) {
+rows.add(const Padding(
+padding: EdgeInsets.symmetric(vertical: 12),
+child: Text('Every student of this class has an account.'),
+));
+} else {
+rows.add(const Padding(
+padding: EdgeInsets.only(top: 4, bottom: 4),
+child: Text('Students without an account',
+style: TextStyle(fontWeight: FontWeight.w700)),
+));
+for (final st in miss) {
+rows.add(ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+title: Text(st.name),
+subtitle: Text(st.phoneText.isEmpty
+? 'No phone number'
+    : st.phoneText),
+));
+}
+}
+}
+return AlertDialog(
+title: const Text('Student accounts'),
+content: SizedBox(
+width: 460,
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+DropdownButton<String>(
+isExpanded: true,
+value: sel,
+items: [
+const DropdownMenuItem(
+value: 'All', child: Text('All classes')),
+for (final c in classes)
+DropdownMenuItem(value: c, child: Text('Class $c')),
+],
+onChanged: (v) => setD(() => sel = v ?? 'All'),
+),
+const SizedBox(height: 10),
+Wrap(spacing: 10, runSpacing: 8, children: [
+chip('With account', withAcc, const Color(0xFF2E7D32)),
+chip('Without account', without, const Color(0xFFC62828)),
+chip('Total students', list.length, const Color(0xFF1565C0)),
+]),
+const SizedBox(height: 8),
+Flexible(
+child: ListView(shrinkWrap: true, children: rows),
+),
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Close')),
+],
+);
+}),
+);
+}
+
 /// Fixes a list that was uploaded twice: a student of a divided class
 /// (1A-A) without a phone and the same name in the whole class (1A) with a
 /// phone. The phone moves to the original student, the copy is deleted.
@@ -19496,6 +19642,13 @@ tooltip: 'Create login accounts for all students',
 icon: Icons.key,
 color: const Color(0xFFEF6C00),
 onTap: () => runAccountCreation(context),
+),
+_BarAction(
+label: 'Accounts',
+tooltip: 'How many students have a login account, by class',
+icon: Icons.how_to_reg,
+color: const Color(0xFF1565C0),
+onTap: () => _showAccounts(secs, all),
 ),
 _BarAction(
 label: 'Merge',
