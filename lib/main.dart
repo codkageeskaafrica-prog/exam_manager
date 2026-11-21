@@ -15069,7 +15069,8 @@ class StudentAccountsResult {
 }
 
 /// Creates the login account of students: username = password = first phone
-/// number. The account is created on a SECOND Firebase app, so the person
+/// number (the next phone number when the first one is already the login of
+/// a different student). The account is created on a SECOND Firebase app, so the person
 /// who is adding the students stays signed in.
 class StudentAccounts {
   /// How many accounts are created at the same time. Every worker has its
@@ -15185,9 +15186,38 @@ class StudentAccounts {
     return res;
   }
 
+  /// The login of one student. The username and password are the FIRST phone
+  /// number. When that number already belongs to the login of a DIFFERENT
+  /// student (the same number is saved for students of other classes), the
+  /// next phone number of this student is used instead, and so on. The phone
+  /// that is used becomes the first one of the student. When every number is
+  /// taken, the student shares the existing login (returns 'shared').
   static Future<String> _one(FirebaseAuth auth, FirebaseFirestore db, String id,
       Map<String, dynamic> m, String form) async {
-    final phone = '${m['phone']}';
+    final all = <String>[];
+    final raw = m['phones'];
+    if (raw is List) {
+      for (final x in raw) {
+        final t = '$x'.trim();
+        if (t.isNotEmpty && !all.contains(t)) all.add(t);
+      }
+    }
+    final first = '${m['phone'] ?? ''}'.trim();
+    if (first.isNotEmpty) {
+      all.remove(first);
+      all.insert(0, first);
+    }
+    for (final phone in all) {
+      final r = await _tryPhone(auth, db, id, m, form, phone, all);
+      if (r == 'ok') return 'ok';
+      // 'taken': another student uses this number, try the next one
+    }
+    return 'shared';
+  }
+
+  static Future<String> _tryPhone(FirebaseAuth auth, FirebaseFirestore db,
+      String id, Map<String, dynamic> m, String form, String phone,
+      List<String> all) async {
     final email = studentEmailFor(phone);
     UserCredential cred;
     var createdNew = false;
@@ -15201,7 +15231,7 @@ class StudentAccounts {
         cred = await auth.signInWithEmailAndPassword(
             email: email, password: phone);
       } on FirebaseAuthException {
-        return 'shared'; // that email belongs to something else
+        return 'taken'; // that email belongs to something else
       }
     }
     final user = cred.user!;
@@ -15210,10 +15240,16 @@ class StudentAccounts {
       if (!createdNew) {
         final ex = await uref.get();
         final sid = '${ex.data()?['studentId'] ?? ''}';
-        if (sid.isNotEmpty && sid != id) return 'shared'; // a sibling has it
+        if (sid.isNotEmpty && sid != id) return 'taken'; // another student
       }
       final batch = db.batch();
-      batch.update(db.collection('students').doc(id), {'accountUid': user.uid});
+      batch.update(db.collection('students').doc(id), {
+        'accountUid': user.uid,
+        // the phone that is the login is always the first phone
+        'phone': phone,
+        'phones': [phone, ...all.where((x) => x != phone)],
+        'username': phone,
+      });
       batch.set(uref, {
         'role': 'student',
         'name': '${m['name'] ?? ''}',
@@ -15262,7 +15298,7 @@ Future<void> runAccountCreation(BuildContext context,
                 ? 'Checking students...'
                 : '${v.$1} of ${v.$2} accounts'),
             const SizedBox(height: 4),
-            const Text('Username and password = first phone number.',
+            const Text('Username and password = first phone number\n(the next number if the first is used by another student).',
                 style: TextStyle(fontSize: 12, color: Colors.black54)),
           ]),
         ),
@@ -33739,6 +33775,35 @@ String? _error;
 // entered (null = all students; entered | partial | none)
 final Set<String> _sel = {}; // ticked classes (empty = all classes)
 String? _stuFilter;
+
+/// show the empty marks of every subject under the "Empty marks" chip
+bool _emptyOpen = true;
+
+/// Students with empty boxes that are shown now: '*' = any subject, or
+/// the name of one subject. null = no such filter. [_emptyIds] is fixed
+/// when a chip is tapped, so a row does not vanish while its box is typed.
+String? _emptyBy;
+Set<String> _emptyIds = {};
+
+void _showEmptyStudents(String by) {
+if (_emptyBy == by) {
+setState(() => _emptyBy = null); // tap again = show everybody
+return;
+}
+final ids = <String>{};
+for (final st in _inScope) {
+final row = _c[st.id];
+if (row == null) continue;
+final subs = by == '*' ? _subjects : [by];
+if (subs.any((sub) => (row[sub]?.text ?? '').trim().isEmpty)) {
+ids.add(st.id);
+}
+}
+setState(() {
+_emptyBy = by;
+_emptyIds = ids;
+});
+}
 final Map<String, String> _stuState = {}; // student id -> entered|partial|none
 
 /// Only "Absent" (not New / Cheated): shown in grey, not red, so it is not
@@ -33768,7 +33833,7 @@ List<StudentInfo> get _shown => [
 for (final s in _inScope)
 if (_stuFilter == null ||
 (_stuFilter == 'failed' ? _isFailed(s) : _stuState[s.id] == _stuFilter))
-s
+if (_emptyBy == null || _emptyIds.contains(s.id)) s
 ];
 
 /// Valid marks typed for a student right now (live, from the boxes).
@@ -34040,11 +34105,16 @@ return const Color(0xFFEF6C00);
 final scope = _inScope;
 // empty marks (live): boxes without any mark in the shown classes
 var emptyMarks = 0;
+// empty boxes of each subject (same shown classes)
+final emptyBySubject = <String, int>{for (final sub in _subjects) sub: 0};
 for (final s in scope) {
 final row = _c[s.id];
 if (row == null) continue;
 for (final sub in _subjects) {
-if ((row[sub]?.text ?? '').trim().isEmpty) emptyMarks++;
+if ((row[sub]?.text ?? '').trim().isEmpty) {
+emptyMarks++;
+emptyBySubject[sub] = (emptyBySubject[sub] ?? 0) + 1;
+}
 }
 }
 return Padding(
@@ -34060,7 +34130,10 @@ FilterChip(
 showCheckmark: true,
 label: Text('All classes ${classes.length}'),
 selected: _sel.isEmpty,
-onSelected: (_) => setState(() => _sel.clear()),
+onSelected: (_) => setState(() {
+_sel.clear();
+_emptyBy = null;
+}),
 ),
 for (final c in classes)
 FilterChip(
@@ -34073,6 +34146,7 @@ Text(c.isEmpty ? 'No class' : c),
 selected: _sel.contains(c),
 onSelected: (on) => setState(() {
 on ? _sel.add(c) : _sel.remove(c);
+_emptyBy = null;
 }),
 ),
 ],
@@ -34097,25 +34171,103 @@ label: Text('Showing: ${_filterName(_stuFilter!)} '
 '${_loading ? '' : _shown.length}'),
 onDeleted: () => setState(() => _stuFilter = null),
 ),
-Container(
-padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+if (_emptyBy != null)
+InputChip(
+avatar: const Icon(Icons.filter_alt, size: 16),
+label: Text(_emptyBy == '*'
+? 'Students with empty boxes: ${_shown.length}'
+    : 'Empty $_emptyBy: ${_shown.length} students'),
+onDeleted: () => setState(() => _emptyBy = null),
+),
+InkWell(
+borderRadius: BorderRadius.circular(20),
+onTap: () => setState(() => _emptyOpen = !_emptyOpen),
+child: Container(
+padding:
+const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
 decoration: BoxDecoration(
 color: const Color(0xFFFDECEA),
 borderRadius: BorderRadius.circular(20),
 border: Border.all(color: const Color(0xFFC62828)),
 ),
 child: Row(mainAxisSize: MainAxisSize.min, children: [
-const Icon(Icons.edit_off, size: 14, color: Color(0xFFC62828)),
+const Icon(Icons.edit_off,
+size: 14, color: Color(0xFFC62828)),
 const SizedBox(width: 4),
 Text('Empty marks $emptyMarks',
 style: const TextStyle(
 fontSize: 13,
 fontWeight: FontWeight.w700,
 color: Color(0xFFC62828))),
+Icon(
+_emptyOpen ? Icons.expand_less : Icons.expand_more,
+size: 18,
+color: const Color(0xFFC62828)),
 ]),
+),
 ),
 ],
 ),
+if (_emptyOpen) ...[
+const SizedBox(height: 8),
+// empty boxes by subject, and the total of all empty boxes
+Wrap(
+spacing: 8,
+runSpacing: 6,
+crossAxisAlignment: WrapCrossAlignment.center,
+children: [
+const Text('Empty by subject:',
+style: TextStyle(fontWeight: FontWeight.w700)),
+for (final sub in _subjects)
+InkWell(
+borderRadius: BorderRadius.circular(16),
+onTap: () => _showEmptyStudents(sub),
+child: Container(
+padding:
+const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+decoration: BoxDecoration(
+color: (emptyBySubject[sub] ?? 0) > 0
+? const Color(0xFFFDECEA)
+    : const Color(0xFFE8F5E9),
+borderRadius: BorderRadius.circular(16),
+border: Border.all(
+width: _emptyBy == sub ? 3 : 1,
+color: (emptyBySubject[sub] ?? 0) > 0
+? const Color(0xFFC62828)
+    : const Color(0xFF2E7D32)),
+),
+child: Text('$sub ${emptyBySubject[sub] ?? 0}',
+style: TextStyle(
+fontSize: 12.5,
+fontWeight: FontWeight.w700,
+color: (emptyBySubject[sub] ?? 0) > 0
+? const Color(0xFFC62828)
+    : const Color(0xFF2E7D32))),
+),
+),
+InkWell(
+borderRadius: BorderRadius.circular(16),
+onTap: () => _showEmptyStudents('*'),
+child: Container(
+padding:
+const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+decoration: BoxDecoration(
+color: const Color(0xFFC62828),
+borderRadius: BorderRadius.circular(16),
+border: Border.all(
+width: _emptyBy == '*' ? 3 : 1,
+color: const Color(0xFF7F0000)),
+),
+child: Text('Total empty boxes $emptyMarks',
+style: const TextStyle(
+fontSize: 12.5,
+fontWeight: FontWeight.w800,
+color: Colors.white)),
+),
+),
+],
+),
+],
 ]),
 );
 }
