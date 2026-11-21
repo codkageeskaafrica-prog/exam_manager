@@ -8132,6 +8132,35 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
   FirebaseFirestore.instance.collection('presence').snapshots();
   Timer? _tick;
 
+  // class of every student who logged in / out: user id -> "2D - Section A"
+  // ('' = unknown). Read once for each person, not on every refresh.
+  final Map<String, String> _classOf = {};
+  final Set<String> _classAsked = {};
+  Map<String, String>? _secLabels;
+
+  Future<void> _loadClasses(Iterable<String> uids) async {
+    final need = [
+      for (final u in uids)
+        if (!_classOf.containsKey(u) && _classAsked.add(u)) u
+    ];
+    if (need.isEmpty) return;
+    _secLabels ??= await _sectionLabels();
+    final db = FirebaseFirestore.instance;
+    await Future.wait(need.map((uid) async {
+      var label = '';
+      try {
+        final u = (await db.collection('users').doc(uid).get()).data();
+        final sid = '${u?['studentId'] ?? ''}';
+        if (sid.isNotEmpty) {
+          final st = (await db.collection('students').doc(sid).get()).data();
+          label = _secLabels?['${st?['sectionId'] ?? ''}'] ?? '';
+        }
+      } catch (_) {}
+      _classOf[uid] = label;
+    }));
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
@@ -8172,6 +8201,11 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     final tf = DateFormat('d MMM yyyy, HH:mm');
     final role = _role('${m['role'] ?? ''}');
     final signedOut = m['online'] != true;
+    // a student is shown with his / her class
+    final cls = '${m['role'] ?? ''}' == 'student'
+        ? (_classOf['${m['uid'] ?? ''}'] ?? '')
+        : '';
+    final classText = cls.isEmpty ? '' : ' - Class $cls';
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
@@ -8185,9 +8219,9 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
       title: Text('${m['name'] ?? ''}',
           style: const TextStyle(fontWeight: FontWeight.w600)),
       subtitle: Text(online
-          ? 'Online${role.isEmpty ? '' : ' - $role'}'
+          ? 'Online${role.isEmpty ? '' : ' - $role'}$classText'
           : '${signedOut ? 'Logged out' : 'Last seen'}'
-          '${role.isEmpty ? '' : ' - $role'}'),
+          '${role.isEmpty ? '' : ' - $role'}$classText'),
       trailing: Text(seen == null ? '...' : tf.format(seen), style: _hint),
     );
   }
@@ -8318,7 +8352,7 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
         final online = <(Map<String, dynamic>, DateTime?)>[];
         final out = <(Map<String, dynamic>, DateTime?)>[];
         for (final d in snap.data!.docs) {
-          final m = d.data();
+          final m = {...d.data(), 'uid': d.id};
           final seen = _time(m['lastSeen']);
           if (m['online'] == true && seen != null && seen.isAfter(cutoff)) {
             online.add((m, seen));
@@ -8330,6 +8364,16 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
         }
         online.sort((a, b) => '${a.$1['name']}'.compareTo('${b.$1['name']}'));
         out.sort((a, b) => b.$2!.compareTo(a.$2!));
+        // find the class of the students that are listed
+        final shownRows = _filter == 'in' ? online : out;
+        final stuUids = [
+          for (final p in shownRows)
+            if ('${p.$1['role'] ?? ''}' == 'student') '${p.$1['uid']}'
+        ];
+        if (stuUids.isNotEmpty) {
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => _loadClasses(stuUids));
+        }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
