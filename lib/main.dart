@@ -13293,14 +13293,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _signUpCard(AppSettings s) => _card('Sign up', Icons.person_add_alt_1, [
     SwitchListTile(
       contentPadding: EdgeInsets.zero,
-      title: const Text('Hide "Sign up" on the sign-in page'),
+      title: const Text('Allow "Sign up" on the sign-in page'),
       subtitle: const Text(
-          'When on, the "Don\'t have an account? Sign up" option is not shown, '
-              'so nobody can start creating an account from the sign-in page. '
-              'People who already have an account sign in as usual.',
+          'When on, people can create a new account with "Don\'t have an '
+              'account? Sign up". When OFF, Sign up is disabled: the option is '
+              'not shown and no new account can be created from the sign-in '
+              'page. People who already have an account sign in as usual.',
           style: _hint),
-      value: s.hideSignUp,
-      onChanged: _busy ? null : _setHideSignUp,
+      // ON = sign up allowed (the saved value is hideSignUp = false)
+      value: !s.hideSignUp,
+      onChanged: _busy ? null : (allow) => _setHideSignUp(!allow),
     ),
   ]);
 
@@ -35780,6 +35782,15 @@ return false;
 }
 
 Future<void> _submit() async {
+// Sign up disabled by the administrator: never create an account here
+if (_signUp && _hideSignUp) {
+setState(() {
+_signUp = false;
+_step = 0;
+_error = 'Sign up is disabled. Please ask the administrator.';
+});
+return;
+}
 if (_signUp && _step == 0) {
 _next();
 return;
