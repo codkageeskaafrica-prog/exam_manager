@@ -23987,7 +23987,7 @@ return 'Period: $p   |   ${shift.isEmpty ? 'Shift A + Shift B' : _shiftName[shif
 static Future<List<_DrTable>> tables({
 required DateTime from,
 required DateTime to,
-required String classId, // '' = every class
+required Set<String> classIds, // empty = every class
 required String shift, // '' = both shifts
 String status = '', // '' = everybody, 'a' = absent at least once, 'p' = never absent
 required QuerySnapshot<Map<String, dynamic>> secs,
@@ -24029,7 +24029,7 @@ throw Exception('No attendance was taken in this period.');
 final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
 final classes = [
 for (final c in all)
-if (!c.isSub && (classId.isEmpty || c.id == classId)) c
+if (!c.isSub && (classIds.isEmpty || classIds.contains(c.id))) c
 ]..sort((a, b) {
 final f = a.form.compareTo(b.form);
 return f != 0 ? f : a.name.compareTo(b.name);
@@ -24922,7 +24922,7 @@ reason.dispose();
 // ---- report (admin) ----
 DateTime _rFrom = _monday(DateTime.now());
 DateTime _rTo = _today();
-String _rClass = ''; // '' = every class
+Set<String> _rClasses = {}; // empty = every class
 String _rShift = ''; // '' = Shift A + Shift B
 String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
 String _show = 'all'; // list filter: all | p (present) | a (absent)
@@ -25187,7 +25187,7 @@ if (_rFrom.isAfter(d)) _rFrom = d;
 Future<List<_DrTable>> _reportTables() => DailyAttendanceReport.tables(
 from: _rFrom,
 to: _rTo,
-classId: _rClass,
+classIds: _rClasses,
 shift: _rShift,
 status: _rStatus,
 secs: _secsSnap!,
@@ -25197,50 +25197,180 @@ stus: _stusSnap!,
 String get _reportPeriod =>
 DailyAttendanceReport.periodText(_rFrom, _rTo, _rShift, _rStatus);
 
-Widget _reportPanel(List<SectionInfo> classes) {
-final fmt = DateFormat('EEE d MMM yyyy');
-return Card(
-margin: const EdgeInsets.only(bottom: 10),
-child: ExpansionTile(
-leading: const Icon(Icons.summarize),
-title: const Text('Report',
+/// The Report is one icon (like the buttons of the Students page); it
+/// opens the report window.
+Widget _reportPanel(List<SectionInfo> classes) => Align(
+alignment: Alignment.centerRight,
+child: Padding(
+padding: const EdgeInsets.only(bottom: 10),
+child: _BarAction(
+icon: Icons.summarize,
+label: 'Report',
+tooltip: 'Report: Excel, Word, PDF and Print',
+onTap: () => _openReport(classes),
+),
+),
+);
+
+/// Text of the Class field: "All classes", "1A, 1C" or "5 classes".
+String _rClassText(List<SectionInfo> classes) {
+final names = [
+for (final c in classes)
+if (_rClasses.contains(c.id)) c.fullName
+];
+if (names.isEmpty || names.length == classes.length) return 'All classes';
+return names.length <= 4 ? names.join(', ') : '${names.length} classes';
+}
+
+/// Tick one class, several classes or a whole form for the report.
+Future<void> _pickReportClasses(List<SectionInfo> classes) async {
+final byForm = <String, List<SectionInfo>>{};
+for (final c in classes) {
+byForm.putIfAbsent(c.form, () => []).add(c);
+}
+final sel = _rClasses.isEmpty
+? <String>{for (final c in classes) c.id}
+    : <String>{..._rClasses};
+final res = await showDialog<Set<String>>(
+context: context,
+builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+bool? formState(List<SectionInfo> l) {
+final n = l.where((c) => sel.contains(c.id)).length;
+return n == 0 ? false : (n == l.length ? true : null);
+}
+
+return AlertDialog(
+title: const Text('Select classes'),
+content: SizedBox(
+width: 340,
+height: 420,
+child: ListView(children: [
+CheckboxListTile(
+dense: true,
+controlAffinity: ListTileControlAffinity.leading,
+title: const Text('All classes',
 style: TextStyle(fontWeight: FontWeight.w700)),
-subtitle: const Text('Excel, Word, PDF and Print',
-style: TextStyle(fontSize: 12)),
-childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-expandedCrossAxisAlignment: CrossAxisAlignment.start,
+value: sel.length == classes.length,
+onChanged: (v) => setD(() {
+if (v == true) {
+sel.addAll(classes.map((c) => c.id));
+} else {
+sel.clear();
+}
+}),
+),
+const Divider(height: 1),
+for (final e in byForm.entries) ...[
+CheckboxListTile(
+dense: true,
+tristate: true,
+controlAffinity: ListTileControlAffinity.leading,
+title: Text(e.key,
+style: const TextStyle(fontWeight: FontWeight.w600)),
+value: formState(e.value),
+onChanged: (_) => setD(() {
+if (formState(e.value) == true) {
+sel.removeAll(e.value.map((c) => c.id));
+} else {
+sel.addAll(e.value.map((c) => c.id));
+}
+}),
+),
+for (final c in e.value)
+Padding(
+padding: const EdgeInsets.only(left: 28),
+child: CheckboxListTile(
+dense: true,
+controlAffinity: ListTileControlAffinity.leading,
+title: Text(c.fullName),
+value: sel.contains(c.id),
+onChanged: (v) => setD(() {
+if (v == true) {
+sel.add(c.id);
+} else {
+sel.remove(c.id);
+}
+}),
+),
+),
+],
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: sel.isEmpty ? null : () => Navigator.pop(ctx, sel),
+child: Text('OK (${sel.length})')),
+],
+);
+}),
+);
+if (res == null || !mounted) return;
+setState(
+() => _rClasses = res.length == classes.length ? <String>{} : res);
+}
+
+/// The report window: period, classes (many), shift, who to show, then
+/// Download / print.
+Future<void> _openReport(List<SectionInfo> classes) async {
+final fmt = DateFormat('EEE d MMM yyyy');
+await showDialog<void>(
+context: context,
+builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+return AlertDialog(
+title: const Row(children: [
+Icon(Icons.summarize),
+SizedBox(width: 10),
+Text('Report'),
+]),
+content: SizedBox(
+width: 480,
+child: SingleChildScrollView(
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
 children: [
 Wrap(spacing: 10, runSpacing: 10, children: [
 OutlinedButton.icon(
-onPressed: () => _pickReportDate(true),
+onPressed: () async {
+await _pickReportDate(true);
+setD(() {});
+},
 icon: const Icon(Icons.calendar_today, size: 18),
 label: Text('From ${fmt.format(_rFrom)}'),
 ),
 OutlinedButton.icon(
-onPressed: () => _pickReportDate(false),
+onPressed: () async {
+await _pickReportDate(false);
+setD(() {});
+},
 icon: const Icon(Icons.event, size: 18),
 label: Text('To ${fmt.format(_rTo)}'),
 ),
 ]),
 const SizedBox(height: 12),
-Wrap(spacing: 10, runSpacing: 10, children: [
-SizedBox(
-width: 220,
-child: DropdownButtonFormField<String>(
-value: classes.any((c) => c.id == _rClass) ? _rClass : '',
-isExpanded: true,
+InkWell(
+borderRadius: BorderRadius.circular(4),
+onTap: () async {
+await _pickReportClasses(classes);
+setD(() {});
+},
+child: InputDecorator(
 decoration: const InputDecoration(
 labelText: 'Class',
 border: OutlineInputBorder(),
-isDense: true),
-items: [
-const DropdownMenuItem(value: '', child: Text('All classes')),
-for (final c in classes)
-DropdownMenuItem(value: c.id, child: Text(c.fullName)),
-],
-onChanged: (v) => setState(() => _rClass = v ?? ''),
+isDense: true,
+prefixIcon: Icon(Icons.groups_2_outlined),
+suffixIcon: Icon(Icons.arrow_drop_down),
+),
+child: Text(_rClassText(classes),
+maxLines: 1, overflow: TextOverflow.ellipsis),
 ),
 ),
+const SizedBox(height: 12),
+Wrap(spacing: 10, runSpacing: 10, children: [
 SizedBox(
 width: 200,
 child: DropdownButtonFormField<String>(
@@ -25251,11 +25381,15 @@ labelText: 'Shift',
 border: OutlineInputBorder(),
 isDense: true),
 items: const [
-DropdownMenuItem(value: '', child: Text('Shift A + B')),
+DropdownMenuItem(
+value: '', child: Text('Shift A + B')),
 DropdownMenuItem(value: 'am', child: Text('Shift A')),
 DropdownMenuItem(value: 'pm', child: Text('Shift B')),
 ],
-onChanged: (v) => setState(() => _rShift = v ?? ''),
+onChanged: (v) {
+setState(() => _rShift = v ?? '');
+setD(() {});
+},
 ),
 ),
 SizedBox(
@@ -25268,23 +25402,33 @@ labelText: 'Show',
 border: OutlineInputBorder(),
 isDense: true),
 items: const [
-DropdownMenuItem(value: '', child: Text('All students')),
-DropdownMenuItem(value: 'a', child: Text('Absent only')),
-DropdownMenuItem(value: 'p', child: Text('Present only')),
+DropdownMenuItem(
+value: '', child: Text('All students')),
+DropdownMenuItem(
+value: 'a', child: Text('Absent only')),
+DropdownMenuItem(
+value: 'p', child: Text('Present only')),
 ],
-onChanged: (v) => setState(() => _rStatus = v ?? ''),
+onChanged: (v) {
+setState(() => _rStatus = v ?? '');
+setD(() {});
+},
 ),
 ),
 ]),
-const SizedBox(height: 8),
+const SizedBox(height: 10),
 Text(
 '${_rFrom == _rTo ? 'One day: each student shows Present / Absent for each shift.' : 'More than one day: each student shows Present, Absent, Sessions and Attendance %.'}'
 '${_rStatus == 'a' ? '\nAbsent only: students who were absent at least once.' : _rStatus == 'p' ? '\nPresent only: students who were never absent.' : ''}',
-style: const TextStyle(fontSize: 12, color: Colors.black54)),
-const SizedBox(height: 10),
-Align(
-alignment: Alignment.centerLeft,
-child: _ReportMenuButton(
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+],
+),
+),
+),
+actions: [
+_ReportMenuButton(
+label: 'Download / print',
 fileName: () => _safeFile(
 'Daily-attendance-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
 '${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
@@ -25295,9 +25439,12 @@ await _reportTables(), _reportPeriod),
 buildDocx: () async => DailyAttendanceReport.docx(
 await _reportTables(), _reportPeriod),
 ),
-),
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Close')),
 ],
-),
+);
+}),
 );
 }
 
