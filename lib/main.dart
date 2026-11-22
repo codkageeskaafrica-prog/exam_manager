@@ -15110,6 +15110,12 @@ String cleanStudentNo(String raw) =>
 class StudentAccountsResult {
   int created = 0, noPhone = 0, failed = 0;
   final shared = <String>[]; // phone already used by a linked brother / sister
+  final noPhoneList = <String>[]; // "Name - Class" of students without a phone
+  final duplicates = <String>[]; // students that are saved twice (same name)
+  // the same lists as table rows, for Excel / PDF / print
+  final noPhoneRows = <List<String>>[]; // [name, class]
+  final duplicateRows = <List<String>>[]; // [name, times, classes]
+  final sharedRows = <List<String>>[]; // [name, reason]
   String? error;
   bool cancelled = false;
 }
@@ -15149,21 +15155,82 @@ class StudentAccounts {
       for (final id in ids) await db.collection('students').doc(id).get()
     ];
     final secForm = <String, String>{};
+    final secInfo = <String, SectionInfo>{};
     try {
       for (final d in (await db.collection('sections').get()).docs) {
         secForm[d.id] = '${d.data()['form'] ?? ''}';
+        secInfo[d.id] = SectionInfo.fromDoc(d);
       }
     } catch (_) {}
+    String clsOf(Map<String, dynamic> m) =>
+        secInfo['${m['sectionId'] ?? ''}']?.fullName ?? '';
+    // A student of a divided class (1A - Section C) is a COPY of the student
+    // in the whole class (1A). Count each student once, like the Students
+    // screen does: a section student is real only if the whole class does
+    // not have that name.
+    String nameKey(Map<String, dynamic> m) {
+      final x = secInfo['${m['sectionId'] ?? ''}']!;
+      return '${SectionInfo.code(x.form, x.classKey)}|'
+          '${'${m['name'] ?? ''}'.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ')}';
+    }
+
+    final realIds = <String>{};
+    final seenKey = <String>{};
+    for (final d in docs) {
+      final m = d.data();
+      if (m == null || !secInfo.containsKey('${m['sectionId'] ?? ''}')) continue;
+      if (!secInfo['${m['sectionId']}']!.isSub) {
+        seenKey.add(nameKey(m));
+        realIds.add(d.id);
+      }
+    }
+    for (final d in docs) {
+      final m = d.data();
+      if (m == null || !secInfo.containsKey('${m['sectionId'] ?? ''}')) continue;
+      if (secInfo['${m['sectionId']}']!.isSub && seenKey.add(nameKey(m))) {
+        realIds.add(d.id);
+      }
+    }
     final todo = <DocumentSnapshot<Map<String, dynamic>>>[];
     for (final d in docs) {
       final m = d.data();
       if (m == null) continue;
       if ('${m['accountUid'] ?? ''}'.isNotEmpty) continue; // already linked
       if ('${m['phone'] ?? ''}'.isEmpty) {
+        if (!realIds.contains(d.id)) continue; // a copy of a class student
         res.noPhone++;
+        final c = clsOf(m);
+        res.noPhoneList.add('${m['name'] ?? ''}${c.isEmpty ? '' : ' - $c'}');
+        res.noPhoneRows.add(['${m['name'] ?? ''}', c]);
         continue;
       }
       todo.add(d);
+    }
+    res.noPhoneList.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    // the same name in more than one class (or twice in one class); the
+    // copies in divided classes (1A - Section C) are not duplicates.
+    if (ids == null) {
+      final byName = <String, List<String>>{};
+      final shownName = <String, String>{};
+      for (final d in docs) {
+        final m = d.data();
+        if (m == null || !realIds.contains(d.id)) continue;
+        final raw = '${m['name'] ?? ''}'.trim();
+        final key = raw.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+        if (key.isEmpty) continue;
+        shownName.putIfAbsent(key, () => raw);
+        final c = clsOf(m);
+        byName.putIfAbsent(key, () => []).add(c.isEmpty ? '?' : c);
+      }
+      for (final e in byName.entries) {
+        if (e.value.length < 2) continue;
+        res.duplicates.add(
+            '${shownName[e.key]} - ${e.value.length} times (${e.value.join(', ')})');
+        res.duplicateRows.add(
+            ['${shownName[e.key]}', '${e.value.length}', e.value.join(', ')]);
+      }
+      res.duplicates
+          .sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
     }
     if (todo.isEmpty) return res;
     // Students with the same phone number (brothers / sisters) are done one
@@ -15196,7 +15263,14 @@ class StudentAccounts {
               final r = await _one(
                   auth, db, d.id, m, secForm['${m['sectionId']}'] ?? '');
               if (r == 'shared') {
-                res.shared.add('${m['name']}');
+                // say WHY: only one number (add a second one to the student)
+                // or every number is already the login of another student
+                final nums = _phoneList(m['phones'], m['phone']);
+                final why = nums.length <= 1
+                    ? 'Only 1 phone number - add a second one'
+                    : 'All ${nums.length} numbers are already used';
+                res.shared.add('${m['name']} - $why');
+                res.sharedRows.add(['${m['name']}', why]);
               } else {
                 res.created++;
               }
@@ -15328,6 +15402,60 @@ class StudentAccounts {
   }
 }
 
+/// The lists of the Student logins window as report tables (Excel / PDF /
+/// Word / Print). Students without a phone are sorted by class, then name.
+List<_DrTable> _loginIssueTables(StudentAccountsResult r) {
+  int by(String a, String b) => a.toLowerCase().compareTo(b.toLowerCase());
+  final tables = <_DrTable>[];
+  if (r.noPhoneRows.isNotEmpty) {
+    final l = [...r.noPhoneRows]..sort((a, b) {
+      final c = by(a[1], b[1]);
+      return c != 0 ? c : by(a[0], b[0]);
+    });
+    tables.add(_DrTable(
+      title: 'Without phone number',
+      headers: const ['No.', 'Student name', 'Class'],
+      rows: [
+        for (var i = 0; i < l.length; i++) ['${i + 1}', l[i][0], l[i][1]]
+      ],
+      weights: const [1, 6, 3],
+      left: const {1, 2},
+      text: const {1, 2},
+      notes: ['Total: ${l.length} students without a phone number'],
+    ));
+  }
+  if (r.duplicateRows.isNotEmpty) {
+    final l = [...r.duplicateRows]..sort((a, b) => by(a[0], b[0]));
+    tables.add(_DrTable(
+      title: 'Duplicate students',
+      headers: const ['No.', 'Student name', 'Times', 'Classes'],
+      rows: [
+        for (var i = 0; i < l.length; i++)
+          ['${i + 1}', l[i][0], l[i][1], l[i][2]]
+      ],
+      weights: const [1, 5, 1.3, 4],
+      left: const {1, 3},
+      text: const {1, 3},
+      notes: ['Total: ${l.length} names saved more than once'],
+    ));
+  }
+  if (r.sharedRows.isNotEmpty) {
+    final l = [...r.sharedRows]..sort((a, b) => by(a[0], b[0]));
+    tables.add(_DrTable(
+      title: 'Phone already used',
+      headers: const ['No.', 'Student name', 'Reason'],
+      rows: [
+        for (var i = 0; i < l.length; i++) ['${i + 1}', l[i][0], l[i][1]]
+      ],
+      weights: const [1, 5, 6],
+      left: const {1, 2},
+      text: const {1, 2},
+      notes: ['Total: ${l.length} students without a login'],
+    ));
+  }
+  return tables;
+}
+
 /// Creates the accounts with a progress window and shows the result.
 Future<void> runAccountCreation(BuildContext context,
     {List<String>? ids, bool quiet = false}) async {
@@ -15388,24 +15516,71 @@ Future<void> runAccountCreation(BuildContext context,
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('Student logins'),
-      content: SingleChildScrollView(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(text),
-          if (r != null && r.shared.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            const Text('Same phone number as a linked student:',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-            for (final n in r.shared.take(15)) Text('\u2022 $n'),
-            if (r.shared.length > 15) Text('... and ${r.shared.length - 15} more'),
-          ],
-        ]),
+      content: SizedBox(
+        width: 520,
+        height: 420,
+        child: Builder(builder: (_) {
+          // (text, isHeader): one scrolling list, built only as it is seen
+          final items = <(String, bool)>[
+            (text, false),
+            if (r != null && r.shared.isNotEmpty) ...[
+              ('Not created (phone number used by a linked student):', true),
+              for (final n in r.shared) ('\u2022 $n', false),
+            ],
+            if (r != null && r.noPhoneList.isNotEmpty) ...[
+              ('Students without a phone number (${r.noPhoneList.length}):',
+              true),
+              for (final n in r.noPhoneList) ('\u2022 $n', false),
+            ],
+            if (r != null && r.duplicates.isNotEmpty) ...[
+              ('Duplicate students - same name saved more than once '
+                  '(${r.duplicates.length}):',
+              true),
+              for (final n in r.duplicates) ('\u2022 $n', false),
+            ],
+          ];
+          return ListView.builder(
+            itemCount: items.length,
+            itemBuilder: (_, i) {
+              final it = items[i];
+              return Padding(
+                padding: EdgeInsets.only(top: it.$2 ? 14 : (i == 0 ? 0 : 2)),
+                child: Text(it.$1,
+                    style: it.$2
+                        ? const TextStyle(fontWeight: FontWeight.bold)
+                        : null),
+              );
+            },
+          );
+        }),
       ),
       actions: [
+        // download (Excel / Word / PDF) or print the lists of this window
+        if (r != null &&
+            (r.noPhoneRows.isNotEmpty ||
+                r.duplicateRows.isNotEmpty ||
+                r.sharedRows.isNotEmpty))
+          _ReportMenuButton(
+            fileName: () => _safeFile(
+                'Student-logins-${DateFormat('yyyy-MM-dd').format(DateTime.now())}'),
+            build: () async => DailyAttendanceReport.pdf(
+                _loginIssueTables(r), _loginReportDate(),
+                title: 'STUDENT LOGINS'),
+            buildXlsx: () async => DailyAttendanceReport.xlsx(
+                _loginIssueTables(r), _loginReportDate(),
+                title: 'STUDENT LOGINS'),
+            buildDocx: () async => DailyAttendanceReport.docx(
+                _loginIssueTables(r), _loginReportDate(),
+                title: 'STUDENT LOGINS'),
+          ),
         FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
       ],
     ),
   );
 }
+
+String _loginReportDate() =>
+    'Date: ${DateFormat('d MMM yyyy').format(DateTime.now())}';
 
 class SchoolService {
   final _db = FirebaseFirestore.instance;
@@ -19250,6 +19425,74 @@ return _page(secSnap.data!, stuSnap.data!);
 );
 }
 
+/// Download (Excel / Word / PDF) or print the students without a phone
+/// number: one page / sheet for each class, with an empty column to write
+/// the number in. [scope] says what was listed ("All classes", "Class 2C").
+Widget _noPhoneReport(List<StudentInfo> students,
+Map<String, SectionInfo> secById, String scope) {
+final list = [
+for (final s in students)
+if (s.phoneText.isEmpty && secById.containsKey(s.sectionId)) s
+]..sort((a, b) {
+final c = secById[a.sectionId]!
+    .label
+    .toLowerCase()
+    .compareTo(secById[b.sectionId]!.label.toLowerCase());
+return c != 0
+? c
+    : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+});
+if (list.isEmpty) return const SizedBox.shrink();
+List<_DrTable> tables() {
+final groups = <String, List<StudentInfo>>{};
+for (final s in list) {
+final x = secById[s.sectionId]!;
+groups
+    .putIfAbsent(SectionInfo.code(x.form, x.classKey), () => [])
+    .add(s);
+}
+return [
+for (final e in groups.entries)
+_DrTable(
+title: 'Class ${e.key}',
+headers: const ['No.', 'Student name', 'Class', 'Phone number'],
+rows: [
+for (var i = 0; i < e.value.length; i++)
+[
+'${i + 1}',
+e.value[i].name,
+secById[e.value[i].sectionId]!.fullName,
+'',
+]
+],
+weights: const [1, 6, 3, 4],
+left: const {1},
+text: const {1, 2, 3},
+notes: [
+'${e.value.length} student${e.value.length == 1 ? '' : 's'} '
+'without a phone number'
+],
+),
+];
+}
+
+final period =
+'Students without a phone number   |   $scope   |   ${list.length} in total'
+'   |   Date: ${DateFormat('d MMM yyyy').format(DateTime.now())}';
+const title = 'STUDENTS WITHOUT PHONE NUMBER';
+return _ReportMenuButton(
+label: 'Download / print',
+fileName: () => _safeFile(
+'Students-without-phone-${scope.replaceAll(' ', '-')}'),
+build: () async =>
+DailyAttendanceReport.pdf(tables(), period, title: title),
+buildXlsx: () async =>
+DailyAttendanceReport.xlsx(tables(), period, title: title),
+buildDocx: () async =>
+DailyAttendanceReport.docx(tables(), period, title: title),
+);
+}
+
 // Totals page: whole school, each form and each class. Tap a form or a
 // class (or "Show all students") to open the list of students.
 Widget _summary(List<SectionInfo> secs, List<StudentInfo> visible) {
@@ -19319,6 +19562,8 @@ stat(Icons.school_outlined, '${classCount.length} Classes'),
 stat(Icons.people_alt_outlined, '${visible.length} Students'),
 if (noPhone > 0)
 stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
+if (noPhone > 0)
+_noPhoneReport(visible, secById, 'All classes'),
 ]),
 ),
 ),
@@ -19518,6 +19763,14 @@ shown.length == visible.length
 '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}',
 style:
 const TextStyle(fontSize: 12, color: Colors.black54)),
+),
+),
+if (listMode && shown.any((x) => x.phoneText.isEmpty))
+Padding(
+padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+child: Align(
+alignment: Alignment.centerLeft,
+child: _noPhoneReport(shown, secById, filterTitle),
 ),
 ),
 Expanded(
@@ -24019,7 +24272,8 @@ return out;
 }
 
 // ---------------- PDF (and Print) ----------------
-static Future<Uint8List> pdf(List<_DrTable> tables, String period) async {
+static Future<Uint8List> pdf(List<_DrTable> tables, String period,
+{String title = 'DAILY ATTENDANCE REPORT'}) async {
 final doc = pw.Document();
 final lb = schoolLogo.value.bytes;
 final logo = lb == null ? null : pw.MemoryImage(lb);
@@ -24052,7 +24306,7 @@ pw.Expanded(
 child: pw.Column(
 crossAxisAlignment: pw.CrossAxisAlignment.start,
 children: [
-pw.Text('DAILY ATTENDANCE REPORT',
+pw.Text(title,
 style: pw.TextStyle(
 fontSize: 17, fontWeight: pw.FontWeight.bold)),
 pw.SizedBox(height: 2),
@@ -24113,7 +24367,8 @@ return Uint8List.fromList(await doc.save());
 }
 
 // ---------------- Excel ----------------
-static Uint8List xlsx(List<_DrTable> tables, String period) {
+static Uint8List xlsx(List<_DrTable> tables, String period,
+{String title = 'DAILY ATTENDANCE REPORT'}) {
 const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 String col(int i) {
 var n = i + 1;
@@ -24164,7 +24419,7 @@ b.write('</row>');
 return b.toString();
 }
 
-rows.write(band(1, 'DAILY ATTENDANCE REPORT', 5));
+rows.write(band(1, title, 5));
 rows.write(band(2, period, 10));
 rows.write(band(3, tb.title, 10));
 final head = StringBuffer('<row r="5" ht="26" customHeight="1">');
@@ -24292,7 +24547,8 @@ return Uint8List.fromList(bytes);
 }
 
 // ---------------- Word ----------------
-static Uint8List docx(List<_DrTable> tables, String period) {
+static Uint8List docx(List<_DrTable> tables, String period,
+{String title = 'DAILY ATTENDANCE REPORT'}) {
 String x(String t) => ExamService._xml(_t(t));
 const ns =
 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -24342,7 +24598,7 @@ final widths = [
 for (final w in tb.weights) (pageW * w / total).floor()
 ];
 widths[1] += pageW - widths.fold<int>(0, (a, b) => a + b);
-body.write(para('DAILY ATTENDANCE REPORT',
+body.write(para(title,
 sz: 30, sp: 30, pageBreak: ti > 0));
 body.write(para(period, b: false, sz: 20, sp: 20));
 body.write(
@@ -24665,7 +24921,7 @@ reason.dispose();
 
 // ---- report (admin) ----
 DateTime _rFrom = _monday(DateTime.now());
-DateTime _rTo = _lastWeekday(DateTime.now());
+DateTime _rTo = _today();
 String _rClass = ''; // '' = every class
 String _rShift = ''; // '' = Shift A + Shift B
 String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
@@ -24809,7 +25065,8 @@ content: Text('Could not save the numbers: '
 }
 
 QuerySnapshot<Map<String, dynamic>>? _secsSnap, _stusSnap;
-late DateTime _date = _lastWeekday(DateTime.now());
+// always opens on the current date (any day of the week)
+late DateTime _date = _today();
 // 'am' = Shift A, 'pm' = Shift B (the codes are kept so saved registers
 // stay valid)
 String _session = 'am';
@@ -24821,12 +25078,9 @@ String _loadedKey = '';
 bool _loading = false, _saving = false, _dirty = false;
 String? _error;
 
-static DateTime _lastWeekday(DateTime d) {
-var x = DateTime(d.year, d.month, d.day);
-while (x.weekday > DateTime.friday) {
-x = x.subtract(const Duration(days: 1));
-}
-return x;
+static DateTime _today() {
+final d = DateTime.now();
+return DateTime(d.year, d.month, d.day);
 }
 
 static DateTime _monday(DateTime d) {
@@ -24916,7 +25170,6 @@ context: context,
 initialDate: from ? _rFrom : _rTo,
 firstDate: DateTime(2020),
 lastDate: DateTime.now(),
-selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
 );
 if (p == null || !mounted) return;
 final d = DateTime(p.year, p.month, p.day);
@@ -25054,7 +25307,6 @@ context: context,
 initialDate: _date,
 firstDate: DateTime(2020),
 lastDate: DateTime.now(),
-selectableDayPredicate: (d) => d.weekday <= DateTime.friday,
 );
 if (p == null || !mounted) return;
 setState(() => _date = DateTime(p.year, p.month, p.day));
@@ -30440,6 +30692,7 @@ final Future<Uint8List> Function()? buildDocx; // Word
 final String Function() fileName;
 final bool enabled;
 final bool iconOnly;
+final String label;
 const _ReportMenuButton({
 required this.build,
 this.buildXlsx,
@@ -30447,6 +30700,7 @@ this.buildDocx,
 required this.fileName,
 this.enabled = true,
 this.iconOnly = false,
+this.label = 'Report',
 });
 
 @override
@@ -30560,7 +30814,7 @@ child: IgnorePointer(
 child: FilledButton.tonalIcon(
 onPressed: widget.enabled ? () {} : null,
 icon: const Icon(Icons.summarize, size: 18),
-label: const Text('Report'),
+label: Text(widget.label),
 ),
 ),
 );
