@@ -9536,7 +9536,7 @@ class HomeScreen extends StatelessWidget {
     _HomeItem(
       page: AppPages.daily,
       title: 'Daily attendance',
-      subtitle: 'Shift A and Shift B attendance, Monday to Friday',
+      subtitle: 'Shift A and Shift B attendance',
       icon: Icons.how_to_reg,
       color: const Color(0xFF16A085),
       builder: (_) => const DailyAttendanceScreen(),
@@ -23969,6 +23969,23 @@ this.text = const {1, 2, 3},
 /// as PDF (also used for Print), Excel or Word.
 ///  - period of ONE day: a row per student with Present / Absent for each shift
 ///  - longer period: a row per student with Present, Absent, Sessions and %
+/// Reasons a teacher / monitor can give for a student in the daily register.
+const Map<String, String> kAttendanceReasons = {
+'sick': 'Sick',
+'late': 'Late',
+'dismissed': 'Dismissed',
+'other': 'Other',
+};
+
+/// "Sick" or "Sick: fever" from a saved reason {type, note} ('' = none).
+String attendanceReasonText(Object? r) {
+if (r is! Map) return '';
+final t = kAttendanceReasons['${r['type'] ?? ''}'] ?? '';
+final n = '${r['note'] ?? ''}'.trim();
+if (t.isEmpty) return n;
+return n.isEmpty ? t : '$t: $n';
+}
+
 class DailyAttendanceReport {
 static const _shiftName = {'am': 'Shift A', 'pm': 'Shift B'};
 static final _day = DateFormat('d MMM yyyy');
@@ -24130,6 +24147,21 @@ if (single) {
 final bySession = {
 for (final r in mine) '${r['session']}': marksOf(r),
 };
+final reasonBy = {
+for (final r in mine)
+'${r['session']}': r['reasons'] is Map
+? Map<String, dynamic>.from(r['reasons'] as Map)
+    : <String, dynamic>{},
+};
+// "Absent", or "Absent (Sick: fever)" when a reason was given
+String cell(String sh, String sid) {
+final v = bySession[sh]?[sid];
+if (v == null) return '-';
+final base = v == 'a' ? 'Absent' : (v == 'l' ? 'Leave' : 'Present');
+final why = v == 'l' ? '' : attendanceReasonText(reasonBy[sh]?[sid]);
+return why.isEmpty ? base : '$base ($why)';
+}
+
 final rows = <List<String>>[];
 for (final s in students) {
 var pr = 0, ab = 0;
@@ -24148,12 +24180,7 @@ rows.add([
 s['name']!,
 s['no']!.isEmpty ? '-' : s['no']!,
 s['phone']!.isEmpty ? '-' : s['phone']!,
-for (final sh in shifts)
-bySession[sh] == null || bySession[sh]![s['id']] == null
-? '-'
-    : (bySession[sh]![s['id']] == 'a'
-? 'Absent'
-    : (bySession[sh]![s['id']] == 'l' ? 'Leave' : 'Present')),
+for (final sh in shifts) cell(sh, s['id']!),
 ]);
 }
 if (rows.isEmpty) continue;
@@ -24206,9 +24233,11 @@ continue;
 }
 if (v == 'a') {
 ab++;
-absentOn
-    .putIfAbsent('${r['date']}', () => [])
-    .add(r['session'] == 'pm' ? 'B' : 'A');
+final rs = r['reasons'];
+final why = rs is Map ? attendanceReasonText(rs[s['id']]) : '';
+absentOn.putIfAbsent('${r['date']}', () => []).add(
+'${r['session'] == 'pm' ? 'B' : 'A'}'
+'${why.isEmpty ? '' : ' - $why'}');
 } else {
 pr++;
 }
@@ -24675,7 +24704,7 @@ return Uint8List.fromList(bytes);
 
 // ======================= DAILY (REGULAR) ATTENDANCE =======================
 /// Regular school attendance, taken for two shifts (Shift A / Shift B),
-/// Monday to Friday. It is separate from the exam attendance above.
+/// every school day. It is separate from the exam attendance above.
 ///   dailyAttendance/{classId}_{yyyy-MM-dd}_{am|pm}   (am = Shift A, pm = Shift B)
 ///     sectionId, date, session, marks {studentId: p|a|l|e},
 ///     byUid, byName, updatedAt
@@ -25072,6 +25101,9 @@ late DateTime _date = _today();
 String _session = 'am';
 // studentId -> 'a' (absent). Everybody else counts as present (ticked).
 Map<String, String> _marks = {};
+// studentId -> {type: sick|late|dismissed|other, note: free text}
+Map<String, Map<String, String>> _reasons = {};
+static const _reasonColor = Color(0xFFE65100);
 List<String> _current = const []; // ids of the students shown
 bool _exists = false; // a register is already saved for this day / session
 String _loadedKey = '';
@@ -25104,13 +25136,24 @@ _error = null;
 _dirty = false;
 _exists = false;
 _marks = {};
+_reasons = {};
 _loadedKey = key;
 });
 try {
 final d = await _db.collection('dailyAttendance').doc(key).get();
 if (!mounted || _loadedKey != key) return;
 final m = d.data()?['marks'];
+final rs = d.data()?['reasons'];
 setState(() {
+_reasons = {
+if (rs is Map)
+for (final e in rs.entries)
+if (e.value is Map)
+'${e.key}': {
+'type': '${(e.value as Map)['type'] ?? ''}',
+'note': '${(e.value as Map)['note'] ?? ''}',
+}
+};
 _exists = d.exists;
 _marks = {
 if (m is Map)
@@ -25128,6 +25171,83 @@ _error = '$e'.replaceFirst('Exception: ', '');
 }
 }
 
+/// Gives (or removes) a reason for one student: sick, late, dismissed...
+Future<void> _reasonDialog(Map<String, String> stu) async {
+final sid = stu['id']!;
+var type = _reasons[sid]?['type'] ?? '';
+final note = TextEditingController(text: _reasons[sid]?['note'] ?? '');
+final had = _reasons[sid] != null;
+const icons = {
+'sick': Icons.healing,
+'late': Icons.schedule,
+'dismissed': Icons.logout,
+'other': Icons.more_horiz,
+};
+final res = await showDialog<String>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
+title: Text(stu['name'] ?? 'Reason'),
+content: SizedBox(
+width: 360,
+child: Column(
+mainAxisSize: MainAxisSize.min,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+const Text('Reason',
+style: TextStyle(fontWeight: FontWeight.w600)),
+const SizedBox(height: 8),
+Wrap(spacing: 8, runSpacing: 8, children: [
+for (final e in kAttendanceReasons.entries)
+ChoiceChip(
+avatar: Icon(icons[e.key], size: 18),
+label: Text(e.value),
+selected: type == e.key,
+onSelected: (_) => setD(() => type = e.key),
+),
+]),
+const SizedBox(height: 14),
+TextField(
+controller: note,
+maxLength: 80,
+decoration: const InputDecoration(
+labelText: 'Note (optional)',
+hintText: 'e.g. fever, came at 8:30, sent home at 10',
+border: OutlineInputBorder(),
+isDense: true,
+),
+),
+],
+),
+),
+actions: [
+if (had)
+TextButton(
+onPressed: () => Navigator.pop(ctx, 'clear'),
+child: const Text('Remove')),
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: type.isEmpty ? null : () => Navigator.pop(ctx, 'save'),
+child: const Text('Save')),
+],
+),
+),
+);
+final text = note.text.trim();
+note.dispose();
+if (res == null || !mounted) return;
+setState(() {
+if (res == 'save') {
+_reasons[sid] = {'type': type, 'note': text};
+} else {
+_reasons.remove(sid);
+}
+_dirty = true;
+});
+}
+
 Future<void> _save(UserProfile me) async {
 final id = _classId;
 if (id == null) return;
@@ -25141,6 +25261,12 @@ await _db.collection('dailyAttendance').doc(_docId).set({
 'marks': {
 for (final sid in _current)
 sid: _leaveIds.contains(sid) ? 'l' : (_marks[sid] == 'a' ? 'a' : 'p')
+},
+// why a student was absent / late / dismissed (optional)
+'reasons': {
+for (final sid in _current)
+if (!_leaveIds.contains(sid) && _reasons[sid] != null)
+sid: _reasons[sid]!
 },
 'byUid': me.uid,
 'byName': me.name.isEmpty ? me.email : me.name,
@@ -25568,7 +25694,6 @@ a['name']!.toLowerCase().compareTo(b['name']!.toLowerCase()));
 
 final today = DateTime.now();
 final canEdit = !todayOnly || _sameDay(_date, today);
-final isWeekend = today.weekday > DateTime.friday;
 _current = [for (final r in students) r['id']!];
 
 // fixed numbers: saved ones first; a student without a number yet goes
@@ -25672,15 +25797,7 @@ _load();
 },
 ),
 ]),
-if (todayOnly && isWeekend)
-const Padding(
-padding: EdgeInsets.only(top: 10),
-child: Text(
-'Attendance is taken Monday to Friday. Today is a weekend, '
-'so you can only look at the last school day.',
-style: TextStyle(fontSize: 12, color: Colors.black54)),
-)
-else if (todayOnly)
+if (todayOnly)
 const Padding(
 padding: EdgeInsets.only(top: 10),
 child: Text('You can take today\'s attendance of your classes.',
@@ -25774,10 +25891,12 @@ void toggle() => setState(() {
 if (allVal == true) {
 for (final r in eligible) {
 _marks[r['id']!] = 'a';
+_reasons.remove(r['id']);
 }
 } else {
 for (final r in eligible) {
 _marks.remove(r['id']);
+_reasons.remove(r['id']);
 }
 }
 _dirty = true;
@@ -25921,6 +26040,9 @@ color: _leaveColor),
 onPressed: () => _leaveDialog(students[i]),
 ),
 ] else ...[
+Column(
+crossAxisAlignment: CrossAxisAlignment.end,
+children: [
 Text(
 _marks[students[i]['id']] == 'a'
 ? 'Absent'
@@ -25931,6 +26053,21 @@ fontWeight: FontWeight.w600,
 color: _marks[students[i]['id']] == 'a'
 ? _absentColor
     : _presentColor)),
+if (_reasons[students[i]['id']] != null)
+ConstrainedBox(
+constraints:
+const BoxConstraints(maxWidth: 150),
+child: Text(
+attendanceReasonText(
+_reasons[students[i]['id']]),
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 10.5,
+fontWeight: FontWeight.w600,
+color: _reasonColor)),
+),
+]),
 Checkbox(
 value: _marks[students[i]['id']] != 'a',
 activeColor: _presentColor,
@@ -25947,8 +26084,23 @@ _marks.remove(students[i]['id']);
 } else {
 _marks[students[i]['id']!] = 'a';
 }
+// a new mark: the old reason no longer fits
+_reasons.remove(students[i]['id']);
 _dirty = true;
 }),
+),
+if (canEdit)
+IconButton(
+tooltip: 'Reason: sick, late, dismissed...',
+visualDensity: VisualDensity.compact,
+icon: Icon(
+_reasons[students[i]['id']] != null
+? Icons.edit_note
+    : Icons.note_add_outlined,
+color: _reasons[students[i]['id']] != null
+? _reasonColor
+    : Colors.black38),
+onPressed: () => _reasonDialog(students[i]),
 ),
 if (canEdit)
 IconButton(
