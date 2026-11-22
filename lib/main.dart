@@ -23986,6 +23986,17 @@ if (t.isEmpty) return n;
 return n.isEmpty ? t : '$t: $n';
 }
 
+/// Who saved a daily register: "Name, 22 Nov 08:15" ('' = not known).
+String attendanceTakenBy(Map<String, dynamic> r) {
+final n = '${r['byName'] ?? ''}'.trim();
+if (n.isEmpty) return '';
+final t = r['updatedAt'];
+if (t is Timestamp) {
+return '$n, ${DateFormat('d MMM HH:mm').format(t.toDate())}';
+}
+return n;
+}
+
 class DailyAttendanceReport {
 static const _shiftName = {'am': 'Shift A', 'pm': 'Shift B'};
 static final _day = DateFormat('d MMM yyyy');
@@ -24194,8 +24205,13 @@ final ab = students.where((s) => m[s['id']] == 'a').length;
 final lv = students.where((s) => m[s['id']] == 'l').length;
 final pr =
 students.where((s) => m[s['id']] != null).length - ab - lv;
+final who = [
+for (final r in mine)
+if (r['session'] == sh) attendanceTakenBy(r)
+].where((x) => x.isNotEmpty).join(', ');
 notes.add('${_shiftName[sh]}: Present $pr, Absent $ab'
-'${lv > 0 ? ', Leave $lv' : ''}');
+'${lv > 0 ? ', Leave $lv' : ''}'
+'${who.isEmpty ? '' : ' - taken by $who'}');
 }
 }
 if (status.isNotEmpty) {
@@ -24265,6 +24281,11 @@ absentText.isEmpty ? '-' : absentText,
 if (rows.isEmpty) continue;
 final a = mine.where((r) => r['session'] == 'am').length;
 final b = mine.where((r) => r['session'] == 'pm').length;
+final whoCount = <String, int>{};
+for (final r in mine) {
+final w = '${r['byName'] ?? ''}'.trim();
+if (w.isNotEmpty) whoCount[w] = (whoCount[w] ?? 0) + 1;
+}
 out.add(_DrTable(
 title: '${cls.form} - ${cls.label}',
 headers: const [
@@ -24284,6 +24305,8 @@ left: const {1, 8},
 text: const {1, 2, 3, 8},
 notes: [
 'Registers taken: ${mine.length} (Shift A: $a, Shift B: $b)',
+if (whoCount.isNotEmpty)
+'Taken by: ${whoCount.entries.map((e) => '${e.key} (${e.value})').join(', ')}',
 'Class attendance: ${pct(tp, tn)}',
 if (status.isNotEmpty)
 'Shown: ${rows.length} of ${students.length} students '
@@ -25103,6 +25126,9 @@ String _session = 'am';
 Map<String, String> _marks = {};
 // studentId -> {type: sick|late|dismissed|other, note: free text}
 Map<String, Map<String, String>> _reasons = {};
+// who saved the shown register, and when ('' / null = not saved yet)
+String _byName = '';
+DateTime? _savedAt;
 static const _reasonColor = Color(0xFFE65100);
 List<String> _current = const []; // ids of the students shown
 bool _exists = false; // a register is already saved for this day / session
@@ -25137,6 +25163,8 @@ _dirty = false;
 _exists = false;
 _marks = {};
 _reasons = {};
+_byName = '';
+_savedAt = null;
 _loadedKey = key;
 });
 try {
@@ -25144,7 +25172,10 @@ final d = await _db.collection('dailyAttendance').doc(key).get();
 if (!mounted || _loadedKey != key) return;
 final m = d.data()?['marks'];
 final rs = d.data()?['reasons'];
+final up = d.data()?['updatedAt'];
 setState(() {
+_byName = '${d.data()?['byName'] ?? ''}'.trim();
+_savedAt = up is Timestamp ? up.toDate() : null;
 _reasons = {
 if (rs is Map)
 for (final e in rs.entries)
@@ -25277,6 +25308,8 @@ setState(() {
 _saving = false;
 _dirty = false;
 _exists = true;
+_byName = me.name.isEmpty ? me.email : me.name;
+_savedAt = DateTime.now();
 });
 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
 content: Text('Saved: ${_session == 'am' ? 'Shift A' : 'Shift B'}'
@@ -25856,9 +25889,20 @@ fontSize: 12)),
 onSelected: (_) => setState(() => _show = 'l'),
 ),
 if (_exists)
-const Chip(
+Chip(
 visualDensity: VisualDensity.compact,
-label: Text('Register saved', style: TextStyle(fontSize: 12)),
+avatar: const Icon(Icons.how_to_reg, size: 16),
+label: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 320),
+child: Text(
+_byName.isEmpty
+? 'Register saved'
+    : 'Taken by $_byName'
+'${_savedAt == null ? '' : ' · ${DateFormat('d MMM, h:mm a').format(_savedAt!)}'}',
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(fontSize: 12)),
+),
 ),
 if (!restricted && vacantTotal > 0)
 ActionChip(
