@@ -23986,6 +23986,129 @@ if (t.isEmpty) return n;
 return n.isEmpty ? t : '$t: $n';
 }
 
+String _drPct(int p, int n) =>
+n == 0 ? '-' : '${(p * 100 / n).toStringAsFixed(1)}%';
+
+/// One class in the report analysis.
+class _DrClassRow {
+final SectionInfo cls;
+int students = 0, regA = 0, regB = 0, present = 0, absent = 0, leave = 0;
+final Map<String, int> takers = {}; // who saved the registers -> how many
+final Set<String> absentIds = {}; // students absent at least once
+final Map<String, _DrAbsent> absentBy = {}; // every absent student of the class
+_DrClassRow(this.cls);
+int get registers => regA + regB;
+String get pct => _drPct(present, present + absent);
+String get takenBy => takers.entries
+    .map((e) => takers.length > 1 ? '${e.key} (${e.value})' : e.key)
+    .join(', ');
+}
+
+/// A student and how many times he / she was absent in the period.
+class _DrAbsent {
+final String name, cls;
+int count = 0;
+final Set<String> why = {};
+_DrAbsent(this.name, this.cls);
+}
+
+/// One day of the period.
+class _DrDay {
+final String date;
+int regs = 0, present = 0, absent = 0, leave = 0;
+_DrDay(this.date);
+}
+
+/// The analysis of the daily registers of a period (shown on the Report
+/// page and written at the start of the downloaded report).
+class _DrAnalysis {
+final DateTime from, to;
+final String shift; // '' = both shifts
+final List<_DrClassRow> rows;
+final List<_DrAbsent> topAbsent;
+final Map<String, List<int>> reasons; // reason -> [absent, present]
+final List<_DrDay> days;
+_DrAnalysis(this.from, this.to, this.shift, this.rows, this.topAbsent,
+this.reasons, this.days);
+
+bool get single => from == to;
+
+/// EVERY student absent at least once, grouped by class:
+/// [Class, Student name, Times absent, Reasons].
+List<List<String>> get absentRows {
+final out = <List<String>>[];
+for (final r in rows) {
+final l = r.absentBy.values.toList()
+..sort((a, b) {
+final c = b.count.compareTo(a.count);
+return c != 0
+? c
+    : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+});
+for (final s in l) {
+out.add([
+r.cls.label,
+s.name,
+'${s.count}',
+s.why.isEmpty ? '-' : s.why.join(', ')
+]);
+}
+}
+return out;
+}
+
+int _sum(int Function(_DrClassRow) f) => rows.fold(0, (t, r) => t + f(r));
+int get students => _sum((r) => r.students);
+int get regA => _sum((r) => r.regA);
+int get regB => _sum((r) => r.regB);
+int get registers => regA + regB;
+int get present => _sum((r) => r.present);
+int get absent => _sum((r) => r.absent);
+int get leave => _sum((r) => r.leave);
+int get absentStudents => _sum((r) => r.absentIds.length);
+String get pct => _drPct(present, present + absent);
+int get classesTaken => rows.where((r) => r.registers > 0).length;
+
+Map<String, int> get takers {
+final m = <String, int>{};
+for (final r in rows) {
+for (final e in r.takers.entries) {
+m[e.key] = (m[e.key] ?? 0) + e.value;
+}
+}
+return m;
+}
+
+/// Shifts a class still has to take (one day) or all shifts when the
+/// class took nothing in a longer period.
+List<String> _missing(_DrClassRow r) {
+final exp = shift.isEmpty ? ['am', 'pm'] : [shift];
+if (single) {
+return [
+for (final sh in exp)
+if ((sh == 'am' ? r.regA : r.regB) == 0)
+DailyAttendanceReport._shiftName[sh]!
+];
+}
+return r.registers == 0
+? [for (final sh in exp) DailyAttendanceReport._shiftName[sh]!]
+    : <String>[];
+}
+
+bool isPending(_DrClassRow r) => _missing(r).isNotEmpty;
+List<String> get pending => [
+for (final r in rows)
+if (isPending(r)) '${r.cls.label} (${_missing(r).join(' + ')})'
+];
+
+/// "Taken" / "Not taken" for one day, the number of registers otherwise.
+String shiftCell(_DrClassRow r, String sh) {
+if (shift.isNotEmpty && shift != sh) return '-';
+final n = sh == 'am' ? r.regA : r.regB;
+return single ? (n > 0 ? 'Taken' : 'Not taken') : '$n';
+}
+}
+
 /// Who saved a daily register: "Name, 22 Nov 08:15" ('' = not known).
 String attendanceTakenBy(Map<String, dynamic> r) {
 final n = '${r['byName'] ?? ''}'.trim();
@@ -24319,6 +24442,319 @@ if (out.isEmpty) {
 throw Exception(status.isEmpty
 ? 'No attendance was taken in this period.'
     : 'No student matches this filter in this period.');
+}
+return out;
+}
+
+/// Counts the saved registers of the period: per class, per student, per
+/// day and per reason. A class that took nothing is listed too.
+static Future<_DrAnalysis> analysis({
+required DateTime from,
+required DateTime to,
+required Set<String> classIds, // empty = every class
+required String shift, // '' = both shifts
+required QuerySnapshot<Map<String, dynamic>> secs,
+required QuerySnapshot<Map<String, dynamic>> stus,
+}) async {
+if (teacherScope.value.scoped) {
+throw Exception('Only an administrator can create the report.');
+}
+final key = DateFormat('yyyy-MM-dd');
+final leaves = <Map<String, String>>[];
+try {
+final lq =
+await FirebaseFirestore.instance.collection('studentLeaves').get();
+for (final d in lq.docs) {
+final m = d.data();
+leaves.add({
+'studentId': '${m['studentId'] ?? ''}',
+'from': '${m['from'] ?? ''}',
+'to': '${m['to'] ?? ''}',
+});
+}
+} catch (_) {}
+bool onLeave(String sid, String date) => leaves.any((l) =>
+l['studentId'] == sid &&
+l['from']!.compareTo(date) <= 0 &&
+l['to']!.compareTo(date) >= 0);
+final snap = await FirebaseFirestore.instance
+    .collection('dailyAttendance')
+    .where('date', isGreaterThanOrEqualTo: key.format(from))
+    .where('date', isLessThanOrEqualTo: key.format(to))
+    .get();
+final regs = [
+for (final d in snap.docs)
+if (shift.isEmpty || d.data()['session'] == shift) d.data()
+];
+final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
+final classes = [
+for (final c in all)
+if (!c.isSub && (classIds.isEmpty || classIds.contains(c.id))) c
+]..sort((a, b) {
+final f = a.form.compareTo(b.form);
+return f != 0 ? f : a.name.compareTo(b.name);
+});
+final bySec = <String, List<MapEntry<String, String>>>{};
+for (final d in stus.docs) {
+final m = d.data();
+bySec
+    .putIfAbsent('${m['sectionId'] ?? ''}', () => [])
+    .add(MapEntry(d.id, '${m['name'] ?? ''}'.trim()));
+}
+final rows = <_DrClassRow>[];
+final reasons = <String, List<int>>{};
+final absentBy = <String, _DrAbsent>{};
+final days = <String, _DrDay>{};
+for (final cls in classes) {
+final row = _DrClassRow(cls);
+final subIds = {
+for (final c in all)
+if (c.isSub &&
+c.form == cls.form &&
+c.classKey == cls.name.toUpperCase())
+c.id
+};
+final inClass = bySec[cls.id] ?? const <MapEntry<String, String>>[];
+final names = {for (final e in inClass) e.value.toLowerCase()};
+// the class + the students that exist only in a divided section
+final students = <MapEntry<String, String>>[
+...inClass,
+for (final sid in subIds)
+for (final e in bySec[sid] ?? const <MapEntry<String, String>>[])
+if (!names.contains(e.value.toLowerCase())) e
+];
+row.students = students.length;
+for (final r in regs) {
+if (r['sectionId'] != cls.id) continue;
+if ('${r['session']}' == 'pm') {
+row.regB++;
+} else {
+row.regA++;
+}
+final who = '${r['byName'] ?? ''}'.trim();
+if (who.isNotEmpty) row.takers[who] = (row.takers[who] ?? 0) + 1;
+final date = '${r['date']}';
+final day = days.putIfAbsent(date, () => _DrDay(date));
+day.regs++;
+final marks = r['marks'] is Map ? r['marks'] as Map : const {};
+final why = r['reasons'] is Map ? r['reasons'] as Map : const {};
+for (final s in students) {
+var v = marks[s.key];
+if (v == null) continue;
+if (onLeave(s.key, date)) v = 'l';
+final rs = why[s.key];
+final label =
+kAttendanceReasons['${rs is Map ? (rs['type'] ?? '') : ''}'] ?? '';
+if (v == 'l') {
+row.leave++;
+day.leave++;
+} else if (v == 'a') {
+row.absent++;
+day.absent++;
+row.absentIds.add(s.key);
+final ab =
+absentBy.putIfAbsent(s.key, () => _DrAbsent(s.value, cls.label));
+ab.count++;
+row.absentBy[s.key] = ab;
+if (label.isNotEmpty) ab.why.add(label);
+reasons.putIfAbsent(label.isEmpty ? 'No reason' : label,
+() => [0, 0])[0]++;
+} else {
+row.present++;
+day.present++;
+if (label.isNotEmpty) {
+reasons.putIfAbsent(label, () => [0, 0])[1]++;
+}
+}
+}
+}
+rows.add(row);
+}
+final top = absentBy.values.toList()
+..sort((a, b) {
+final c = b.count.compareTo(a.count);
+return c != 0 ? c : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+});
+final byReason = reasons.entries.toList()
+..sort((a, b) => b.value[0].compareTo(a.value[0]));
+final dayList = days.values.toList()
+..sort((a, b) => a.date.compareTo(b.date));
+return _DrAnalysis(from, to, shift, rows, top.take(25).toList(),
+{for (final e in byReason) e.key: e.value}, dayList);
+}
+
+/// The analysis as report tables (they come first in the download).
+static List<_DrTable> analysisTables(_DrAnalysis a) {
+final out = <_DrTable>[];
+final taken = a.takers.entries.map((e) => '${e.key} (${e.value})').join(', ');
+out.add(_DrTable(
+title: 'Summary by class',
+headers: const [
+'Class',
+'Students',
+'Shift A',
+'Shift B',
+'Taken by',
+'Present',
+'Absent',
+'Leave',
+'Attendance',
+'Absent students'
+],
+rows: [
+for (final r in a.rows)
+[
+r.cls.label,
+'${r.students}',
+a.shiftCell(r, 'am'),
+a.shiftCell(r, 'pm'),
+r.takenBy.isEmpty ? '-' : r.takenBy,
+'${r.present}',
+'${r.absent}',
+'${r.leave}',
+r.pct,
+'${r.absentIds.length}',
+],
+[
+'TOTAL',
+'${a.students}',
+a.single
+? '${a.rows.where((r) => r.regA > 0).length}/${a.rows.length}'
+    : '${a.regA}',
+a.single
+? '${a.rows.where((r) => r.regB > 0).length}/${a.rows.length}'
+    : '${a.regB}',
+'-',
+'${a.present}',
+'${a.absent}',
+'${a.leave}',
+a.pct,
+'${a.absentStudents}',
+],
+],
+weights: const [1.0, 1.1, 1.2, 1.2, 3.0, 1.0, 1.0, 0.9, 1.2, 1.3],
+left: const {0, 4},
+text: const {0, 2, 3, 4, 8},
+notes: [
+'Classes that took the attendance: ${a.classesTaken} of ${a.rows.length}'
+'   |   Registers: ${a.registers} (Shift A: ${a.regA}, Shift B: ${a.regB})',
+'General total: Present ${a.present}, Absent ${a.absent}, '
+'Leave ${a.leave}, Attendance ${a.pct}',
+'Students absent at least once: ${a.absentStudents}',
+if (taken.isNotEmpty) 'Taken by: $taken',
+if (a.pending.isNotEmpty) 'Not taken: ${a.pending.join(', ')}',
+],
+));
+if (a.absentRows.isNotEmpty) {
+out.add(_DrTable(
+title: 'Absent students by class',
+headers: const ['Class', 'Student name', 'Times absent', 'Reasons'],
+rows: a.absentRows,
+weights: const [1.0, 3.6, 1.2, 2.6],
+left: const {0, 1, 3},
+text: const {0, 1, 3},
+notes: [
+'${a.absentRows.length} student(s) absent at least once; '
+'total absences: ${a.absent}.'
+],
+));
+}
+if (a.pending.isNotEmpty) {
+out.add(_DrTable(
+title: 'Classes without attendance',
+headers: const ['No.', 'Class', 'Not taken'],
+rows: [
+for (var i = 0; i < a.pending.length; i++)
+[
+'${i + 1}',
+a.pending[i].split(' (').first,
+a.pending[i].contains(' (')
+? a.pending[i].substring(a.pending[i].indexOf('(') + 1,
+a.pending[i].length - 1)
+    : '-',
+]
+],
+weights: const [0.8, 1.5, 3],
+left: const {1, 2},
+text: const {1, 2},
+notes: ['${a.pending.length} class(es) did not take the attendance.'],
+));
+}
+if (a.reasons.isNotEmpty) {
+var ta = 0, tp = 0;
+for (final v in a.reasons.values) {
+ta += v[0];
+tp += v[1];
+}
+out.add(_DrTable(
+title: 'Absence reasons',
+headers: const ['Reason', 'Absent', 'Present'],
+rows: [
+for (final e in a.reasons.entries)
+[e.key, '${e.value[0]}', '${e.value[1]}'],
+['TOTAL', '$ta', '$tp'],
+],
+weights: const [3, 1.2, 1.2],
+left: const {0},
+text: const {0},
+notes: const [
+'Present: students who came but were late / dismissed (reason given).'
+],
+));
+}
+if (!a.single && a.days.isNotEmpty) {
+out.add(_DrTable(
+title: 'Absent by day',
+headers: const [
+'Date',
+'Registers',
+'Present',
+'Absent',
+'Leave',
+'Attendance'
+],
+rows: [
+for (final d in a.days)
+[
+DateFormat('EEE d MMM yyyy')
+    .format(DateTime.tryParse(d.date) ?? a.from),
+'${d.regs}',
+'${d.present}',
+'${d.absent}',
+'${d.leave}',
+_drPct(d.present, d.present + d.absent),
+]
+],
+weights: const [2.4, 1.2, 1.2, 1.2, 1.0, 1.4],
+left: const {0},
+text: const {0, 5},
+));
+}
+if (a.topAbsent.isNotEmpty) {
+out.add(_DrTable(
+title: 'Most absent students',
+headers: const [
+'No.',
+'Student name',
+'Class',
+'Times absent',
+'Reasons'
+],
+rows: [
+for (var i = 0; i < a.topAbsent.length; i++)
+[
+'${i + 1}',
+a.topAbsent[i].name,
+a.topAbsent[i].cls,
+'${a.topAbsent[i].count}',
+a.topAbsent[i].why.isEmpty ? '-' : a.topAbsent[i].why.join(', '),
+]
+],
+weights: const [0.7, 3.6, 1.1, 1.4, 3],
+left: const {1, 4},
+text: const {1, 2, 4},
+notes: ['Top ${a.topAbsent.length} students by number of absences.'],
+));
 }
 return out;
 }
@@ -24975,6 +25411,9 @@ reason.dispose();
 DateTime _rFrom = _monday(DateTime.now());
 DateTime _rTo = _today();
 Set<String> _rClasses = {}; // empty = every class
+String _view = 'entry'; // 'entry' (take attendance) | 'report' (analysis)
+Future<_DrAnalysis>? _anFuture;
+bool _rDetail = true; // the download also lists the students of each class
 String _rShift = ''; // '' = Shift A + Shift B
 String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
 String _show = 'all'; // list filter: all | p (present) | a (absent)
@@ -25343,7 +25782,31 @@ if (_rFrom.isAfter(d)) _rFrom = d;
 });
 }
 
-Future<List<_DrTable>> _reportTables() => DailyAttendanceReport.tables(
+Future<_DrAnalysis> _startAnalysis() => DailyAttendanceReport.analysis(
+from: _rFrom,
+to: _rTo,
+classIds: _rClasses,
+shift: _rShift,
+secs: _secsSnap!,
+stus: _stusSnap!,
+);
+
+void _runAnalysis() {
+if (!mounted) return;
+setState(() => _anFuture = _startAnalysis());
+}
+
+/// The downloaded report: the analysis first, then (optionally) the
+/// students of every class.
+Future<List<_DrTable>> _reportTables() async {
+final a = await _startAnalysis();
+if (a.registers == 0) {
+throw Exception('No attendance was taken in this period.');
+}
+final out = [...DailyAttendanceReport.analysisTables(a)];
+if (_rDetail) {
+try {
+out.addAll(await DailyAttendanceReport.tables(
 from: _rFrom,
 to: _rTo,
 classIds: _rClasses,
@@ -25351,25 +25814,14 @@ shift: _rShift,
 status: _rStatus,
 secs: _secsSnap!,
 stus: _stusSnap!,
-);
+));
+} catch (_) {}
+}
+return out;
+}
 
 String get _reportPeriod =>
 DailyAttendanceReport.periodText(_rFrom, _rTo, _rShift, _rStatus);
-
-/// The Report is one icon (like the buttons of the Students page); it
-/// opens the report window.
-Widget _reportPanel(List<SectionInfo> classes) => Align(
-alignment: Alignment.centerRight,
-child: Padding(
-padding: const EdgeInsets.only(bottom: 10),
-child: _BarAction(
-icon: Icons.summarize,
-label: 'Report',
-tooltip: 'Report: Excel, Word, PDF and Print',
-onTap: () => _openReport(classes),
-),
-),
-);
 
 /// Text of the Class field: "All classes", "1A, 1C" or "5 classes".
 String _rClassText(List<SectionInfo> classes) {
@@ -25471,31 +25923,155 @@ setState(
 () => _rClasses = res.length == classes.length ? <String>{} : res);
 }
 
-/// The report window: period, classes (many), shift, who to show, then
-/// Download / print.
-Future<void> _openReport(List<SectionInfo> classes) async {
-final fmt = DateFormat('EEE d MMM yyyy');
-await showDialog<void>(
-context: context,
-builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
-return AlertDialog(
-title: const Row(children: [
-Icon(Icons.summarize),
-SizedBox(width: 10),
-Text('Report'),
-]),
-content: SizedBox(
-width: 480,
-child: SingleChildScrollView(
+/// Entry | Report (only the administrator has the Report).
+Widget _viewSwitch() => Padding(
+padding: const EdgeInsets.only(bottom: 12),
+child: SegmentedButton<String>(
+showSelectedIcon: false,
+segments: const [
+ButtonSegment(
+value: 'entry',
+icon: Icon(Icons.edit_note),
+label: Text('Entry')),
+ButtonSegment(
+value: 'report',
+icon: Icon(Icons.analytics_outlined),
+label: Text('Report')),
+],
+selected: {_view},
+onSelectionChanged: (v) => setState(() {
+_view = v.first;
+_anFuture = null; // the report is counted again each time
+}),
+),
+);
+
+Widget _statTile(IconData icon, String label, String value, Color c) =>
+Container(
+width: 158,
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+decoration: BoxDecoration(
+color: c.withAlpha(24),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: c.withAlpha(70)),
+),
+child: Row(children: [
+Icon(icon, color: c, size: 22),
+const SizedBox(width: 8),
+Expanded(
 child: Column(
-mainAxisSize: MainAxisSize.min,
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
+Text(value,
+style: TextStyle(
+fontSize: 18,
+fontWeight: FontWeight.w800,
+color: c)),
+Text(label,
+style: const TextStyle(
+fontSize: 11, color: Colors.black54)),
+]),
+),
+]),
+);
+
+Widget _section(String title, Widget child, {String? sub}) => Card(
+margin: const EdgeInsets.only(top: 12),
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Text(title,
+style:
+const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700)),
+if (sub != null)
+Padding(
+padding: const EdgeInsets.only(top: 2),
+child: Text(sub,
+style: const TextStyle(fontSize: 12, color: Colors.black54)),
+),
+const SizedBox(height: 8),
+child,
+]),
+),
+);
+
+Widget _scrollTable(List<String> heads, List<List<String>> rows,
+{Set<int> numeric = const {},
+bool totalRow = false,
+Set<int> red = const {}}) {
+TextStyle st(int i) {
+if (totalRow && i == rows.length - 1) {
+return const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5);
+}
+if (red.contains(i)) {
+return const TextStyle(
+color: _absentColor, fontWeight: FontWeight.w600, fontSize: 12.5);
+}
+return const TextStyle(fontSize: 12.5);
+}
+
+return SingleChildScrollView(
+scrollDirection: Axis.horizontal,
+child: DataTable(
+columnSpacing: 16,
+headingRowHeight: 38,
+dataRowMinHeight: 32,
+dataRowMaxHeight: 46,
+columns: [
+for (var c = 0; c < heads.length; c++)
+DataColumn(
+numeric: numeric.contains(c),
+label: Text(heads[c],
+style: const TextStyle(
+fontWeight: FontWeight.w700, fontSize: 12)),
+)
+],
+rows: [
+for (var i = 0; i < rows.length; i++)
+DataRow(cells: [
+for (var c = 0; c < heads.length; c++)
+DataCell(Text(rows[i][c], style: st(i))),
+])
+],
+),
+);
+}
+
+/// The Report page: filters, then the analysis of the saved registers.
+Widget _reportView(List<SectionInfo> classes) {
+_anFuture ??= _startAnalysis();
+final fmt = DateFormat('EEE d MMM yyyy');
+final today = _today();
+void quick(DateTime a, DateTime b) {
+setState(() {
+_rFrom = a;
+_rTo = b;
+_anFuture = _startAnalysis();
+});
+}
+
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+children: [
+_viewSwitch(),
+Wrap(spacing: 8, runSpacing: 8, children: [
+ActionChip(
+avatar: const Icon(Icons.today, size: 16),
+label: const Text('Today'),
+onPressed: () => quick(today, today)),
+ActionChip(
+label: const Text('This week'),
+onPressed: () => quick(_monday(today), today)),
+ActionChip(
+label: const Text('This month'),
+onPressed: () => quick(DateTime(today.year, today.month, 1), today)),
+]),
+const SizedBox(height: 10),
 Wrap(spacing: 10, runSpacing: 10, children: [
 OutlinedButton.icon(
 onPressed: () async {
 await _pickReportDate(true);
-setD(() {});
+_runAnalysis();
 },
 icon: const Icon(Icons.calendar_today, size: 18),
 label: Text('From ${fmt.format(_rFrom)}'),
@@ -25503,7 +26079,7 @@ label: Text('From ${fmt.format(_rFrom)}'),
 OutlinedButton.icon(
 onPressed: () async {
 await _pickReportDate(false);
-setD(() {});
+_runAnalysis();
 },
 icon: const Icon(Icons.event, size: 18),
 label: Text('To ${fmt.format(_rTo)}'),
@@ -25514,7 +26090,7 @@ InkWell(
 borderRadius: BorderRadius.circular(4),
 onTap: () async {
 await _pickReportClasses(classes);
-setD(() {});
+_runAnalysis();
 },
 child: InputDecorator(
 decoration: const InputDecoration(
@@ -25540,14 +26116,13 @@ labelText: 'Shift',
 border: OutlineInputBorder(),
 isDense: true),
 items: const [
-DropdownMenuItem(
-value: '', child: Text('Shift A + B')),
+DropdownMenuItem(value: '', child: Text('Shift A + B')),
 DropdownMenuItem(value: 'am', child: Text('Shift A')),
 DropdownMenuItem(value: 'pm', child: Text('Shift B')),
 ],
 onChanged: (v) {
-setState(() => _rShift = v ?? '');
-setD(() {});
+_rShift = v ?? '';
+_runAnalysis();
 },
 ),
 ),
@@ -25557,39 +26132,92 @@ child: DropdownButtonFormField<String>(
 value: _rStatus,
 isExpanded: true,
 decoration: const InputDecoration(
-labelText: 'Show',
+labelText: 'Student lists show',
 border: OutlineInputBorder(),
 isDense: true),
 items: const [
-DropdownMenuItem(
-value: '', child: Text('All students')),
-DropdownMenuItem(
-value: 'a', child: Text('Absent only')),
-DropdownMenuItem(
-value: 'p', child: Text('Present only')),
+DropdownMenuItem(value: '', child: Text('All students')),
+DropdownMenuItem(value: 'a', child: Text('Absent only')),
+DropdownMenuItem(value: 'p', child: Text('Present only')),
 ],
-onChanged: (v) {
-setState(() => _rStatus = v ?? '');
-setD(() {});
-},
+onChanged: (v) => setState(() => _rStatus = v ?? ''),
 ),
 ),
 ]),
-const SizedBox(height: 10),
-Text(
-'${_rFrom == _rTo ? 'One day: each student shows Present / Absent for each shift.' : 'More than one day: each student shows Present, Absent, Sessions and Attendance %.'}'
-'${_rStatus == 'a' ? '\nAbsent only: students who were absent at least once.' : _rStatus == 'p' ? '\nPresent only: students who were never absent.' : ''}',
-style: const TextStyle(
-fontSize: 12, color: Colors.black54)),
+SwitchListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+title: const Text('Download also lists the students of each class',
+style: TextStyle(fontSize: 13)),
+value: _rDetail,
+onChanged: (v) => setState(() => _rDetail = v),
+),
+FutureBuilder<_DrAnalysis>(
+future: _anFuture,
+builder: (ctx, snap) {
+if (snap.connectionState != ConnectionState.done) {
+return const Padding(
+padding: EdgeInsets.all(32),
+child: Center(child: CircularProgressIndicator()),
+);
+}
+if (snap.hasError) {
+return _msg(
+'${snap.error}'.replaceFirst('Exception: ', ''),
+error: true);
+}
+return _analysisView(snap.data!);
+},
+),
 ],
-),
-),
-),
-actions: [
-_ReportMenuButton(
+);
+}
+
+Widget _analysisView(_DrAnalysis a) {
+final pending = a.pending;
+final redRows = {
+for (var i = 0; i < a.rows.length; i++)
+if (a.isPending(a.rows[i])) i
+};
+final classRows = <List<String>>[
+for (final r in a.rows)
+[
+r.cls.label,
+'${r.students}',
+a.shiftCell(r, 'am'),
+a.shiftCell(r, 'pm'),
+r.takenBy.isEmpty ? '-' : r.takenBy,
+'${r.present}',
+'${r.absent}',
+'${r.leave}',
+r.pct,
+'${r.absentIds.length}',
+],
+[
+'TOTAL',
+'${a.students}',
+a.single
+? '${a.rows.where((r) => r.regA > 0).length}/${a.rows.length}'
+    : '${a.regA}',
+a.single
+? '${a.rows.where((r) => r.regB > 0).length}/${a.rows.length}'
+    : '${a.regB}',
+'-',
+'${a.present}',
+'${a.absent}',
+'${a.leave}',
+a.pct,
+'${a.absentStudents}',
+],
+];
+return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+const SizedBox(height: 4),
+Align(
+alignment: Alignment.centerLeft,
+child: _ReportMenuButton(
 label: 'Download / print',
 fileName: () => _safeFile(
-'Daily-attendance-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
+'Daily-attendance-report-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
 '${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
 build: () async => DailyAttendanceReport.pdf(
 await _reportTables(), _reportPeriod),
@@ -25598,13 +26226,147 @@ await _reportTables(), _reportPeriod),
 buildDocx: () async => DailyAttendanceReport.docx(
 await _reportTables(), _reportPeriod),
 ),
-TextButton(
-onPressed: () => Navigator.pop(ctx),
-child: const Text('Close')),
-],
-);
-}),
-);
+),
+const SizedBox(height: 12),
+Wrap(spacing: 10, runSpacing: 10, children: [
+_statTile(
+Icons.fact_check_outlined,
+'Classes took attendance',
+'${a.classesTaken} of ${a.rows.length}',
+pending.isEmpty ? _presentColor : _reasonColor),
+_statTile(Icons.menu_book_outlined, 'Registers',
+'${a.registers}', const Color(0xFF455A64)),
+_statTile(Icons.groups_outlined, 'Students', '${a.students}',
+const Color(0xFF455A64)),
+_statTile(Icons.check_circle_outline, 'Present', '${a.present}',
+_presentColor),
+_statTile(
+Icons.cancel_outlined, 'Absent', '${a.absent}', _absentColor),
+_statTile(Icons.event_busy_outlined, 'Leave', '${a.leave}',
+_leaveColor),
+_statTile(Icons.percent, 'Attendance', a.pct, _presentColor),
+_statTile(Icons.person_off_outlined, 'Students absent',
+'${a.absentStudents}', _absentColor),
+]),
+Card(
+margin: const EdgeInsets.only(top: 12),
+color: (pending.isEmpty ? _presentColor : _absentColor).withAlpha(20),
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: pending.isEmpty
+? const Row(children: [
+Icon(Icons.check_circle, color: _presentColor),
+SizedBox(width: 8),
+Expanded(
+child: Text('All classes have taken the attendance.',
+style: TextStyle(fontWeight: FontWeight.w600))),
+])
+    : Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(
+'Not taken: ${pending.length} '
+'class${pending.length == 1 ? '' : 'es'}',
+style: const TextStyle(
+fontWeight: FontWeight.w700, color: _absentColor)),
+const SizedBox(height: 8),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final p in pending)
+Chip(
+visualDensity: VisualDensity.compact,
+label: Text(p, style: const TextStyle(fontSize: 12)),
+),
+]),
+]),
+),
+),
+_section(
+'Classes and the user who took the attendance',
+_scrollTable(const [
+'Class',
+'Students',
+'Shift A',
+'Shift B',
+'Taken by',
+'Present',
+'Absent',
+'Leave',
+'Attendance',
+'Absent students',
+], classRows, totalRow: true, red: redRows, numeric: const {1, 5, 6, 7, 9}),
+sub: a.single
+? 'One day: each shift shows Taken / Not taken.'
+    : 'Shift A / Shift B = number of registers taken in the period.',
+),
+if (a.absentRows.isNotEmpty)
+_section(
+'Absent students by class',
+_scrollTable(const [
+'Class',
+'Student name',
+'Times absent',
+'Reasons'
+], a.absentRows, numeric: const {2}),
+sub: '${a.absentRows.length} student(s) absent at least once.',
+),
+if (a.reasons.isNotEmpty)
+_section(
+'Reasons',
+_scrollTable(const [
+'Reason',
+'Absent',
+'Present'
+], [
+for (final e in a.reasons.entries)
+[e.key, '${e.value[0]}', '${e.value[1]}'],
+], numeric: const {1, 2}),
+sub: 'Present = came, but late / dismissed (a reason was given).',
+),
+if (!a.single && a.days.isNotEmpty)
+_section(
+'Absent by day',
+_scrollTable(const [
+'Date',
+'Registers',
+'Present',
+'Absent',
+'Leave',
+'Attendance'
+], [
+for (final d in a.days)
+[
+DateFormat('EEE d MMM yyyy')
+    .format(DateTime.tryParse(d.date) ?? a.from),
+'${d.regs}',
+'${d.present}',
+'${d.absent}',
+'${d.leave}',
+_drPct(d.present, d.present + d.absent),
+]
+], numeric: const {1, 2, 3, 4}),
+),
+if (a.topAbsent.isNotEmpty)
+_section(
+'Most absent students',
+_scrollTable(const [
+'No.',
+'Student name',
+'Class',
+'Times absent',
+'Reasons'
+], [
+for (var i = 0; i < a.topAbsent.length; i++)
+[
+'${i + 1}',
+a.topAbsent[i].name,
+a.topAbsent[i].cls,
+'${a.topAbsent[i].count}',
+a.topAbsent[i].why.isEmpty ? '-' : a.topAbsent[i].why.join(', '),
+]
+], numeric: const {0, 3}),
+sub: 'Top ${a.topAbsent.length} by number of absences.',
+),
+]);
 }
 
 Future<void> _pickDate() async {
@@ -25679,6 +26441,8 @@ return _msg(restricted
 ? 'None of your classes was found. Ask the administrator.'
     : 'There are no classes yet.');
 }
+// the administrator can switch to the Report (analysis) page
+if (_view == 'report' && me.fullAccess) return _reportView(classes);
 final cid =
 classes.any((c) => c.id == _classId) ? _classId! : classes.first.id;
 if (cid != _classId) {
@@ -25780,7 +26544,7 @@ return ListView(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
 children: [
 // only the administrator sees the report
-if (me.fullAccess) _reportPanel(classes),
+if (me.fullAccess) _viewSwitch(),
 DropdownButtonFormField<String>(
 value: cid,
 isExpanded: true,
