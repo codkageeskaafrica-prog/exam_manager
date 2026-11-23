@@ -40323,6 +40323,14 @@ final List<_SowRow> _rows = [];
 DateTime _start1 = _acDay(DateTime.now()); // first day of week 1
 DateTime? _start2; // Term 2 start (null = 4 weeks after Term 1 ends)
 String? _genForm, _genSubject; // what the shown rows were made for
+int _genWeeks = 0; // the weeks, the revision switch and the topics the
+bool _genRevision = true; // shown rows were made from (saved with them,
+String _genTopics = ''; // so a reopened scheme can be made again)
+
+/// Whose scheme this is (a saved scheme opened by an administrator keeps
+/// its teacher) and the form|subject|term it was opened for.
+String _ownerId = FirebaseAuth.instance.currentUser?.uid ?? '';
+String _loadedKey = '';
 
 /// The days this teacher teaches (1 = Monday ... 7 = Sunday).
 Set<int> _days = {};
@@ -40404,6 +40412,10 @@ setState(() => _error = 'Write at least one topic (one topic per line).');
 return;
 }
 _syncStarts(_term); // the dates may have been changed in Settings
+final me = FirebaseAuth.instance.currentUser?.uid ?? '';
+if (_ownerId != me && '$_form|$_subject|$_term' != _loadedKey) {
+_ownerId = me; // a different scheme: it is this person's own
+}
 // the weeks of the chosen term(s); the last week of each term can be
 // a revision and test week
 final segs = _both
@@ -40479,6 +40491,9 @@ _rows
 _genTerm = _term;
 _genForm = _form;
 _genSubject = _subject;
+_genWeeks = _weeks;
+_genRevision = _revision;
+_genTopics = _topics.text;
 _error = null;
 });
 _save(quiet: true); // so the Lesson plan can find it by date
@@ -40487,7 +40502,8 @@ _save(quiet: true); // so the Lesson plan can find it by date
 /// Saves the scheme (Firestore: schemesOfWork) for the Lesson plan.
 Future<void> _save({bool quiet = false}) async {
 if (_rows.isEmpty || _genForm == null || _genSubject == null) return;
-final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+final me = FirebaseAuth.instance.currentUser?.uid ?? '';
+final uid = _ownerId.isEmpty ? me : _ownerId;
 final id = _safeFile('${_genForm}_${_genSubject}_${_genTerm}_$uid');
 final day = DateFormat('yyyy-MM-dd');
 final data = <String, dynamic>{
@@ -40497,6 +40513,9 @@ final data = <String, dynamic>{
 'term': _genTerm,
 'teacherId': uid,
 'teacherName': _teacher.text.trim(),
+'weeks': _genWeeks,
+'revision': _genRevision,
+'topics': _genTopics,
 'days': ([..._effDays]..sort()),
 'rows': [
 for (final r in _rows)
@@ -40529,6 +40548,288 @@ messenger.showSnackBar(SnackBar(
 content: Text('Could not save online: $e\n'
 'It stays on this device until the app is closed.')));
 }
+}
+
+/// Generate; asks first when it would replace the weeks shown or a scheme
+/// that is already saved for this form, subject and term.
+Future<void> _generateAsk() async {
+if (_form == null || _subject == null) {
+_generate(); // shows what is missing
+return;
+}
+if (_rows.isNotEmpty) {
+final ok = await showDialog<bool>(
+context: context,
+builder: (c) => AlertDialog(
+title: const Text('Generate again?'),
+content: const Text(
+'The weeks below are made again from the topics. Your changes '
+'to them will be replaced.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(c, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(c, true),
+child: const Text('Generate again')),
+],
+),
+);
+if (ok != true || !mounted) return;
+} else {
+final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+final id = _safeFile('${_form}_${_subject}_${_term}_$uid');
+Map<String, dynamic>? saved;
+try {
+final d = await FirebaseFirestore.instance
+    .collection('schemesOfWork')
+    .doc(id)
+    .get();
+if (d.exists) saved = {...?d.data(), 'id': d.id};
+} catch (_) {}
+saved ??= _AcademicStore.cache[id];
+if (saved != null) {
+if (!mounted) return;
+final c = await showDialog<String>(
+context: context,
+builder: (c) => AlertDialog(
+title: const Text('Already saved'),
+content: Text('A scheme of work for $_form $_subject $_term is '
+'already saved. Open it to continue, or make a new one that '
+'replaces it.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(c, 'cancel'),
+child: const Text('Cancel')),
+OutlinedButton(
+onPressed: () => Navigator.pop(c, 'open'),
+child: const Text('Open saved')),
+FilledButton(
+onPressed: () => Navigator.pop(c, 'new'),
+child: const Text('Replace it')),
+],
+),
+);
+if (!mounted || c == null || c == 'cancel') return;
+if (c == 'open') {
+_loadScheme(saved);
+return;
+}
+}
+}
+_generate();
+}
+
+/// Moves the content of a week up or down (the week numbers and dates
+/// stay where they are).
+void _swap(int i, int j) {
+final a = _rows[i], b = _rows[j];
+void sw(TextEditingController x, TextEditingController y) {
+final t = x.text;
+x.text = y.text;
+y.text = t;
+}
+
+sw(a.topic, b.topic);
+sw(a.objectives, b.objectives);
+sw(a.activities, b.activities);
+sw(a.resources, b.resources);
+sw(a.assessment, b.assessment);
+setState(() {});
+}
+
+Widget _moveButtons(_SowRow r) {
+final i = _rows.indexOf(r);
+return Row(mainAxisSize: MainAxisSize.min, children: [
+IconButton(
+tooltip: 'Move this content to the week above',
+visualDensity: VisualDensity.compact,
+icon: const Icon(Icons.arrow_upward, size: 18),
+onPressed: i > 0 ? () => _swap(i, i - 1) : null,
+),
+IconButton(
+tooltip: 'Move this content to the week below',
+visualDensity: VisualDensity.compact,
+icon: const Icon(Icons.arrow_downward, size: 18),
+onPressed: i >= 0 && i < _rows.length - 1 ? () => _swap(i, i + 1) : null,
+),
+]);
+}
+
+/// Lists the saved schemes of work and opens the chosen one.
+Future<void> _openSaved() async {
+final me = FirebaseAuth.instance.currentUser?.uid ?? '';
+final scoped = teacherScope.value.scoped;
+final items = <Map<String, dynamic>>[];
+try {
+Query<Map<String, dynamic>> q =
+FirebaseFirestore.instance.collection('schemesOfWork');
+if (scoped) q = q.where('teacherId', isEqualTo: me);
+final snap = await q.get();
+for (final d in snap.docs) {
+items.add({...d.data(), 'id': d.id});
+}
+} catch (e) {
+if (mounted) {
+ScaffoldMessenger.of(context)
+    .showSnackBar(SnackBar(content: Text('Could not load: $e')));
+}
+}
+for (final m in _AcademicStore.cache.values) {
+if (!items.any((x) => x['id'] == m['id']) &&
+(!scoped || m['teacherId'] == me)) {
+items.add(m);
+}
+}
+int stamp(Map<String, dynamic> m) =>
+m['updatedAt'] is Timestamp
+? (m['updatedAt'] as Timestamp).millisecondsSinceEpoch
+    : 0;
+items.sort((a, b) => stamp(b).compareTo(stamp(a)));
+if (!mounted) return;
+final pick = await showDialog<Map<String, dynamic>>(
+context: context,
+builder: (c) => StatefulBuilder(
+builder: (c, setD) => AlertDialog(
+title: const Text('Saved schemes of work'),
+content: SizedBox(
+width: 440,
+child: items.isEmpty
+? const Text('Nothing saved yet. Generate a scheme and press Save.')
+    : ListView(shrinkWrap: true, children: [
+for (final m in items)
+ListTile(
+dense: true,
+title: Text('${m['form']}  |  ${m['subject']}  |  ${m['term']}'),
+subtitle: Text([
+if ('${m['teacherName'] ?? ''}'.isNotEmpty)
+'${m['teacherName']}',
+'${(m['rows'] is List) ? (m['rows'] as List).length : 0} weeks',
+if (stamp(m) > 0)
+DateFormat('d MMM yyyy').format(
+(m['updatedAt'] as Timestamp).toDate()),
+].join('  |  ')),
+onTap: () => Navigator.pop(c, m),
+trailing: IconButton(
+tooltip: 'Delete',
+icon: const Icon(Icons.delete_outline, size: 20),
+onPressed: () async {
+final yes = await showDialog<bool>(
+context: c,
+builder: (c2) => AlertDialog(
+title: const Text('Delete this scheme?'),
+content: Text(
+'${m['form']} ${m['subject']} ${m['term']} will be removed.'),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(c2, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(c2, true),
+child: const Text('Delete')),
+],
+),
+);
+if (yes != true) return;
+try {
+await FirebaseFirestore.instance
+    .collection('schemesOfWork')
+    .doc('${m['id']}')
+    .delete();
+} catch (_) {}
+_AcademicStore.cache.remove('${m['id']}');
+setD(() => items.remove(m));
+},
+),
+),
+]),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(c),
+child: const Text('Close')),
+],
+),
+),
+);
+if (pick != null && mounted) _loadScheme(pick);
+}
+
+/// Shows a saved scheme: the form, subject, term, topics and every week.
+void _loadScheme(Map<String, dynamic> m) {
+final raw = m['rows'];
+final fresh = <_SowRow>[];
+if (raw is List) {
+for (final r in raw) {
+if (r is! Map) continue;
+final from = DateTime.tryParse('${r['from']}') ?? DateTime.now();
+fresh.add(_SowRow(
+'${r['term'] ?? ''}',
+_acDay(from),
+'${r['week'] ?? ''}',
+'${r['topic'] ?? ''}',
+'${r['objectives'] ?? ''}',
+'${r['activities'] ?? ''}',
+'${r['resources'] ?? ''}',
+'${r['assessment'] ?? ''}',
+));
+}
+}
+if (fresh.isEmpty) {
+ScaffoldMessenger.of(context).showSnackBar(
+const SnackBar(content: Text('This saved scheme has no weeks.')));
+return;
+}
+// older saves have no topics list: take it from the weeks
+var topics = '${m['topics'] ?? ''}';
+if (topics.trim().isEmpty) {
+final seen = <String>[];
+for (final r in fresh) {
+if (r.topic.text.startsWith('Revision and end of')) continue;
+for (final t in r.topic.text
+    .replaceAll(' (continued)', '')
+    .split(RegExp(r';\s*'))) {
+if (t.trim().isNotEmpty && !seen.contains(t.trim())) seen.add(t.trim());
+}
+}
+topics = seen.join('\n');
+}
+final term = '${m['term'] ?? 'Term 1'}';
+final dl = m['days'];
+setState(() {
+for (final r in _rows) {
+r.dispose();
+}
+_rows
+..clear()
+..addAll(fresh);
+_term = _terms.contains(term) ? term : 'Term 1';
+_form = '${m['form']}';
+_subject = '${m['subject']}';
+final w = m['weeks'];
+_weeks = (w is num ? w.toInt() : fresh.length).clamp(4, 45);
+_revision = m['revision'] is bool ? m['revision'] as bool : _revision;
+if (dl is List) {
+final d = {
+for (final e in dl)
+if (e is num) e.toInt()
+};
+if (d.isNotEmpty) _days = d;
+}
+_topics.text = topics;
+if ('${m['teacherName'] ?? ''}'.isNotEmpty) {
+_teacher.text = '${m['teacherName']}';
+}
+_genTerm = _term;
+_genForm = _form;
+_genSubject = _subject;
+_genWeeks = _weeks;
+_genRevision = _revision;
+_genTopics = topics;
+_ownerId = '${m['teacherId'] ?? ''}';
+_loadedKey = '$_form|$_subject|$_term';
+_error = null;
+});
 }
 
 String get _period =>
@@ -40589,7 +40890,9 @@ const SizedBox(height: 4),
 const Text(
 'Choose the form, subject and term, type the topics (one per '
 'line), then generate. The weeks and their dates come from '
-'Settings > Academic. '
+'Settings > Academic. Use Open saved to continue a saved '
+'scheme: change the topics and press Generate again, or move '
+'a week\'s content up or down with the arrows. '
 'Edit any cell and press Save: the Lesson plan then fills '
 'the topic from this scheme by date.',
 style: TextStyle(fontSize: 12.5, color: Colors.black54)),
@@ -40680,9 +40983,14 @@ child: Text(_error!, style: const TextStyle(color: Colors.red)),
 ),
 Wrap(spacing: 10, runSpacing: 10, children: [
 FilledButton.icon(
-onPressed: _generate,
+onPressed: _generateAsk,
 icon: const Icon(Icons.auto_fix_high),
 label: Text(_rows.isEmpty ? 'Generate' : 'Generate again'),
+),
+OutlinedButton.icon(
+onPressed: _openSaved,
+icon: const Icon(Icons.folder_open),
+label: const Text('Open saved'),
 ),
 OutlinedButton.icon(
 onPressed: _rows.isEmpty ? null : () => _save(),
@@ -40712,11 +41020,11 @@ margin: const EdgeInsets.only(top: 12),
 child: Padding(
 padding: const EdgeInsets.all(12),
 child: Column(children: [
-Align(
-alignment: Alignment.centerLeft,
-child: Padding(
+Padding(
 padding: const EdgeInsets.only(bottom: 8),
-child: Wrap(spacing: 6, children: [
+child: Row(children: [
+Expanded(
+child: Wrap(spacing: 6, runSpacing: 4, children: [
 if (_genBoth)
 Chip(
 visualDensity: VisualDensity.compact,
@@ -40732,6 +41040,8 @@ style: const TextStyle(fontSize: 12)),
 ),
 ]),
 ),
+_moveButtons(r),
+]),
 ),
 Row(children: [
 SizedBox(width: 90, child: _acField(r.week, 'Week')),
