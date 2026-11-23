@@ -6907,6 +6907,76 @@ class AssignmentService {
   CollectionReference<Map<String, dynamic>> get _files =>
       _db.collection('assignmentFiles');
 
+  // A Firestore document holds about 1 MiB, so a bigger file is stored in
+  // parts: part 0 in assignmentFiles/{id} (with the details) and the others
+  // in assignmentFiles/{id}__p1, __p2 ... (same collection, same rules).
+  static const maxBytes = 6 * 1024 * 1024; // the biggest file accepted
+  static const _chunk = 640 * 1024; // raw bytes per part (~853 KB as base64)
+
+  Future<void> _put(String docId, Map<String, dynamic> data) =>
+      _files.doc(docId).set(data).timeout(const Duration(seconds: 60),
+          onTimeout: () {
+            throw Exception(
+                'Saving timed out. Check the internet connection and the Firestore rules '
+                    '(collection "assignmentFiles").');
+          });
+
+  /// Saves [bytes] with the details [meta]; the main document is written
+  /// last, so a half saved file is never shown.
+  Future<void> _storeBytes(String id, Uint8List bytes,
+      Map<String, dynamic> meta, void Function(String status)? onStatus) async {
+    final parts = bytes.isEmpty ? 1 : (bytes.length + _chunk - 1) ~/ _chunk;
+    Uint8List slice(int i) {
+      final end = (i + 1) * _chunk;
+      return bytes.sublist(i * _chunk, end > bytes.length ? bytes.length : end);
+    }
+
+    for (var i = 1; i < parts; i++) {
+      onStatus?.call('Saving part ${i + 1} of $parts...');
+      await _put('${id}__p$i', {'dataBase64': base64Encode(slice(i))});
+    }
+    await _put(id, {
+      ...meta,
+      'parts': parts,
+      'dataBase64': base64Encode(parts == 1 ? bytes : slice(0)),
+    });
+  }
+
+  /// The bytes of a stored file ([d] is its main document).
+  Future<Uint8List> _readBytes(String id, Map<String, dynamic> d) async {
+    final first = base64Decode(d['dataBase64'] as String);
+    final parts = (d['parts'] as num?)?.toInt() ?? 1;
+    if (parts <= 1) return first;
+    final out = BytesBuilder(copy: false)..add(first);
+    for (var i = 1; i < parts; i++) {
+      final c = (await _files.doc('${id}__p$i').get()).data();
+      if (c == null || c['dataBase64'] == null) {
+        throw Exception(
+            'A part of the file is missing. Please upload the assignment again.');
+      }
+      out.add(base64Decode(c['dataBase64'] as String));
+    }
+    return out.toBytes();
+  }
+
+  /// Deletes a stored file with all its parts.
+  Future<void> _deleteStored(String id) async {
+    var parts = 1;
+    try {
+      parts = ((await _files.doc(id).get()).data()?['parts'] as num?)
+          ?.toInt() ??
+          1;
+    } catch (_) {}
+    for (var i = 1; i < parts; i++) {
+      try {
+        await _files.doc('${id}__p$i').delete();
+      } catch (_) {}
+    }
+    try {
+      await _files.doc(id).delete();
+    } catch (_) {}
+  }
+
   static void _sortOldestFirst(List<AssignmentRecord> l) {
     final far = DateTime.now().add(const Duration(days: 1));
     l.sort((a, b) => (a.createdAt ?? far).compareTo(b.createdAt ?? far));
@@ -6992,9 +7062,7 @@ class AssignmentService {
     final snap = await _meta.where('subject', isEqualTo: subject).get();
     for (final d in snap.docs) {
       if ('${d.data()['form']}' != form) continue;
-      try {
-        await _files.doc(d.id).delete();
-      } catch (_) {}
+      await _deleteStored(d.id);
       await d.reference.delete();
     }
   }
@@ -7038,27 +7106,23 @@ class AssignmentService {
     final baseName = file.name.replaceAll(RegExp(r'\.[^.]+$'), '');
     final fileName = isDocx ? file.name : '$baseName.pdf';
     final kb = (stamped.length / 1024).round();
-    if (stamped.length > ExamService.maxFileBytes) {
+    if (stamped.length > maxBytes) {
       throw Exception(
-          'File is too large ($kb KB after adding the letterhead). The limit is 700 KB. '
-              'Please compress the file or use a smaller letterhead image.');
+          'File is too large ($kb KB after adding the letterhead). The limit is '
+              '${maxBytes ~/ (1024 * 1024)} MB. Please make its pictures smaller '
+              'or use a smaller letterhead image.');
     }
 
     onStatus?.call('Saving $kb KB...');
     final uid = FirebaseAuth.instance.currentUser?.uid;
     final ref = _meta.doc();
-    await _files.doc(ref.id).set({
+    await _storeBytes(ref.id, stamped, {
       'fileName': fileName,
       'contentType': isDocx ? ExamService._docxMime : 'application/pdf',
-      'dataBase64': base64Encode(stamped),
       'size': stamped.length,
       'updatedBy': uid,
       'updatedAt': FieldValue.serverTimestamp(),
-    }).timeout(const Duration(seconds: 40), onTimeout: () {
-      throw Exception(
-          'Saving timed out. Check the internet connection and the Firestore rules '
-              '(collection "assignmentFiles").');
-    });
+    }, onStatus);
     await ref.set({
       'subject': subject,
       'form': form,
@@ -7086,16 +7150,14 @@ class AssignmentService {
     final name = '${_clean(r.form)}-${_clean(r.subject)}-'
         '${_clean(r.title.isEmpty ? 'Assignment' : r.title)}${_extOf(stored)}';
     await _downloadInBrowser(
-      base64Decode(d['dataBase64'] as String),
+      await _readBytes(r.id, d),
       name,
       (d['contentType'] as String?) ?? 'application/octet-stream',
     );
   }
 
   Future<void> delete(AssignmentRecord r) async {
-    try {
-      await _files.doc(r.id).delete();
-    } catch (_) {}
+    await _deleteStored(r.id);
     await _meta.doc(r.id).delete();
   }
 
@@ -7119,7 +7181,7 @@ class AssignmentService {
       final r = list[i];
       final d = docs[i].data();
       if (d == null || d['dataBase64'] == null) continue;
-      final bytes = base64Decode(d['dataBase64'] as String);
+      final bytes = await _readBytes(r.id, d);
       final ext = _extOf((d['fileName'] as String?) ?? r.fileName);
       final stem = '$year/${_clean(r.subject)}/${_clean(r.form)}-'
           '${_clean(r.subject)}-${_clean(r.title.isEmpty ? 'Assignment' : r.title)}';
@@ -8637,6 +8699,7 @@ class AppPages {
   static const teachers = 'teachers';
   static const finance = 'finance';
   static const discipline = 'discipline';
+  static const academic = 'academic';
   static const settings = 'settings';
 
   static const all = [
@@ -8651,6 +8714,7 @@ class AppPages {
     teachers,
     finance,
     discipline,
+    academic,
     settings,
   ];
   static const labels = {
@@ -8665,6 +8729,7 @@ class AppPages {
     teachers: 'Teachers',
     finance: 'Finance',
     discipline: 'Discipline',
+    academic: 'Academic',
     settings: 'Settings',
   };
 }
@@ -9580,6 +9645,14 @@ class HomeScreen extends StatelessWidget {
       icon: Icons.gavel,
       color: const Color(0xFFC0392B),
       builder: (_) => const DisciplineScreen(),
+    ),
+    _HomeItem(
+      page: AppPages.academic,
+      title: 'Academic',
+      subtitle: 'Scheme of work and Lesson plan generators',
+      icon: Icons.auto_stories,
+      color: const Color(0xFF6A1B9A),
+      builder: (_) => const AcademicScreen(),
     ),
     _HomeItem(
       page: AppPages.settings,
@@ -11984,6 +12057,17 @@ class AppSettings {
   /// Finance: the ways a payment can be received.
   final List<String> paymentMethods;
 
+  /// Academic: the weekend days (DateTime.monday ... sunday); no lessons then.
+  final List<int> weekendDays;
+
+  /// Academic: the first day (yyyy-MM-dd, or '') and the number of weeks of
+  /// each term. The Scheme of work starts from these.
+  final String term1Start, term2Start;
+  final int term1Weeks, term2Weeks;
+
+  /// Academic: the usual length of a lesson in minutes (Lesson plan).
+  final int lessonMinutes;
+
   const AppSettings({
     this.weekStart = DateTime.monday,
     this.maxMark = 100.0,
@@ -12004,6 +12088,7 @@ class AppSettings {
       AppPages.attendance,
       AppPages.result,
       AppPages.discipline,
+      AppPages.academic,
     ],
     this.studentAccess = const [AppPages.result],
     this.affairsAccess = const [
@@ -12024,6 +12109,12 @@ class AppSettings {
     this.currency = 'USD',
     this.monthlyFees = const {},
     this.paymentMethods = const ['Cash', 'Mobile money', 'Bank'],
+    this.weekendDays = const [DateTime.friday],
+    this.term1Start = '',
+    this.term2Start = '',
+    this.term1Weeks = 21,
+    this.term2Weeks = 22,
+    this.lessonMinutes = 40,
   });
 
   /// Used until the first exam is added in Settings.
@@ -12307,6 +12398,26 @@ class AppSettings {
           if (e is String && e.trim().isNotEmpty) e.trim(),
       ]
           : d.paymentMethods,
+      weekendDays: m['weekendDays'] is List
+          ? ({
+        for (final e in (m['weekendDays'] as List))
+          if (e is num && e >= 1 && e <= 7) e.toInt(),
+      }.toList()
+        ..sort())
+          : d.weekendDays,
+      term1Start:
+      m['term1Start'] is String ? m['term1Start'] as String : d.term1Start,
+      term2Start:
+      m['term2Start'] is String ? m['term2Start'] as String : d.term2Start,
+      term1Weeks: m['term1Weeks'] is num
+          ? (m['term1Weeks'] as num).toInt().clamp(1, 45)
+          : d.term1Weeks,
+      term2Weeks: m['term2Weeks'] is num
+          ? (m['term2Weeks'] as num).toInt().clamp(1, 45)
+          : d.term2Weeks,
+      lessonMinutes: m['lessonMinutes'] is num
+          ? (m['lessonMinutes'] as num).toInt().clamp(10, 180)
+          : d.lessonMinutes,
     );
   }
 }
@@ -12381,6 +12492,8 @@ const _kSetCats = <_SetCat>[
       Icons.emoji_events),
   _SetCat(2, 'Attendance', 'Week start and attendance colours',
       Icons.fact_check),
+  _SetCat(8, 'Academic', 'Weekend days, term dates and lesson length',
+      Icons.auto_stories),
   _SetCat(5, 'Finance', 'Currency, monthly fees and payment methods',
       Icons.account_balance_wallet),
   _SetCat(3, 'Users', 'Accounts, approval and page access',
@@ -13183,6 +13296,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       TextEditingController(text: _fmtMark(g)),
   ];
   final _newExam = TextEditingController();
+  late final _t1Weeks =
+  TextEditingController(text: '${appSettings.value.term1Weeks}');
+  late final _t2Weeks =
+  TextEditingController(text: '${appSettings.value.term2Weeks}');
+  late final _lessonMin =
+  TextEditingController(text: '${appSettings.value.lessonMinutes}');
   late final _appName = TextEditingController(text: appSettings.value.appName);
   late final _sig = [
     for (var i = 0; i < 3; i++)
@@ -13224,7 +13343,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     for (final c in [
-      _good, _warn, _newExam, _appName, ..._grade, _cur, _methods, ..._fee.values
+      _good, _warn, _newExam, _appName, ..._grade, _cur, _methods, ..._fee.values,
+      _t1Weeks, _t2Weeks, _lessonMin,
     ]) {
       c.dispose();
     }
@@ -13259,6 +13379,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _saveAcademic() async {
+    final a = int.tryParse(_t1Weeks.text.trim());
+    final b = int.tryParse(_t2Weeks.text.trim());
+    final m = int.tryParse(_lessonMin.text.trim());
+    if (a == null || b == null || a < 1 || a > 45 || b < 1 || b > 45) {
+      _toast('Enter the number of weeks of each term (1 to 45).');
+      return;
+    }
+    if (m == null || m < 10 || m > 180) {
+      _toast('Enter the length of a lesson in minutes (10 to 180).');
+      return;
+    }
+    await _save({'term1Weeks': a, 'term2Weeks': b, 'lessonMinutes': m},
+        'Academic settings saved');
+  }
+
+  Future<void> _pickTermStart(String key, DateTime? current) async {
+    final p = await showDatePicker(
+      context: context,
+      initialDate: current ?? DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 800)),
+    );
+    if (p == null || !mounted) return;
+    await _save({key: DateFormat('yyyy-MM-dd').format(p)});
   }
 
   Future<void> _saveRates() async {
@@ -14262,6 +14409,102 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _saveButton('Save colours', _saveRates),
       ]);
 
+  Widget _intField(TextEditingController c, String label) => TextField(
+    controller: c,
+    keyboardType: TextInputType.number,
+    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+  );
+
+  Widget _termRow(String label, String key, String start,
+      TextEditingController weeks) {
+    final d = DateTime.tryParse(start);
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SizedBox(
+                width: 70,
+                child: Text(label,
+                    style: const TextStyle(fontWeight: FontWeight.w600))),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : () => _pickTermStart(key, d),
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(d == null
+                  ? 'Set start date'
+                  : DateFormat('EEE d MMM yyyy').format(d)),
+            ),
+            if (d != null)
+              IconButton(
+                tooltip: 'Clear the date',
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: _busy ? null : () => _save({key: ''}),
+              ),
+            SizedBox(width: 120, child: _intField(weeks, 'Weeks')),
+          ]),
+    );
+  }
+
+  Widget _academicCard(AppSettings s) =>
+      _card('Academic', Icons.auto_stories, [
+        const Text('Weekend days',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text(
+            'No lessons on these days. The Scheme of work and the Lesson plan '
+                'leave them out.',
+            style: _hint),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          for (var i = 0; i < 7; i++)
+            FilterChip(
+              label: Text(AppSettings.weekDays[i]),
+              selected: s.weekendDays.contains(i + 1),
+              onSelected: _busy
+                  ? null
+                  : (on) {
+                final set = {...s.weekendDays};
+                if (on) {
+                  set.add(i + 1);
+                } else {
+                  set.remove(i + 1);
+                }
+                if (set.length >= 7) {
+                  _toast('At least one day of the week must be a school day.');
+                  return;
+                }
+                _save({'weekendDays': (set.toList()..sort())});
+              },
+            ),
+        ]),
+        const Divider(height: 28),
+        const Text('Terms', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text(
+            'The Scheme of work starts from these dates and uses these '
+                'numbers of weeks.',
+            style: _hint),
+        _termRow('Term 1', 'term1Start', s.term1Start, _t1Weeks),
+        _termRow('Term 2', 'term2Start', s.term2Start, _t2Weeks),
+        const Divider(height: 28),
+        const Text('Lesson',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        const Text('The usual length of a lesson, used by the Lesson plan.',
+            style: _hint),
+        const SizedBox(height: 10),
+        SizedBox(width: 200, child: _intField(_lessonMin, 'Lesson length (min)')),
+        const SizedBox(height: 8),
+        _saveButton('Save academic settings', _saveAcademic),
+      ]);
+
   Widget _resultsCard() => _card('Results', Icons.emoji_events, [
     const Text('Grades', style: TextStyle(fontWeight: FontWeight.w600)),
     const SizedBox(height: 2),
@@ -14618,6 +14861,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ('Attendance', <Widget>[_attendanceCard(s)]),
       ];
     }
+    if (id == 8) {
+      return <(String, List<Widget>)>[
+        ('Academic', <Widget>[_academicCard(s)]),
+      ];
+    }
     if (id == 5) {
       return <(String, List<Widget>)>[
         ('Finance', <Widget>[_financeCard(s)]),
@@ -14785,7 +15033,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final admin = me.hasError || me.data?.fullAccess == true;
         final cats = [
           for (final c in _kSetCats)
-            if (((c.id != 3 && c.id != 7) || admin) &&
+            if (((c.id != 3 && c.id != 7 && c.id != 8) || admin) &&
                 (c.id != 6 || me.data?.isAdmin == true))
               c
         ];
@@ -31800,6 +32048,9 @@ final String Function() fileName;
 final bool enabled;
 final bool iconOnly;
 final String label;
+
+/// Shown to teachers too (the Academic page); other reports are admin only.
+final bool allowScoped;
 const _ReportMenuButton({
 required this.build,
 this.buildXlsx,
@@ -31808,6 +32059,7 @@ required this.fileName,
 this.enabled = true,
 this.iconOnly = false,
 this.label = 'Report',
+this.allowScoped = false,
 });
 
 @override
@@ -31859,7 +32111,9 @@ if (mounted) setState(() => _busy = false);
 @override
 Widget build(BuildContext context) {
 // only the administrator can see, download or print the report
-if (teacherScope.value.scoped) return const SizedBox.shrink();
+if (teacherScope.value.scoped && !widget.allowScoped) {
+return const SizedBox.shrink();
+}
 if (_busy) {
 return const Padding(
 padding: EdgeInsets.all(12),
@@ -39755,3 +40009,1397 @@ Firestore:
 
 (Firebase Storage is no longer used.)
 ------------------------------------------------------------------------------ */
+
+// ======================= ACADEMIC (Scheme of work + Lesson plan) =======================
+/// The Academic page: a Scheme of work generator and a Lesson plan generator.
+/// Both fill a ready, editable plan from the form, the subject and the topics
+/// the teacher types; the result can be edited and downloaded / printed
+/// (PDF, Excel, Word) with the school letterhead like the other reports.
+class AcademicScreen extends StatelessWidget {
+const AcademicScreen({super.key});
+
+@override
+Widget build(BuildContext context) => DefaultTabController(
+length: 2,
+child: Scaffold(
+appBar: AppBar(
+title: const Text('Academic'),
+bottom: const TabBar(tabs: [
+Tab(icon: Icon(Icons.calendar_view_week), text: 'Scheme of work'),
+Tab(icon: Icon(Icons.menu_book), text: 'Lesson plan'),
+]),
+),
+body: Center(
+child: ConstrainedBox(
+constraints: const BoxConstraints(maxWidth: 900),
+child: TabBarView(children: const [
+SchemeOfWorkGenerator(),
+LessonPlanGenerator(),
+]),
+),
+),
+),
+);
+}
+
+/// Shared small helpers of the two generators.
+Widget _acField(TextEditingController c, String label,
+{int maxLines = 1, String? hint, TextInputType? type}) =>
+TextField(
+controller: c,
+maxLines: maxLines,
+minLines: maxLines > 1 ? 2 : 1,
+keyboardType: type ?? (maxLines > 1 ? TextInputType.multiline : null),
+decoration: InputDecoration(
+labelText: label,
+hintText: hint,
+border: const OutlineInputBorder(),
+isDense: true,
+alignLabelWithHint: maxLines > 1,
+),
+);
+
+Widget _acDrop(String label, String? value, List<String> items,
+ValueChanged<String?> onChanged,
+{double width = 200}) =>
+SizedBox(
+width: width,
+child: DropdownButtonFormField<String>(
+value: items.contains(value) ? value : null,
+isExpanded: true,
+decoration: InputDecoration(
+labelText: label,
+border: const OutlineInputBorder(),
+isDense: true),
+items: [
+for (final i in items) DropdownMenuItem(value: i, child: Text(i)),
+],
+onChanged: onChanged,
+),
+);
+
+/// The signed-in person's name (to pre-fill the Teacher field).
+void _acFillTeacher(TextEditingController c, bool Function() mounted,
+VoidCallback refresh) {
+UserProfile.watchMine().first.then((p) {
+if (!mounted() || c.text.isNotEmpty) return;
+c.text = p.name;
+refresh();
+}).catchError((_) {});
+}
+
+String _acOneLine(String s) =>
+s.replaceAll(RegExp(r'\s*\n\s*'), '  ').trim();
+
+// ---------------------------------------------------------------- Scheme of work
+
+/// A date without the time of day.
+DateTime _acDay(DateTime d) => DateTime(d.year, d.month, d.day);
+
+/// The first day from [d] that is not a weekend day (Settings > Academic).
+DateTime _acNextWorking(DateTime d) {
+final weekend = appSettings.value.weekendDays;
+var x = d;
+for (var i = 0; i < 7 && weekend.contains(x.weekday); i++) {
+x = x.add(const Duration(days: 1));
+}
+return x;
+}
+
+/// "Mon, Tue, Thu" for a set of weekdays (1 = Monday ... 7 = Sunday).
+String _acDaysText(Iterable<int> days) => ([...days]..sort())
+    .map((d) => AppSettings.weekDays[d - 1].substring(0, 3))
+    .join(', ');
+
+/// A leading "- ", "* " or "1. " of a typed topic line.
+final RegExp _acBullet = RegExp(r'^(?:[-•*]+|\d+[.)])\s+');
+
+/// Splits the topic of a scheme of work week into (topic, sub-topic).
+///  - "Grammar: Combining Sentences" -> topic Grammar, sub-topic Combining Sentences
+///  - a week with several topics ("A; B; C") gives one of them, by the day
+///    of the week the lesson is on.
+({String topic, String sub}) _acSplitTopic(
+String raw, DateTime day, DateTime weekFrom,
+{List<int>? days}) {
+var t = raw.replaceAll(' (continued)', '').trim();
+final parts = [
+for (final x in t.split(RegExp(r';\s*')))
+if (x.trim().isNotEmpty) x.trim()
+];
+if (parts.length > 1) {
+var idx = day.difference(weekFrom).inDays.clamp(0, 6);
+var total = 7;
+if (days != null && days.isNotEmpty) {
+// the lesson's place among the teaching days of that week
+final teach = [
+for (var i = 0; i < 7; i++)
+if (days.contains(weekFrom.add(Duration(days: i)).weekday))
+weekFrom.add(Duration(days: i))
+];
+final pos = teach.indexWhere((x) =>
+x.year == day.year && x.month == day.month && x.day == day.day);
+if (pos >= 0 && teach.isNotEmpty) {
+idx = pos;
+total = teach.length;
+}
+}
+t = parts[(idx * parts.length ~/ total).clamp(0, parts.length - 1)];
+}
+final i = t.indexOf(':');
+if (i > 0 && i < t.length - 1) {
+return (topic: t.substring(0, i).trim(), sub: t.substring(i + 1).trim());
+}
+return (topic: t, sub: '');
+}
+
+/// Saved schemes of work (Firestore: schemesOfWork/{id}); the Lesson plan
+/// reads them to fill the topic of a date. [cache] keeps what was saved in
+/// this session in case the online save is not allowed.
+class _AcademicStore {
+static final Map<String, Map<String, dynamic>> cache = {};
+
+/// The week (a saved row) of a scheme of [form] / [subject] that covers
+/// [day] (yyyy-MM-dd); the person's own scheme comes first.
+static Future<Map<String, dynamic>?> find(
+String form, String subject, String day) async {
+final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+final all = <Map<String, dynamic>>[];
+try {
+final q = await FirebaseFirestore.instance
+    .collection('schemesOfWork')
+    .where('form', isEqualTo: form)
+    .where('subject', isEqualTo: subject)
+    .get();
+for (final d in q.docs) {
+all.add({...d.data(), 'id': d.id});
+}
+} catch (_) {}
+for (final m in cache.values) {
+if (m['form'] == form &&
+m['subject'] == subject &&
+!all.any((x) => x['id'] == m['id'])) {
+all.add(m);
+}
+}
+all.sort((a, b) => ('${b['teacherId']}' == uid ? 1 : 0)
+    .compareTo('${a['teacherId']}' == uid ? 1 : 0));
+for (final m in all) {
+final rows = m['rows'];
+if (rows is! List) continue;
+for (final r in rows) {
+if (r is Map &&
+'${r['from']}'.compareTo(day) <= 0 &&
+'${r['to']}'.compareTo(day) >= 0) {
+return {
+...Map<String, dynamic>.from(r),
+'teacher': m['teacherName'],
+'days': m['days'],
+};
+}
+}
+}
+return null;
+}
+}
+
+class _SowRow {
+final String term;
+final DateTime from; // first day of the week
+DateTime get to => from.add(const Duration(days: 6));
+final TextEditingController week, topic, objectives, activities, resources,
+assessment;
+_SowRow(this.term, this.from, String w, String t, String o, String a, String r,
+String s)
+    : week = TextEditingController(text: w),
+topic = TextEditingController(text: t),
+objectives = TextEditingController(text: o),
+activities = TextEditingController(text: a),
+resources = TextEditingController(text: r),
+assessment = TextEditingController(text: s);
+
+void dispose() {
+week.dispose();
+topic.dispose();
+objectives.dispose();
+activities.dispose();
+resources.dispose();
+assessment.dispose();
+}
+}
+
+class SchemeOfWorkGenerator extends StatefulWidget {
+const SchemeOfWorkGenerator({super.key});
+
+@override
+State<SchemeOfWorkGenerator> createState() => _SchemeOfWorkGeneratorState();
+}
+
+class _SchemeOfWorkGeneratorState extends State<SchemeOfWorkGenerator>
+with AutomaticKeepAliveClientMixin {
+@override
+bool get wantKeepAlive => true;
+
+// The school year has two terms (about 43 weeks in all).
+static const _terms = ['Term 1', 'Term 2', 'Both terms'];
+// The weeks of each term come from Settings > Academic.
+static int _defaultWeeks(String t) {
+final s = appSettings.value;
+return t == 'Term 1'
+? s.term1Weeks
+    : (t == 'Term 2' ? s.term2Weeks : s.term1Weeks + s.term2Weeks);
+}
+
+/// Weeks of Term 1 when both terms are made in one scheme.
+int get _t1Weeks {
+final s = appSettings.value;
+return _weeks == s.term1Weeks + s.term2Weeks
+? s.term1Weeks
+    : (_weeks + 1) ~/ 2;
+}
+
+/// The start dates of the term(s): only from Settings > Academic (today
+/// is used for a term whose date is not set there yet).
+void _syncStarts(String t) {
+final s = appSettings.value;
+DateTime? day(String v) {
+final d = DateTime.tryParse(v);
+return d == null ? null : _acDay(d);
+}
+
+final a = day(s.term1Start), b = day(s.term2Start);
+_start1 = (t == 'Term 2' ? b : a) ?? _acDay(DateTime.now());
+_start2 = t == 'Both terms' ? b : null;
+}
+
+/// True when a start date the chosen term(s) need is not set in Settings.
+bool get _startsMissing {
+final s = appSettings.value;
+return (_term != 'Term 2' && s.term1Start.isEmpty) ||
+(_term != 'Term 1' && s.term2Start.isEmpty);
+}
+
+/// The start dates and the weeks of the term(s) from Settings > Academic.
+void _applyTermDefaults(String t) {
+_syncStarts(t);
+_weeks = _defaultWeeks(t);
+}
+bool get _both => _term == 'Both terms';
+// the term setting the shown rows were generated with
+String _genTerm = 'Term 1';
+bool get _genBoth => _genTerm == 'Both terms';
+static const _objectives = [
+'Explain the key ideas of {t}.',
+'Apply {t} to solve simple problems and examples.',
+'Practise and consolidate {t} through guided exercises.',
+'Analyse and discuss {t} using real-life examples.',
+];
+static const _activities = [
+'Teacher explains with examples; students take notes and ask questions.',
+'Pair and group work on practical tasks, then class discussion.',
+'Guided practice followed by individual exercises.',
+'Demonstration, student presentations and feedback.',
+];
+static const _resources = [
+'Textbook, whiteboard, charts',
+'Textbook, worksheets, past papers',
+'Real objects / models, charts, notebooks',
+'Textbook, projector or board, exercise books',
+];
+static const _assessment = [
+'Oral questions and class exercise',
+'Short quiz',
+'Homework marking and feedback',
+'Observation and group-work feedback',
+];
+
+String? _form, _subject;
+String _term = 'Term 1';
+int _weeks = appSettings.value.term1Weeks;
+bool _revision = true;
+String? _error;
+final _teacher = TextEditingController();
+final _topics = TextEditingController();
+final List<_SowRow> _rows = [];
+DateTime _start1 = _acDay(DateTime.now()); // first day of week 1
+DateTime? _start2; // Term 2 start (null = 4 weeks after Term 1 ends)
+String? _genForm, _genSubject; // what the shown rows were made for
+
+/// The days this teacher teaches (1 = Monday ... 7 = Sunday).
+Set<int> _days = {};
+
+/// The teaching days without the weekend days of Settings > Academic.
+Set<int> get _effDays {
+final w = appSettings.value.weekendDays;
+return {
+for (final d in _days)
+if (!w.contains(d)) d
+};
+}
+
+DateTime get _start2Shown =>
+_start2 ?? _start1.add(Duration(days: (_t1Weeks + 4) * 7));
+
+static final _short = DateFormat('d MMM');
+String _range(_SowRow r) => '${_short.format(r.from)} - ${_short.format(r.to)}';
+
+@override
+void initState() {
+super.initState();
+_acFillTeacher(_teacher, () => mounted, () => setState(() {}));
+_pickOnly();
+_applyTermDefaults('Term 1');
+_days = {
+for (var d = 1; d <= 7; d++)
+if (!appSettings.value.weekendDays.contains(d)) d
+};
+teacherScope.addListener(_autoPick); // the profile may load a moment later
+}
+
+/// A person who teaches only one form / one subject gets it selected.
+bool _pickOnly() {
+final sc = teacherScope.value;
+final f = sc.formList, sb = sc.subjectList;
+var changed = false;
+if (_form == null && f.length == 1) {
+_form = f.first;
+changed = true;
+}
+if (_subject == null && sb.length == 1) {
+_subject = sb.first;
+changed = true;
+}
+return changed;
+}
+
+void _autoPick() {
+if (mounted && _pickOnly()) setState(() {});
+}
+
+@override
+void dispose() {
+teacherScope.removeListener(_autoPick);
+_teacher.dispose();
+_topics.dispose();
+for (final r in _rows) {
+r.dispose();
+}
+super.dispose();
+}
+
+String _fill(List<String> l, int i, String t) =>
+l[i % l.length].replaceAll('{t}', t);
+
+void _generate() {
+final topics = [
+for (final l in _topics.text.split('\n'))
+if (l.trim().replaceFirst(_acBullet, '').isNotEmpty)
+l.trim().replaceFirst(_acBullet, '')
+];
+if (_form == null || _subject == null) {
+setState(() => _error = 'Pick the form and the subject.');
+return;
+}
+if (topics.isEmpty) {
+setState(() => _error = 'Write at least one topic (one topic per line).');
+return;
+}
+_syncStarts(_term); // the dates may have been changed in Settings
+// the weeks of the chosen term(s); the last week of each term can be
+// a revision and test week
+final segs = _both
+? [('Term 1', _t1Weeks), ('Term 2', _weeks - _t1Weeks)]
+    : [(_term, _weeks)];
+final slots = <(int, String, bool, DateTime)>[];
+var wk = 0;
+for (var g = 0; g < segs.length; g++) {
+final sg = segs[g];
+final st = g == 0 ? _start1 : _start2Shown;
+final rev = _revision && sg.$2 > 1;
+for (var k = 0; k < sg.$2; k++) {
+wk++;
+slots.add((wk, sg.$1, rev && k == sg.$2 - 1,
+st.add(Duration(days: 7 * k))));
+}
+}
+final w = slots.where((x) => !x.$3).length;
+final n = topics.length;
+final fresh = <_SowRow>[];
+var lastIdx = -1, occ = 0, i = 0;
+for (final sl in slots) {
+if (sl.$3) {
+fresh.add(_SowRow(
+sl.$2,
+sl.$4,
+'${sl.$1}',
+'Revision and end of ${sl.$2} assessment',
+'Revise the topics taught in the term and be assessed on them.',
+'Revision exercises, question and answer, end of term test.',
+'Past papers, revision notes, exercise books',
+'End of term test and feedback',
+));
+continue;
+}
+String topic;
+if (n >= w) {
+// more topics than weeks: several topics share a week
+final a = i * n ~/ w, b = (i + 1) * n ~/ w;
+topic = topics.sublist(a, b).join('; ');
+occ = 0;
+} else {
+// fewer topics than weeks: a topic lasts several weeks
+final idx = i * n ~/ w;
+if (idx != lastIdx) {
+occ = 0;
+lastIdx = idx;
+} else {
+occ++;
+}
+topic = occ == 0 ? topics[idx] : '${topics[idx]} (continued)';
+}
+final base = topic.replaceAll(' (continued)', '');
+fresh.add(_SowRow(
+sl.$2,
+sl.$4,
+'${sl.$1}',
+topic,
+_fill(_objectives, occ, base),
+_fill(_activities, i, base),
+_fill(_resources, i, base),
+_fill(_assessment, i, base),
+));
+i++;
+}
+setState(() {
+for (final r in _rows) {
+r.dispose();
+}
+_rows
+..clear()
+..addAll(fresh);
+_genTerm = _term;
+_genForm = _form;
+_genSubject = _subject;
+_error = null;
+});
+_save(quiet: true); // so the Lesson plan can find it by date
+}
+
+/// Saves the scheme (Firestore: schemesOfWork) for the Lesson plan.
+Future<void> _save({bool quiet = false}) async {
+if (_rows.isEmpty || _genForm == null || _genSubject == null) return;
+final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+final id = _safeFile('${_genForm}_${_genSubject}_${_genTerm}_$uid');
+final day = DateFormat('yyyy-MM-dd');
+final data = <String, dynamic>{
+'id': id,
+'form': _genForm,
+'subject': _genSubject,
+'term': _genTerm,
+'teacherId': uid,
+'teacherName': _teacher.text.trim(),
+'days': ([..._effDays]..sort()),
+'rows': [
+for (final r in _rows)
+{
+'term': r.term,
+'week': r.week.text.trim(),
+'from': day.format(r.from),
+'to': day.format(r.to),
+'topic': r.topic.text.trim(),
+'objectives': r.objectives.text.trim(),
+'activities': r.activities.text.trim(),
+'resources': r.resources.text.trim(),
+'assessment': r.assessment.text.trim(),
+}
+],
+};
+_AcademicStore.cache[id] = data;
+final messenger = ScaffoldMessenger.of(context);
+try {
+await FirebaseFirestore.instance
+    .collection('schemesOfWork')
+    .doc(id)
+    .set({...data, 'updatedAt': FieldValue.serverTimestamp()});
+if (!quiet) {
+messenger.showSnackBar(
+const SnackBar(content: Text('Scheme of work saved')));
+}
+} catch (e) {
+messenger.showSnackBar(SnackBar(
+content: Text('Could not save online: $e\n'
+'It stays on this device until the app is closed.')));
+}
+}
+
+String get _period =>
+'$_genForm  |  $_genSubject  |  $_genTerm'
+'${_teacher.text.trim().isEmpty ? '' : '  |  Teacher: ${_teacher.text.trim()}'}';
+
+List<_DrTable> _tables() => [
+_DrTable(
+title: 'Scheme of work - $_genSubject, $_genForm, $_genTerm',
+headers: [
+if (_genBoth) 'Term',
+'Week',
+'Dates',
+'Topic',
+'Objectives',
+'Teaching activities',
+'Resources',
+'Assessment'
+],
+rows: [
+for (final r in _rows)
+[
+if (_genBoth) r.term,
+r.week.text,
+_range(r),
+_acOneLine(r.topic.text),
+_acOneLine(r.objectives.text),
+_acOneLine(r.activities.text),
+_acOneLine(r.resources.text),
+_acOneLine(r.assessment.text),
+]
+],
+weights: _genBoth
+? const [0.9, 0.7, 1.5, 2.2, 3.0, 3.0, 2.0, 2.0]
+    : const [0.7, 1.5, 2.2, 3.0, 3.0, 2.0, 2.0],
+left: _genBoth ? const {3, 4, 5, 6, 7} : const {2, 3, 4, 5, 6},
+text: _genBoth ? const {0, 2, 3, 4, 5, 6, 7} : const {1, 2, 3, 4, 5, 6},
+notes: [
+'Weeks: $_weeks   |   Rows: ${_rows.length}',
+if (_effDays.isNotEmpty) 'Teaching days: ${_acDaysText(_effDays)}',
+if (_teacher.text.trim().isNotEmpty)
+'Teacher: ${_teacher.text.trim()}',
+],
+)
+];
+
+@override
+Widget build(BuildContext context) {
+super.build(context);
+final forms = teacherScope.value.formList;
+final subjects = teacherScope.value.subjectList;
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+children: [
+const Text('Scheme of work generator',
+style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+const SizedBox(height: 4),
+const Text(
+'Choose the form, subject and term, type the topics (one per '
+'line), then generate. The weeks and their dates come from '
+'Settings > Academic. '
+'Edit any cell and press Save: the Lesson plan then fills '
+'the topic from this scheme by date.',
+style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+const SizedBox(height: 14),
+Wrap(spacing: 10, runSpacing: 10, children: [
+_acDrop('Form', _form, forms, (v) => setState(() => _form = v),
+width: 160),
+_acDrop('Subject', _subject, subjects,
+(v) => setState(() => _subject = v),
+width: 230),
+_acDrop('Term', _term, _terms, (v) {
+final t = v ?? 'Term 1';
+setState(() {
+_term = t;
+_applyTermDefaults(t); // dates and weeks from Settings > Academic
+});
+}, width: 150),
+SizedBox(
+width: 140,
+child: DropdownButtonFormField<int>(
+value: _weeks,
+decoration: const InputDecoration(
+labelText: 'Weeks',
+border: OutlineInputBorder(),
+isDense: true),
+items: [
+for (var i = 4; i <= 45; i++)
+DropdownMenuItem(value: i, child: Text('$i weeks')),
+],
+onChanged: (v) => setState(() => _weeks = v ?? _defaultWeeks(_term)),
+),
+),
+]),
+const SizedBox(height: 10),
+SizedBox(width: 400, child: _acField(_teacher, 'Teacher')),
+if (_startsMissing)
+const Padding(
+padding: EdgeInsets.only(top: 6),
+child: Text(
+'The term start date is not set yet (Settings > Academic), '
+'so the weeks start from today.',
+style: TextStyle(fontSize: 11.5, color: Colors.orange)),
+),
+const SizedBox(height: 10),
+const Text('Days I teach',
+style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+const SizedBox(height: 6),
+Wrap(spacing: 8, runSpacing: 4, children: [
+for (var d = 1; d <= 7; d++)
+FilterChip(
+label: Text(AppSettings.weekDays[d - 1].substring(0, 3)),
+selected: _effDays.contains(d),
+onSelected: appSettings.value.weekendDays.contains(d)
+? null // a weekend day (Settings > Academic)
+    : (on) => setState(() {
+if (on) {
+_days.add(d);
+} else if (_effDays.length > 1) {
+_days.remove(d); // keep at least one day
+}
+}),
+),
+]),
+if (appSettings.value.weekendDays.isNotEmpty)
+Padding(
+padding: const EdgeInsets.only(top: 4),
+child: Text(
+'Weekend: ${_acDaysText(appSettings.value.weekendDays)} '
+'(set in Settings > Academic).',
+style: const TextStyle(fontSize: 11.5, color: Colors.black54)),
+),
+const SizedBox(height: 10),
+_acField(_topics, 'Topics (one per line)',
+maxLines: 6,
+hint: 'e.g.\nNumbers and place value\nFractions\nDecimals'),
+SwitchListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+title: const Text('Last week of each term is revision and end of term test',
+style: TextStyle(fontSize: 13)),
+value: _revision,
+onChanged: (v) => setState(() => _revision = v),
+),
+if (_error != null)
+Padding(
+padding: const EdgeInsets.only(bottom: 8),
+child: Text(_error!, style: const TextStyle(color: Colors.red)),
+),
+Wrap(spacing: 10, runSpacing: 10, children: [
+FilledButton.icon(
+onPressed: _generate,
+icon: const Icon(Icons.auto_fix_high),
+label: Text(_rows.isEmpty ? 'Generate' : 'Generate again'),
+),
+OutlinedButton.icon(
+onPressed: _rows.isEmpty ? null : () => _save(),
+icon: const Icon(Icons.save_outlined),
+label: const Text('Save'),
+),
+_ReportMenuButton(
+allowScoped: true,
+enabled: _rows.isNotEmpty,
+label: 'Download / print',
+fileName: () =>
+_safeFile('Scheme-of-work-$_genSubject-$_genForm-$_genTerm'),
+build: () async => DailyAttendanceReport.pdf(
+_tables(), _period,
+title: 'SCHEME OF WORK'),
+buildXlsx: () async => DailyAttendanceReport.xlsx(
+_tables(), _period,
+title: 'SCHEME OF WORK'),
+buildDocx: () async => DailyAttendanceReport.docx(
+_tables(), _period,
+title: 'SCHEME OF WORK'),
+),
+]),
+for (final r in _rows)
+Card(
+margin: const EdgeInsets.only(top: 12),
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Column(children: [
+Align(
+alignment: Alignment.centerLeft,
+child: Padding(
+padding: const EdgeInsets.only(bottom: 8),
+child: Wrap(spacing: 6, children: [
+if (_genBoth)
+Chip(
+visualDensity: VisualDensity.compact,
+label: Text(r.term,
+style: const TextStyle(
+fontSize: 12, fontWeight: FontWeight.w700)),
+),
+Chip(
+visualDensity: VisualDensity.compact,
+avatar: const Icon(Icons.event, size: 14),
+label: Text(_range(r),
+style: const TextStyle(fontSize: 12)),
+),
+]),
+),
+),
+Row(children: [
+SizedBox(width: 90, child: _acField(r.week, 'Week')),
+const SizedBox(width: 10),
+Expanded(child: _acField(r.topic, 'Topic')),
+]),
+const SizedBox(height: 10),
+_acField(r.objectives, 'Objectives', maxLines: 3),
+const SizedBox(height: 10),
+_acField(r.activities, 'Teaching activities', maxLines: 3),
+const SizedBox(height: 10),
+Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Expanded(child: _acField(r.resources, 'Resources', maxLines: 2)),
+const SizedBox(width: 10),
+Expanded(child: _acField(r.assessment, 'Assessment', maxLines: 2)),
+]),
+]),
+),
+),
+],
+);
+}
+}
+
+// ---------------------------------------------------------------- Lesson plan PDF (one page)
+/// The lesson plan as ONE A4 page: the lesson details are the header of the
+/// page, the timed plan is under it. A long plan is scaled down to fit.
+class LessonPlanReport {
+static Future<Uint8List> pdf(List<(String, String)> details,
+List<List<String>> plan, String planTitle, String period) async {
+final doc = pw.Document();
+final lb = schoolLogo.value.bytes;
+final logo = lb == null ? null : pw.MemoryImage(lb);
+const navy = PdfColor.fromInt(0xFF1F4E79);
+String t(String s) => DailyAttendanceReport._t(s);
+pw.Widget cell(String s,
+{bool bold = false, PdfColor? bg, bool center = false}) =>
+pw.Container(
+color: bg,
+padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2.5),
+alignment: center ? pw.Alignment.center : pw.Alignment.centerLeft,
+child: pw.Text(t(s),
+style: pw.TextStyle(
+fontSize: 9,
+fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal)),
+);
+
+// header: the lesson details, two items per row
+final head = <pw.TableRow>[];
+for (var i = 0; i < details.length; i += 2) {
+final a = details[i];
+final b = i + 1 < details.length ? details[i + 1] : ('', '');
+head.add(pw.TableRow(children: [
+cell(a.$1, bold: true, bg: PdfColors.grey200),
+cell(a.$2),
+cell(b.$1, bold: true, bg: PdfColors.grey200),
+cell(b.$2),
+]));
+}
+final width = PdfPageFormat.a4.width - 56;
+doc.addPage(pw.Page(
+pageFormat: PdfPageFormat.a4,
+margin: const pw.EdgeInsets.all(28),
+build: (ctx) => pw.FittedBox(
+fit: pw.BoxFit.scaleDown,
+alignment: pw.Alignment.topLeft,
+child: pw.SizedBox(
+width: width,
+child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+if (logo != null) ...[
+pw.Image(logo, height: 42),
+pw.SizedBox(width: 10),
+],
+pw.Expanded(
+child: pw.Column(
+crossAxisAlignment: pw.CrossAxisAlignment.start,
+children: [
+pw.Text('LESSON PLAN',
+style: pw.TextStyle(
+fontSize: 17, fontWeight: pw.FontWeight.bold)),
+pw.SizedBox(height: 2),
+pw.Text(t(period),
+style: const pw.TextStyle(fontSize: 10)),
+]),
+),
+]),
+pw.SizedBox(height: 8),
+pw.Table(
+border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+columnWidths: const {
+0: pw.FlexColumnWidth(1.1),
+1: pw.FlexColumnWidth(2.4),
+2: pw.FlexColumnWidth(1.1),
+3: pw.FlexColumnWidth(2.4),
+},
+children: head,
+),
+pw.SizedBox(height: 8),
+pw.Container(
+width: double.infinity,
+color: navy,
+padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+child: pw.Text(t(planTitle),
+style: pw.TextStyle(
+color: PdfColors.white,
+fontSize: 11,
+fontWeight: pw.FontWeight.bold)),
+),
+pw.SizedBox(height: 4),
+pw.Table(
+border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+columnWidths: const {
+0: pw.FlexColumnWidth(2.0),
+1: pw.FlexColumnWidth(0.9),
+2: pw.FlexColumnWidth(6.5),
+},
+children: [
+pw.TableRow(children: [
+cell('Stage', bold: true, bg: PdfColors.grey300, center: true),
+cell('Time', bold: true, bg: PdfColors.grey300, center: true),
+cell('Content / activities',
+bold: true, bg: PdfColors.grey300, center: true),
+]),
+for (var r = 0; r < plan.length; r++)
+pw.TableRow(children: [
+cell(plan[r][0],
+bg: r.isOdd ? PdfColors.grey100 : null),
+cell(plan[r][1],
+bg: r.isOdd ? PdfColors.grey100 : null, center: true),
+cell(plan[r][2],
+bg: r.isOdd ? PdfColors.grey100 : null),
+]),
+],
+),
+]),
+),
+),
+));
+return Uint8List.fromList(await doc.save());
+}
+}
+
+// ---------------------------------------------------------------- Lesson plan
+class LessonPlanGenerator extends StatefulWidget {
+const LessonPlanGenerator({super.key});
+
+@override
+State<LessonPlanGenerator> createState() => _LessonPlanGeneratorState();
+}
+
+class _LessonPlanGeneratorState extends State<LessonPlanGenerator>
+with AutomaticKeepAliveClientMixin {
+@override
+bool get wantKeepAlive => true;
+
+static const _durations = ['40', '45', '60', '80', '90'];
+
+/// The usual lengths plus the one chosen in Settings > Academic.
+List<String> get _durItems =>
+({..._durations, _duration}.toList()
+..sort((a, b) => int.parse(a).compareTo(int.parse(b))));
+// (key, label)
+static const _sections = <(String, String)>[
+('objectives', 'Learning objectives'),
+('prior', 'Prior knowledge'),
+('resources', 'Teaching and learning resources'),
+('intro', 'Introduction'),
+('development', 'Development (presentation)'),
+('practice', 'Student activity / practice'),
+('conclusion', 'Conclusion'),
+('assessment', 'Assessment'),
+('homework', 'Homework'),
+('reflection', 'Teacher reflection'),
+];
+
+String? _form, _subject;
+String _duration = '${appSettings.value.lessonMinutes}';
+DateTime _date = _acNextWorking(_acDay(DateTime.now()));
+bool _generated = false;
+String? _error;
+final _teacher = TextEditingController();
+final _topic = TextEditingController();
+final _subtopic = TextEditingController();
+final Map<String, TextEditingController> _c = {
+for (final s in _sections) s.$1: TextEditingController()
+};
+final Map<String, String> _time = {};
+
+List<SectionInfo> _allSecs = [];
+SectionInfo? _cls; // the chosen class
+int? _count; // students in the chosen class
+bool _countErr = false;
+String? _match; // where the topic came from
+
+@override
+void initState() {
+super.initState();
+_acFillTeacher(_teacher, () => mounted, () => setState(() {}));
+_loadSections();
+if (_pickOnly()) _refreshFill();
+teacherScope.addListener(_autoPick); // the profile may load a moment later
+}
+
+/// A person who teaches only one form / one subject gets it selected.
+bool _pickOnly() {
+final sc = teacherScope.value;
+final f = sc.formList, sb = sc.subjectList;
+var changed = false;
+if (_form == null && f.length == 1) {
+_form = f.first;
+changed = true;
+}
+if (_subject == null && sb.length == 1) {
+_subject = sb.first;
+changed = true;
+}
+return changed;
+}
+
+void _autoPick() {
+if (!mounted || !_pickOnly()) return;
+setState(() {});
+_refreshFill();
+}
+
+/// Topic from the scheme of work first, then the saved lesson plan of this
+/// class and date (if there is one) on top of it.
+Future<void> _refreshFill() async {
+await _autoTopic();
+await _loadSaved();
+}
+
+String? get _planId {
+if (_form == null || _subject == null || _cls == null) return null;
+final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+return _safeFile('${_form}_${_subject}_${_cls!.label}_'
+'${DateFormat('yyyy-MM-dd').format(_date)}_$uid');
+}
+
+/// Saves the lesson plan (Firestore: lessonPlans).
+Future<void> _save() async {
+final id = _planId;
+if (!_generated || id == null) return;
+final messenger = ScaffoldMessenger.of(context);
+try {
+await FirebaseFirestore.instance.collection('lessonPlans').doc(id).set({
+'form': _form,
+'subject': _subject,
+'classId': _cls!.id,
+'class': _cls!.label,
+'date': DateFormat('yyyy-MM-dd').format(_date),
+'duration': _duration,
+'topic': _topic.text.trim(),
+'subtopic': _subtopic.text.trim(),
+'teacherId': FirebaseAuth.instance.currentUser?.uid ?? '',
+'teacherName': _teacher.text.trim(),
+'students': _count,
+'times': _time,
+'sections': {for (final e in _c.entries) e.key: e.value.text},
+'updatedAt': FieldValue.serverTimestamp(),
+});
+messenger.showSnackBar(const SnackBar(content: Text('Lesson plan saved')));
+} catch (e) {
+messenger.showSnackBar(SnackBar(content: Text('Could not save: $e')));
+}
+}
+
+/// Opens the lesson plan this person saved for the chosen class and date.
+Future<void> _loadSaved() async {
+final id = _planId;
+if (id == null) return;
+try {
+final d = await FirebaseFirestore.instance
+    .collection('lessonPlans')
+    .doc(id)
+    .get();
+if (!mounted || id != _planId || !d.exists) return;
+final m = d.data() ?? const <String, dynamic>{};
+setState(() {
+final du = '${m['duration'] ?? ''}';
+if (int.tryParse(du) != null) _duration = du;
+_topic.text = '${m['topic'] ?? ''}';
+_subtopic.text = '${m['subtopic'] ?? ''}';
+final secs = m['sections'];
+if (secs is Map) {
+for (final k in _c.keys) {
+_c[k]!.text = '${secs[k] ?? ''}';
+}
+}
+final tm = m['times'];
+_time
+..clear()
+..addAll(tm is Map
+? {for (final e in tm.entries) '${e.key}': '${e.value}'}
+    : <String, String>{});
+_generated = true;
+_match = 'Opened your saved lesson plan for this class and date.';
+});
+} catch (_) {}
+}
+
+@override
+void dispose() {
+teacherScope.removeListener(_autoPick);
+for (final c in [_teacher, _topic, _subtopic, ..._c.values]) {
+c.dispose();
+}
+super.dispose();
+}
+
+Future<void> _loadSections() async {
+try {
+final q = await FirebaseFirestore.instance.collection('sections').get();
+if (!mounted) return;
+setState(() => _allSecs = [for (final d in q.docs) SectionInfo.fromDoc(d)]);
+} catch (_) {}
+}
+
+/// The classes of the chosen form that this person is assigned to
+/// (an administrator or a teacher with all sections sees every class).
+List<SectionInfo> get _classes {
+final f = _form;
+if (f == null) return const [];
+final scope = teacherScope.value;
+if (_subject != null && !scope.allows(_subject!, f)) return const [];
+final mine = scope.filterSections([
+for (final s in _allSecs)
+if (!s.isSub && s.form == f) s
+]);
+return [...mine]..sort((a, b) => a.name.compareTo(b.name));
+}
+
+/// Counts the students of a class (the divided sections included).
+Future<void> _loadCount(SectionInfo c) async {
+setState(() {
+_count = null;
+_countErr = false;
+});
+try {
+final ids = [
+c.id,
+for (final s in _allSecs)
+if (s.isSub && s.form == c.form && s.classKey == c.name.toUpperCase())
+s.id
+];
+final q = await FirebaseFirestore.instance
+    .collection('students')
+    .where('sectionId', whereIn: ids.take(30).toList())
+    .get();
+final seen = <String>{};
+for (final d in q.docs) {
+final n = '${d.data()['name'] ?? ''}'.trim().toLowerCase();
+seen.add(n.isEmpty ? d.id : n); // a student saved twice counts once
+}
+if (!mounted || _cls?.id != c.id) return;
+setState(() => _count = seen.length);
+} catch (_) {
+if (!mounted || _cls?.id != c.id) return;
+setState(() => _countErr = true);
+}
+}
+
+/// Fills the topic and sub-topic from the saved scheme of work week that
+/// covers the chosen date.
+Future<void> _autoTopic() async {
+final f = _form, s = _subject;
+if (f == null || s == null) return;
+final d = _date;
+final key = DateFormat('yyyy-MM-dd').format(d);
+final row = await _AcademicStore.find(f, s, key);
+if (!mounted || f != _form || s != _subject || d != _date) return;
+setState(() {
+if (row == null) {
+_match = 'No saved scheme of work for $f $s covers '
+'${DateFormat('d MMM yyyy').format(d)}. Write the topic yourself, '
+'or generate and save the scheme in the Scheme of work tab.';
+return;
+}
+final from = DateTime.tryParse('${row['from']}') ?? d;
+final dl = row['days'];
+final days = dl is List
+? [
+for (final e in dl)
+if (e is num) e.toInt()
+]
+    : null;
+final t = _acSplitTopic('${row['topic']}', d, from, days: days);
+_topic.text = t.topic;
+_subtopic.text = t.sub;
+_match = 'From the scheme of work: ${row['term']}, week ${row['week']} '
+'(${DateFormat('d MMM').format(from)} - '
+'${DateFormat('d MMM').format(from.add(const Duration(days: 6)))}).'
+'${days != null && days.isNotEmpty && !days.contains(d.weekday) ? ' This is not one of the days taught in that scheme of work (${_acDaysText(days)}).' : ''}';
+});
+}
+
+void _generate() {
+final t = _topic.text.trim();
+if (_form == null || _subject == null) {
+setState(() => _error = 'Pick the form and the subject.');
+return;
+}
+if (_cls == null) {
+setState(() => _error = 'Pick the class.');
+return;
+}
+if (t.isEmpty) {
+setState(() => _error = 'Write the topic of the lesson.');
+return;
+}
+final sub = _subtopic.text.trim();
+final focus = sub.isEmpty ? t : '$sub ($t)';
+final d = int.tryParse(_duration) ?? 40;
+final intro = (d * 0.15).round();
+final dev = (d * 0.40).round();
+final prac = (d * 0.30).round();
+final conc = d - intro - dev - prac;
+final subject = _subject!;
+setState(() {
+_time
+..['intro'] = '$intro min'
+..['development'] = '$dev min'
+..['practice'] = '$prac min'
+..['conclusion'] = '$conc min';
+_c['objectives']!.text =
+'By the end of the lesson, students should be able to:\n'
+'1. Explain the main ideas of $focus.\n'
+'2. Give examples related to $focus.\n'
+'3. Apply $focus to solve exercises correctly.\n'
+'4. Work with others and present their answers clearly.';
+_c['prior']!.text =
+'Students already know the basic ideas that lead to $t '
+'from earlier lessons in $subject.';
+_c['resources']!.text =
+'Textbook, whiteboard and markers, charts / worksheets, exercise books.';
+_c['intro']!.text =
+'Greet the students and check attendance. Review the previous lesson '
+'with 2-3 quick questions. Introduce the topic "$focus" and write '
+'the objectives on the board.';
+_c['development']!.text =
+'Step 1: Explain the key terms and ideas of $focus with simple '
+'examples on the board.\n'
+'Step 2: Work through two examples together with the students, '
+'asking questions at each step.\n'
+'Step 3: Check understanding with short questions and correct '
+'misunderstandings.';
+_c['practice']!.text =
+'Students work in pairs / small groups on exercises about $focus. '
+'The teacher moves around, helps, and some groups present their '
+'answers to the class.';
+_c['conclusion']!.text =
+'Summarise the main points of $focus with the students. Ask 2-3 '
+'closing questions and tell the students what the next lesson '
+'will cover.';
+_c['assessment']!.text =
+'Oral questions during the lesson, marking of the class exercise, '
+'and observation of group work.';
+_c['homework']!.text =
+'Give short exercises on $focus to be done at home and checked '
+'in the next lesson.';
+_c['reflection']!.text = '';
+_generated = true;
+_error = null;
+});
+}
+
+String get _period =>
+'$_form  |  $_subject  |  ${DateFormat('EEE d MMM yyyy').format(_date)}';
+
+/// The lesson details (the header of the page).
+List<(String, String)> _details() => [
+('Form / class', '$_form${_cls == null ? '' : ' - ${_cls!.label}'}'),
+('Subject', _subject ?? ''),
+('Topic', _topic.text.trim()),
+('Sub-topic', _subtopic.text.trim().isEmpty ? '-' : _subtopic.text.trim()),
+('Date', DateFormat('EEE d MMM yyyy').format(_date)),
+('Duration', '$_duration minutes'),
+('Students', _count == null ? '-' : '$_count'),
+('Teacher', _teacher.text.trim().isEmpty ? '-' : _teacher.text.trim()),
+];
+
+/// Stage / time / content of every part of the plan.
+List<List<String>> _planRows({bool oneLine = false}) => [
+for (final s in _sections)
+[
+s.$2,
+_time[s.$1] ?? '-',
+oneLine ? _acOneLine(_c[s.$1]!.text) : _c[s.$1]!.text.trim(),
+]
+];
+
+/// Excel and Word: ONE table, the details first, then the plan.
+List<_DrTable> _tables() => [
+_DrTable(
+title: 'Lesson plan - ${_topic.text.trim()}',
+headers: const ['Stage', 'Time', 'Content / activities'],
+rows: [
+for (final d in _details()) [d.$1, '', d.$2],
+..._planRows(oneLine: true),
+],
+weights: const [2.0, 0.9, 6.5],
+left: const {0, 2},
+text: const {0, 1, 2},
+),
+];
+
+Future<void> _pickDate() async {
+final p = await showDatePicker(
+context: context,
+initialDate: _acNextWorking(_date),
+firstDate: DateTime(2020),
+lastDate: DateTime.now().add(const Duration(days: 400)),
+// no lessons on the weekend days (Settings > Academic)
+selectableDayPredicate: (d) =>
+!appSettings.value.weekendDays.contains(d.weekday),
+);
+if (p == null || !mounted) return;
+setState(() => _date = _acDay(p));
+_refreshFill();
+}
+
+@override
+Widget build(BuildContext context) {
+super.build(context);
+final forms = teacherScope.value.formList;
+final subjects = teacherScope.value.subjectList;
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+children: [
+const Text('Lesson plan generator',
+style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+const SizedBox(height: 4),
+const Text(
+'Pick the form, subject, class and date: the topic and sub-topic '
+'are filled from your saved scheme of work for that date. '
+'Then generate; the plan is split into timed stages and you '
+'can edit every part before you download.',
+style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+const SizedBox(height: 14),
+Wrap(spacing: 10, runSpacing: 10, children: [
+_acDrop('Form', _form, forms, (v) {
+setState(() {
+_form = v;
+if (_cls != null && _cls!.form != v) {
+_cls = null;
+_count = null;
+}
+});
+_refreshFill();
+}, width: 160),
+_acDrop('Subject', _subject, subjects, (v) {
+setState(() => _subject = v);
+_refreshFill();
+}, width: 230),
+_acDrop('Duration (min)', _duration, _durItems,
+(v) => setState(() => _duration = v ?? '40'),
+width: 150),
+SizedBox(
+height: 40,
+child: OutlinedButton.icon(
+onPressed: _pickDate,
+icon: const Icon(Icons.calendar_today, size: 18),
+label: Text(DateFormat('EEE d MMM yyyy').format(_date)),
+),
+),
+]),
+const SizedBox(height: 10),
+Wrap(spacing: 10, runSpacing: 10, children: [
+SizedBox(width: 260, child: _acField(_teacher, 'Teacher')),
+_acDrop('Class', _cls?.label, [for (final c in _classes) c.label],
+(v) {
+final c = _classes.where((x) => x.label == v).firstOrNull;
+setState(() => _cls = c);
+if (c != null) _loadCount(c);
+_refreshFill();
+}, width: 150),
+if (_cls != null)
+Chip(
+avatar: const Icon(Icons.groups, size: 18),
+label: Text(_countErr
+? 'Students: could not load'
+    : _count == null
+? 'Counting students...'
+    : 'Students: $_count'),
+),
+]),
+if (_form != null && _classes.isEmpty && _allSecs.isNotEmpty)
+const Padding(
+padding: EdgeInsets.only(top: 6),
+child: Text('No class of this form is assigned to you.',
+style: TextStyle(fontSize: 12, color: Colors.red)),
+),
+const SizedBox(height: 10),
+_acField(_topic, 'Topic', hint: 'e.g. Fractions'),
+const SizedBox(height: 10),
+_acField(_subtopic, 'Sub-topic (optional)',
+hint: 'e.g. Adding fractions with different denominators'),
+if (_match != null)
+Padding(
+padding: const EdgeInsets.only(top: 6),
+child: Row(children: [
+Expanded(
+child: Text(_match!,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+),
+TextButton.icon(
+onPressed: _autoTopic,
+icon: const Icon(Icons.refresh, size: 16),
+label: const Text('Fill again'),
+),
+]),
+),
+const SizedBox(height: 12),
+if (_error != null)
+Padding(
+padding: const EdgeInsets.only(bottom: 8),
+child: Text(_error!, style: const TextStyle(color: Colors.red)),
+),
+Wrap(spacing: 10, runSpacing: 10, children: [
+FilledButton.icon(
+onPressed: _generate,
+icon: const Icon(Icons.auto_fix_high),
+label: Text(_generated ? 'Generate again' : 'Generate'),
+),
+OutlinedButton.icon(
+onPressed: _generated && _cls != null ? _save : null,
+icon: const Icon(Icons.save_outlined),
+label: const Text('Save'),
+),
+_ReportMenuButton(
+allowScoped: true,
+enabled: _generated,
+label: 'Download / print',
+fileName: () => _safeFile(
+'Lesson-plan-$_subject-$_form-${DateFormat('yyyy-MM-dd').format(_date)}'),
+build: () async => LessonPlanReport.pdf(_details(), _planRows(),
+'Lesson plan - ${_topic.text.trim()}', _period),
+buildXlsx: () async => DailyAttendanceReport.xlsx(
+_tables(), _period,
+title: 'LESSON PLAN'),
+buildDocx: () async => DailyAttendanceReport.docx(
+_tables(), _period,
+title: 'LESSON PLAN'),
+),
+]),
+if (_generated)
+for (final s in _sections)
+Padding(
+padding: const EdgeInsets.only(top: 12),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Padding(
+padding: const EdgeInsets.only(bottom: 4),
+child: Text(
+_time[s.$1] == null
+? s.$2
+    : '${s.$2}  (${_time[s.$1]})',
+style: const TextStyle(
+fontSize: 13, fontWeight: FontWeight.w700)),
+),
+_acField(_c[s.$1]!, s.$2,
+maxLines: s.$1 == 'reflection' ? 2 : 4),
+]),
+),
+],
+);
+}
+}
