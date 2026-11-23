@@ -40093,7 +40093,6 @@ double? get coverage => elapsed == 0 ? null : covered / elapsed;
 
 class _AcademicPerformanceTabState extends State<AcademicPerformanceTab>
 with AutomaticKeepAliveClientMixin {
-static const _all = 'All terms';
 String? _term; // null = the current term
 late final Stream<QuerySnapshot<Map<String, dynamic>>> _schemes =
 FirebaseFirestore.instance.collection('schemesOfWork').snapshots();
@@ -40149,12 +40148,41 @@ QuerySnapshot<Map<String, dynamic>> planSnap) {
 final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 final plans = [for (final d in planSnap.docs) d.data()];
 final all = <_SowProgress>[];
-String? currentTerm; // the term that has today in one of its weeks
+const options = ['Term 1', 'Term 2', 'Both terms'];
 
+// the week a row belongs to: Term 1 / Term 2 (a scheme made for both terms
+// keeps the term on every week)
+String rowTerm(Map<String, dynamic> m, Map r) {
+final t = '${r['term'] ?? m['term'] ?? ''}';
+return t == 'Term 2' ? 'Term 2' : 'Term 1';
+}
+
+// the term that has today in one of its weeks (else both terms)
+String? currentTerm;
 for (final d in schemeSnap.docs) {
 final m = d.data();
 final rows = m['rows'];
-if (rows is! List || rows.isEmpty) continue;
+if (rows is! List) continue;
+for (final r in rows) {
+if (r is Map &&
+'${r['from']}'.compareTo(today) <= 0 &&
+'${r['to']}'.compareTo(today) >= 0) {
+currentTerm = rowTerm(m, r);
+}
+}
+}
+final term = _term ?? currentTerm ?? 'Both terms';
+
+for (final d in schemeSnap.docs) {
+final m = d.data();
+final allRows = m['rows'];
+if (allRows is! List || allRows.isEmpty) continue;
+// only the weeks of the chosen term
+final rows = [
+for (final r in allRows)
+if (r is Map && (term == 'Both terms' || rowTerm(m, r) == term)) r
+];
+if (rows.isEmpty) continue;
 final form = '${m['form'] ?? ''}';
 final subject = '${m['subject'] ?? ''}';
 final mine = [
@@ -40179,10 +40207,7 @@ final dt = '${p['date'] ?? ''}';
 return dt.compareTo(from) >= 0 && dt.compareTo(to) <= 0;
 });
 if (has) covered++;
-if (to.compareTo(today) >= 0) {
-current = topic;
-currentTerm = '${m['term'] ?? ''}';
-}
+if (to.compareTo(today) >= 0) current = topic;
 }
 }
 var n = 0;
@@ -40211,15 +40236,7 @@ plans: n,
 ));
 }
 
-final terms = {for (final x in all) x.term}.toList()..sort();
-final term = _term ??
-(currentTerm != null && terms.contains(currentTerm)
-? currentTerm!
-    : _all);
-final list = [
-for (final x in all)
-if (term == _all || x.term == term) x
-];
+final list = all;
 
 final forms = <String>[
 ...ExamService.forms,
@@ -40325,7 +40342,7 @@ final byTeacher = [...list]..sort((a, b) =>
 (a.coverage ?? 2).compareTo(b.coverage ?? 2)); // behind first
 
 return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-_acDrop('Term', term, [_all, ...terms], (v) => setState(() => _term = v),
+_acDrop('Term', term, options, (v) => setState(() => _term = v),
 width: 220),
 const SizedBox(height: 14),
 if (all.isEmpty)
