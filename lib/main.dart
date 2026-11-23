@@ -40019,27 +40019,350 @@ class AcademicScreen extends StatelessWidget {
 const AcademicScreen({super.key});
 
 @override
-Widget build(BuildContext context) => DefaultTabController(
-length: 2,
+Widget build(BuildContext context) => StreamBuilder<UserProfile>(
+stream: UserProfile.watchMine(),
+builder: (context, snap) {
+// the Performance tab is for administrators only
+final admin = snap.data?.isAdmin == true;
+return DefaultTabController(
+key: ValueKey(admin),
+length: admin ? 3 : 2,
 child: Scaffold(
 appBar: AppBar(
 title: const Text('Academic'),
-bottom: const TabBar(tabs: [
-Tab(icon: Icon(Icons.calendar_view_week), text: 'Scheme of work'),
-Tab(icon: Icon(Icons.menu_book), text: 'Lesson plan'),
+bottom: TabBar(tabs: [
+const Tab(
+icon: Icon(Icons.calendar_view_week),
+text: 'Scheme of work'),
+const Tab(icon: Icon(Icons.menu_book), text: 'Lesson plan'),
+if (admin)
+const Tab(icon: Icon(Icons.insights), text: 'Performance'),
 ]),
 ),
 body: Center(
 child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 900),
-child: TabBarView(children: const [
-SchemeOfWorkGenerator(),
-LessonPlanGenerator(),
+constraints: BoxConstraints(maxWidth: admin ? 1200 : 900),
+child: TabBarView(children: [
+const SchemeOfWorkGenerator(),
+const LessonPlanGenerator(),
+if (admin) const AcademicPerformanceTab(),
 ]),
 ),
 ),
 ),
 );
+},
+);
+}
+
+// ---------------------------------------------------------------- Performance (admin only)
+
+/// Admin only: the academic performance of EVERY subject in EVERY form for
+/// one exam. A table (subjects x forms) with the class average, the grade and
+/// the pass rate, plus the overall result of each form and the strongest /
+/// weakest subjects. Read only; the numbers come from the saved results.
+class AcademicPerformanceTab extends StatefulWidget {
+const AcademicPerformanceTab({super.key});
+
+@override
+State<AcademicPerformanceTab> createState() => _AcademicPerformanceTabState();
+}
+
+/// Marks of one subject in one form.
+class _PerfCell {
+final List<double> marks = [];
+double get avg => marks.fold(0.0, (a, b) => a + b) / marks.length;
+}
+
+class _AcademicPerformanceTabState extends State<AcademicPerformanceTab>
+with AutomaticKeepAliveClientMixin {
+late String _exam = _ResultPrefs.exam;
+final _svc = ResultService();
+late final Stream<List<StudentInfo>> _students = _svc.watchAllStudents();
+late final Stream<QuerySnapshot<Map<String, dynamic>>> _sections =
+FirebaseFirestore.instance.collection('sections').snapshots();
+late Stream<Map<String, ResultMarks>> _results = _svc.watchResults(_exam);
+
+@override
+bool get wantKeepAlive => true;
+
+String _f1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+
+@override
+Widget build(BuildContext context) {
+super.build(context);
+final exams = _ResultPrefs.options();
+return ListView(
+padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+children: [
+const Text('Academic performance',
+style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+const SizedBox(height: 4),
+const Text(
+'Administrators only. The average mark, grade and pass rate of '
+'every subject in every form, from the saved exam results. '
+'Students who cheated or have no mark in a subject are not counted.',
+style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+const SizedBox(height: 12),
+_acDrop('Exam', _exam, exams, (v) {
+if (v == null) return;
+setState(() {
+_exam = v;
+_ResultPrefs.exam = v;
+_results = _svc.watchResults(v);
+});
+}, width: 260),
+const SizedBox(height: 14),
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: _sections,
+builder: (context, secSnap) => StreamBuilder<List<StudentInfo>>(
+stream: _students,
+builder: (context, stuSnap) =>
+StreamBuilder<Map<String, ResultMarks>>(
+stream: _results,
+builder: (context, resSnap) {
+final err = secSnap.error ?? stuSnap.error ?? resSnap.error;
+if (err != null) {
+return Text('Could not load the results: $err');
+}
+if (!secSnap.hasData || !stuSnap.hasData || !resSnap.hasData) {
+return const Padding(
+padding: EdgeInsets.all(32),
+child: Center(child: CircularProgressIndicator()),
+);
+}
+return _body(secSnap.data!, stuSnap.data!, resSnap.data!);
+},
+),
+),
+),
+],
+);
+}
+
+Widget _body(QuerySnapshot<Map<String, dynamic>> secs,
+List<StudentInfo> students, Map<String, ResultMarks> results) {
+final formOfSection = {
+for (final d in secs.docs) d.id: SectionInfo.fromDoc(d).form,
+};
+// form -> subject -> marks
+final data = <String, Map<String, _PerfCell>>{};
+// form -> student averages (for the overall result of the form)
+final studentAvg = <String, List<double>>{};
+for (final s in students) {
+final form = formOfSection[s.sectionId] ?? '';
+final r = results[s.id];
+if (form.isEmpty || r == null || r.cheated || r.marks.isEmpty) continue;
+for (final m in r.marks.entries) {
+data
+    .putIfAbsent(form, () => {})
+    .putIfAbsent(m.key, () => _PerfCell())
+    .marks
+    .add(m.value);
+}
+if (r.average != null) {
+studentAvg.putIfAbsent(form, () => []).add(r.average!);
+}
+}
+if (data.isEmpty) {
+return const Padding(
+padding: EdgeInsets.all(32),
+child: Center(
+child: Text('No marks entered for this exam yet.',
+textAlign: TextAlign.center)),
+);
+}
+
+final forms = <String>[
+for (final f in ExamService.forms)
+if (data.containsKey(f)) f,
+for (final f in data.keys)
+if (!ExamService.forms.contains(f)) f,
+];
+final subjects = <String>[
+for (final s in ExamService.subjects)
+if (data.values.any((m) => m.containsKey(s))) s,
+for (final s in {for (final m in data.values) ...m.keys})
+if (!ExamService.subjects.contains(s)) s,
+];
+
+double pct(String form, double mark) {
+final mx = _gradeMax(_exam, form);
+return mx > 0 ? mark / mx * 100 : mark;
+}
+
+bool passed(String form, double mark) =>
+_gradeOf(mark, max: _gradeMax(_exam, form)) != 'F';
+
+// best / weakest subject of the whole school (average of the % of every form)
+final subPct = <String, double>{};
+for (final sub in subjects) {
+final v = [
+for (final f in forms)
+if (data[f]![sub] != null) pct(f, data[f]![sub]!.avg)
+];
+if (v.isNotEmpty) subPct[sub] = v.fold(0.0, (a, b) => a + b) / v.length;
+}
+final ranked = subPct.keys.toList()
+..sort((a, b) => subPct[b]!.compareTo(subPct[a]!));
+
+Widget cell(Widget child, {Color? bg, Alignment al = Alignment.center}) =>
+Container(
+width: 118,
+height: 58,
+alignment: al,
+color: bg,
+padding: const EdgeInsets.symmetric(horizontal: 6),
+child: child,
+);
+
+Widget head(String t, {double w = 118}) => Container(
+width: w,
+height: 40,
+alignment: Alignment.center,
+color: Theme.of(context).colorScheme.primaryContainer,
+child: Text(t,
+style: const TextStyle(fontWeight: FontWeight.w700),
+textAlign: TextAlign.center),
+);
+
+Widget markCell(String form, _PerfCell? c) {
+if (c == null || c.marks.isEmpty) {
+return cell(const Text('-', style: TextStyle(color: Colors.black38)));
+}
+final g = _gradeOf(c.avg, max: _gradeMax(_exam, form));
+final col = _gradeColor(g);
+final pass =
+c.marks.where((m) => passed(form, m)).length / c.marks.length * 100;
+return cell(
+Column(mainAxisSize: MainAxisSize.min, children: [
+Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+Text(_f1(c.avg),
+style: TextStyle(
+fontSize: 16, fontWeight: FontWeight.w800, color: col)),
+const SizedBox(width: 6),
+Container(
+padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+decoration: BoxDecoration(
+color: col.withOpacity(.15),
+borderRadius: BorderRadius.circular(8)),
+child: Text(g,
+style: TextStyle(
+fontSize: 12, fontWeight: FontWeight.w700, color: col)),
+),
+]),
+Text('pass ${pass.round()}% · ${c.marks.length} st.',
+style: const TextStyle(fontSize: 11, color: Colors.black54)),
+]),
+bg: col.withOpacity(.06),
+);
+}
+
+Widget overallCell(String form) {
+final l = studentAvg[form] ?? const <double>[];
+if (l.isEmpty) return cell(const Text('-'));
+final avg = l.fold(0.0, (a, b) => a + b) / l.length;
+final g = _gradeOf(avg, max: _gradeMax(_exam, form));
+final col = _gradeColor(g);
+final pass = l.where((m) => passed(form, m)).length / l.length * 100;
+return cell(
+Column(mainAxisSize: MainAxisSize.min, children: [
+Text('${_f1(avg)}  $g',
+style: TextStyle(
+fontSize: 16, fontWeight: FontWeight.w800, color: col)),
+Text('pass ${pass.round()}% · ${l.length} st.',
+style: const TextStyle(fontSize: 11, color: Colors.black54)),
+]),
+bg: col.withOpacity(.12),
+);
+}
+
+Widget summary(String title, String sub, IconData icon, Color c) => Card(
+margin: EdgeInsets.zero,
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(icon, color: c, size: 28),
+const SizedBox(width: 10),
+Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(title,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+Text(sub,
+style: const TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+]),
+),
+);
+
+return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Wrap(spacing: 10, runSpacing: 10, children: [
+if (ranked.isNotEmpty)
+summary('Strongest subject',
+'${ranked.first} (${_f1(subPct[ranked.first]!)}%)',
+Icons.trending_up, kGreen),
+if (ranked.length > 1)
+summary('Weakest subject',
+'${ranked.last} (${_f1(subPct[ranked.last]!)}%)',
+Icons.trending_down, kRed),
+summary('Forms with results', '${forms.length}', Icons.school,
+const Color(0xFF6A1B9A)),
+]),
+const SizedBox(height: 16),
+Text('$_exam: average mark, grade and pass rate',
+style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+const SizedBox(height: 8),
+Card(
+margin: EdgeInsets.zero,
+clipBehavior: Clip.antiAlias,
+child: SingleChildScrollView(
+scrollDirection: Axis.horizontal,
+child: Column(children: [
+Row(children: [
+head('Subject', w: 130),
+for (final f in forms) head(f),
+]),
+for (final sub in subjects) ...[
+const Divider(height: 1),
+Row(children: [
+Container(
+width: 130,
+height: 58,
+alignment: Alignment.centerLeft,
+padding: const EdgeInsets.symmetric(horizontal: 10),
+child: Text(sub,
+style: const TextStyle(fontWeight: FontWeight.w600)),
+),
+for (final f in forms) markCell(f, data[f]![sub]),
+]),
+],
+const Divider(height: 1, thickness: 2),
+Row(children: [
+Container(
+width: 130,
+height: 58,
+alignment: Alignment.centerLeft,
+padding: const EdgeInsets.symmetric(horizontal: 10),
+child: const Text('Form overall',
+style: TextStyle(fontWeight: FontWeight.w800)),
+),
+for (final f in forms) overallCell(f),
+]),
+]),
+),
+),
+const SizedBox(height: 10),
+Text(
+'Pass = any grade except F. Each cell: class average mark, its grade, '
+'the share of students who passed the subject and how many students '
+'have a mark. The overall row uses each student\'s average over all '
+'their subjects.',
+style: const TextStyle(fontSize: 12, color: Colors.black54)),
+]);
+}
 }
 
 /// Shared small helpers of the two generators.
