@@ -40057,10 +40057,11 @@ if (admin) const AcademicPerformanceTab(),
 
 // ---------------------------------------------------------------- Performance (admin only)
 
-/// Admin only: the academic performance of EVERY subject in EVERY form for
-/// one exam. A table (subjects x forms) with the class average, the grade and
-/// the pass rate, plus the overall result of each form and the strongest /
-/// weakest subjects. Read only; the numbers come from the saved results.
+/// Admin only: the PROGRESS of the schemes of work and the lesson plans of
+/// every subject in every form. For each saved scheme it shows how many weeks
+/// of the term have started, how many of those weeks have at least one
+/// saved lesson plan, the topic filled in and the last lesson plan date.
+/// Read only; the numbers come from schemesOfWork and lessonPlans.
 class AcademicPerformanceTab extends StatefulWidget {
 const AcademicPerformanceTab({super.key});
 
@@ -40068,155 +40069,211 @@ const AcademicPerformanceTab({super.key});
 State<AcademicPerformanceTab> createState() => _AcademicPerformanceTabState();
 }
 
-/// Marks of one subject in one form.
-class _PerfCell {
-final List<double> marks = [];
-double get avg => marks.fold(0.0, (a, b) => a + b) / marks.length;
+/// The progress of one saved scheme of work.
+class _SowProgress {
+final String teacher, form, subject, term, current, lastPlan;
+final int total, elapsed, covered, filled, plans;
+const _SowProgress({
+required this.teacher,
+required this.form,
+required this.subject,
+required this.term,
+required this.current,
+required this.lastPlan,
+required this.total,
+required this.elapsed,
+required this.covered,
+required this.filled,
+required this.plans,
+});
+
+/// Share of the started weeks that have a lesson plan (null = not started).
+double? get coverage => elapsed == 0 ? null : covered / elapsed;
 }
 
 class _AcademicPerformanceTabState extends State<AcademicPerformanceTab>
 with AutomaticKeepAliveClientMixin {
-late String _exam = _ResultPrefs.exam;
-final _svc = ResultService();
-late final Stream<List<StudentInfo>> _students = _svc.watchAllStudents();
-late final Stream<QuerySnapshot<Map<String, dynamic>>> _sections =
-FirebaseFirestore.instance.collection('sections').snapshots();
-late Stream<Map<String, ResultMarks>> _results = _svc.watchResults(_exam);
+static const _all = 'All terms';
+String? _term; // null = the current term
+late final Stream<QuerySnapshot<Map<String, dynamic>>> _schemes =
+FirebaseFirestore.instance.collection('schemesOfWork').snapshots();
+late final Stream<QuerySnapshot<Map<String, dynamic>>> _plans =
+FirebaseFirestore.instance.collection('lessonPlans').snapshots();
 
 @override
 bool get wantKeepAlive => true;
 
-String _f1(double v) => _fmtMark(double.parse(v.toStringAsFixed(1)));
+Color _col(double? c) => c == null
+? Colors.blueGrey
+    : (c >= .8 ? kGreen : (c >= .5 ? kLate : kRed));
 
 @override
 Widget build(BuildContext context) {
 super.build(context);
-final exams = _ResultPrefs.options();
 return ListView(
 padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
 children: [
-const Text('Academic performance',
+const Text('Scheme of work and lesson plan progress',
 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
 const SizedBox(height: 4),
 const Text(
-'Administrators only. The average mark, grade and pass rate of '
-'every subject in every form, from the saved exam results. '
-'Students who cheated or have no mark in a subject are not counted.',
+'Administrators only. For every form and subject: how far the '
+'scheme of work has gone this term and how many of those weeks '
+'have a saved lesson plan.',
 style: TextStyle(fontSize: 12.5, color: Colors.black54)),
 const SizedBox(height: 12),
-_acDrop('Exam', _exam, exams, (v) {
-if (v == null) return;
-setState(() {
-_exam = v;
-_ResultPrefs.exam = v;
-_results = _svc.watchResults(v);
-});
-}, width: 260),
-const SizedBox(height: 14),
 StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-stream: _sections,
-builder: (context, secSnap) => StreamBuilder<List<StudentInfo>>(
-stream: _students,
-builder: (context, stuSnap) =>
-StreamBuilder<Map<String, ResultMarks>>(
-stream: _results,
-builder: (context, resSnap) {
-final err = secSnap.error ?? stuSnap.error ?? resSnap.error;
-if (err != null) {
-return Text('Could not load the results: $err');
-}
-if (!secSnap.hasData || !stuSnap.hasData || !resSnap.hasData) {
+stream: _schemes,
+builder: (context, sSnap) =>
+StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+stream: _plans,
+builder: (context, pSnap) {
+final err = sSnap.error ?? pSnap.error;
+if (err != null) return Text('Could not load the progress: $err');
+if (!sSnap.hasData || !pSnap.hasData) {
 return const Padding(
 padding: EdgeInsets.all(32),
 child: Center(child: CircularProgressIndicator()),
 );
 }
-return _body(secSnap.data!, stuSnap.data!, resSnap.data!);
+return _body(sSnap.data!, pSnap.data!);
 },
-),
 ),
 ),
 ],
 );
 }
 
-Widget _body(QuerySnapshot<Map<String, dynamic>> secs,
-List<StudentInfo> students, Map<String, ResultMarks> results) {
-final formOfSection = {
-for (final d in secs.docs) d.id: SectionInfo.fromDoc(d).form,
-};
-// form -> subject -> marks
-final data = <String, Map<String, _PerfCell>>{};
-// form -> student averages (for the overall result of the form)
-final studentAvg = <String, List<double>>{};
-for (final s in students) {
-final form = formOfSection[s.sectionId] ?? '';
-final r = results[s.id];
-if (form.isEmpty || r == null || r.cheated || r.marks.isEmpty) continue;
-for (final m in r.marks.entries) {
-data
-    .putIfAbsent(form, () => {})
-    .putIfAbsent(m.key, () => _PerfCell())
-    .marks
-    .add(m.value);
+Widget _body(QuerySnapshot<Map<String, dynamic>> schemeSnap,
+QuerySnapshot<Map<String, dynamic>> planSnap) {
+final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+final plans = [for (final d in planSnap.docs) d.data()];
+final all = <_SowProgress>[];
+String? currentTerm; // the term that has today in one of its weeks
+
+for (final d in schemeSnap.docs) {
+final m = d.data();
+final rows = m['rows'];
+if (rows is! List || rows.isEmpty) continue;
+final form = '${m['form'] ?? ''}';
+final subject = '${m['subject'] ?? ''}';
+final mine = [
+for (final p in plans)
+if ('${p['form']}' == form && '${p['subject']}' == subject) p
+];
+var total = 0, elapsed = 0, covered = 0, filled = 0;
+var current = '';
+var first = '9999-99-99', last = '0000-00-00';
+for (final r in rows) {
+if (r is! Map) continue;
+final from = '${r['from']}', to = '${r['to']}';
+final topic = '${r['topic'] ?? ''}'.trim();
+total++;
+if (topic.isNotEmpty) filled++;
+if (from.compareTo(first) < 0) first = from;
+if (to.compareTo(last) > 0) last = to;
+if (from.compareTo(today) <= 0) {
+elapsed++;
+final has = mine.any((p) {
+final dt = '${p['date'] ?? ''}';
+return dt.compareTo(from) >= 0 && dt.compareTo(to) <= 0;
+});
+if (has) covered++;
+if (to.compareTo(today) >= 0) {
+current = topic;
+currentTerm = '${m['term'] ?? ''}';
 }
-if (r.average != null) {
-studentAvg.putIfAbsent(form, () => []).add(r.average!);
 }
 }
-if (data.isEmpty) {
-return const Padding(
-padding: EdgeInsets.all(32),
-child: Center(
-child: Text('No marks entered for this exam yet.',
-textAlign: TextAlign.center)),
-);
+var n = 0;
+var lastPlan = '';
+for (final p in mine) {
+final dt = '${p['date'] ?? ''}';
+if (dt.compareTo(first) >= 0 && dt.compareTo(last) <= 0) {
+n++;
+if (dt.compareTo(lastPlan) > 0) lastPlan = dt;
 }
+}
+all.add(_SowProgress(
+teacher: '${m['teacherName'] ?? ''}'.trim().isEmpty
+? '-'
+    : '${m['teacherName']}',
+form: form,
+subject: subject,
+term: '${m['term'] ?? ''}',
+current: current,
+lastPlan: lastPlan,
+total: total,
+elapsed: elapsed,
+covered: covered,
+filled: filled,
+plans: n,
+));
+}
+
+final terms = {for (final x in all) x.term}.toList()..sort();
+final term = _term ??
+(currentTerm != null && terms.contains(currentTerm)
+? currentTerm!
+    : _all);
+final list = [
+for (final x in all)
+if (term == _all || x.term == term) x
+];
 
 final forms = <String>[
-for (final f in ExamService.forms)
-if (data.containsKey(f)) f,
-for (final f in data.keys)
-if (!ExamService.forms.contains(f)) f,
-];
+...ExamService.forms,
+for (final x in list)
+if (!ExamService.forms.contains(x.form)) x.form,
+].toSet().toList();
 final subjects = <String>[
-for (final s in ExamService.subjects)
-if (data.values.any((m) => m.containsKey(s))) s,
-for (final s in {for (final m in data.values) ...m.keys})
-if (!ExamService.subjects.contains(s)) s,
+...ExamService.subjects,
+for (final x in list)
+if (!ExamService.subjects.contains(x.subject)) x.subject,
+].toSet().toList();
+
+List<_SowProgress> at(String f, String sub) => [
+for (final x in list)
+if (x.form == f && x.subject == sub) x
 ];
 
-double pct(String form, double mark) {
-final mx = _gradeMax(_exam, form);
-return mx > 0 ? mark / mx * 100 : mark;
-}
-
-bool passed(String form, double mark) =>
-_gradeOf(mark, max: _gradeMax(_exam, form)) != 'F';
-
-// best / weakest subject of the whole school (average of the % of every form)
-final subPct = <String, double>{};
-for (final sub in subjects) {
-final v = [
+final missing = [
 for (final f in forms)
-if (data[f]![sub] != null) pct(f, data[f]![sub]!.avg)
+for (final sub in subjects)
+if (at(f, sub).isEmpty) '$f $sub'
 ];
-if (v.isNotEmpty) subPct[sub] = v.fold(0.0, (a, b) => a + b) / v.length;
-}
-final ranked = subPct.keys.toList()
-..sort((a, b) => subPct[b]!.compareTo(subPct[a]!));
+final behind = list.where((x) => (x.coverage ?? 1) < .5).length;
+final planCount = list.fold<int>(0, (a, x) => a + x.plans);
 
-Widget cell(Widget child, {Color? bg, Alignment al = Alignment.center}) =>
-Container(
-width: 118,
-height: 58,
-alignment: al,
+Widget summary(String title, String value, IconData icon, Color c) => Card(
+margin: EdgeInsets.zero,
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(icon, color: c, size: 28),
+const SizedBox(width: 10),
+Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Text(title,
+style:
+const TextStyle(fontSize: 12, color: Colors.black54)),
+Text(value,
+style: const TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+]),
+),
+);
+
+Widget cell(Widget child, {Color? bg, double w = 128}) => Container(
+width: w,
+height: 66,
+alignment: Alignment.center,
 color: bg,
-padding: const EdgeInsets.symmetric(horizontal: 6),
+padding: const EdgeInsets.symmetric(horizontal: 8),
 child: child,
 );
 
-Widget head(String t, {double w = 118}) => Container(
+Widget head(String t, {double w = 128}) => Container(
 width: w,
 height: 40,
 alignment: Alignment.center,
@@ -40226,93 +40283,74 @@ style: const TextStyle(fontWeight: FontWeight.w700),
 textAlign: TextAlign.center),
 );
 
-Widget markCell(String form, _PerfCell? c) {
-if (c == null || c.marks.isEmpty) {
-return cell(const Text('-', style: TextStyle(color: Colors.black38)));
+Widget bar(double? v, Color c) => ClipRRect(
+borderRadius: BorderRadius.circular(4),
+child: LinearProgressIndicator(
+value: v ?? 0,
+minHeight: 6,
+color: c,
+backgroundColor: c.withOpacity(.15)),
+);
+
+Widget matrixCell(String f, String sub) {
+final l = at(f, sub);
+if (l.isEmpty) {
+return cell(
+const Text('No scheme',
+style: TextStyle(fontSize: 12, color: Colors.black38)),
+bg: Colors.black.withOpacity(.03));
 }
-final g = _gradeOf(c.avg, max: _gradeMax(_exam, form));
-final col = _gradeColor(g);
-final pass =
-c.marks.where((m) => passed(form, m)).length / c.marks.length * 100;
+final elapsed = l.fold<int>(0, (a, x) => a + x.elapsed);
+final covered = l.fold<int>(0, (a, x) => a + x.covered);
+final total = l.map((x) => x.total).reduce((a, b) => a > b ? a : b);
+final wk = l.map((x) => x.elapsed).reduce((a, b) => a > b ? a : b);
+final cov = elapsed == 0 ? null : covered / elapsed;
+final c = _col(cov);
 return cell(
 Column(mainAxisSize: MainAxisSize.min, children: [
-Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-Text(_f1(c.avg),
+Text(cov == null ? 'Not started' : '${(cov * 100).round()}% planned',
 style: TextStyle(
-fontSize: 16, fontWeight: FontWeight.w800, color: col)),
-const SizedBox(width: 6),
-Container(
-padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-decoration: BoxDecoration(
-color: col.withOpacity(.15),
-borderRadius: BorderRadius.circular(8)),
-child: Text(g,
-style: TextStyle(
-fontSize: 12, fontWeight: FontWeight.w700, color: col)),
-),
-]),
-Text('pass ${pass.round()}% · ${c.marks.length} st.',
+fontSize: 14, fontWeight: FontWeight.w800, color: c)),
+const SizedBox(height: 4),
+bar(cov ?? 0, c),
+const SizedBox(height: 4),
+Text('Week $wk/$total · LP $covered/$elapsed',
 style: const TextStyle(fontSize: 11, color: Colors.black54)),
 ]),
-bg: col.withOpacity(.06),
+bg: c.withOpacity(.07),
 );
 }
 
-Widget overallCell(String form) {
-final l = studentAvg[form] ?? const <double>[];
-if (l.isEmpty) return cell(const Text('-'));
-final avg = l.fold(0.0, (a, b) => a + b) / l.length;
-final g = _gradeOf(avg, max: _gradeMax(_exam, form));
-final col = _gradeColor(g);
-final pass = l.where((m) => passed(form, m)).length / l.length * 100;
-return cell(
-Column(mainAxisSize: MainAxisSize.min, children: [
-Text('${_f1(avg)}  $g',
-style: TextStyle(
-fontSize: 16, fontWeight: FontWeight.w800, color: col)),
-Text('pass ${pass.round()}% · ${l.length} st.',
-style: const TextStyle(fontSize: 11, color: Colors.black54)),
-]),
-bg: col.withOpacity(.12),
-);
-}
-
-Widget summary(String title, String sub, IconData icon, Color c) => Card(
-margin: EdgeInsets.zero,
-child: Padding(
-padding: const EdgeInsets.all(12),
-child: Row(mainAxisSize: MainAxisSize.min, children: [
-Icon(icon, color: c, size: 28),
-const SizedBox(width: 10),
-Column(
-crossAxisAlignment: CrossAxisAlignment.start,
-children: [
-Text(title,
-style: const TextStyle(
-fontSize: 12, color: Colors.black54)),
-Text(sub,
-style: const TextStyle(
-fontSize: 15, fontWeight: FontWeight.w700)),
-]),
-]),
-),
-);
+final byTeacher = [...list]..sort((a, b) =>
+(a.coverage ?? 2).compareTo(b.coverage ?? 2)); // behind first
 
 return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+_acDrop('Term', term, [_all, ...terms], (v) => setState(() => _term = v),
+width: 220),
+const SizedBox(height: 14),
+if (all.isEmpty)
+const Padding(
+padding: EdgeInsets.all(32),
+child: Center(
+child: Text(
+'No scheme of work has been saved yet.\n'
+'Teachers save them in the Scheme of work tab.',
+textAlign: TextAlign.center)),
+)
+else ...[
 Wrap(spacing: 10, runSpacing: 10, children: [
-if (ranked.isNotEmpty)
-summary('Strongest subject',
-'${ranked.first} (${_f1(subPct[ranked.first]!)}%)',
-Icons.trending_up, kGreen),
-if (ranked.length > 1)
-summary('Weakest subject',
-'${ranked.last} (${_f1(subPct[ranked.last]!)}%)',
-Icons.trending_down, kRed),
-summary('Forms with results', '${forms.length}', Icons.school,
+summary('Schemes of work', '${list.length}', Icons.calendar_view_week,
 const Color(0xFF6A1B9A)),
+summary('Lesson plans saved', '$planCount', Icons.menu_book,
+const Color(0xFF1565C0)),
+summary('Behind (under 50%)', '$behind', Icons.warning_amber,
+behind == 0 ? kGreen : kRed),
+summary('Form / subject without a scheme', '${missing.length}',
+Icons.report_gmailerrorred,
+missing.isEmpty ? kGreen : kLate),
 ]),
 const SizedBox(height: 16),
-Text('$_exam: average mark, grade and pass rate',
+Text('$term: lesson plan coverage of the weeks started',
 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
 const SizedBox(height: 8),
 Card(
@@ -40322,45 +40360,108 @@ child: SingleChildScrollView(
 scrollDirection: Axis.horizontal,
 child: Column(children: [
 Row(children: [
-head('Subject', w: 130),
+head('Subject', w: 120),
 for (final f in forms) head(f),
 ]),
 for (final sub in subjects) ...[
 const Divider(height: 1),
 Row(children: [
 Container(
-width: 130,
-height: 58,
+width: 120,
+height: 66,
 alignment: Alignment.centerLeft,
 padding: const EdgeInsets.symmetric(horizontal: 10),
 child: Text(sub,
 style: const TextStyle(fontWeight: FontWeight.w600)),
 ),
-for (final f in forms) markCell(f, data[f]![sub]),
+for (final f in forms) matrixCell(f, sub),
 ]),
 ],
-const Divider(height: 1, thickness: 2),
+]),
+),
+),
+const SizedBox(height: 6),
+const Text(
+'Week a/b = weeks of the scheme that have started / all weeks. '
+'LP x/y = started weeks that have at least one saved lesson plan '
+'for that form and subject. Green 80%+, orange 50%+, red below.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+const SizedBox(height: 18),
+const Text('By teacher (furthest behind first)',
+style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+const SizedBox(height: 8),
+for (final x in byTeacher)
+Card(
+margin: const EdgeInsets.only(bottom: 8),
+child: Padding(
+padding: const EdgeInsets.all(12),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
 Row(children: [
-Container(
-width: 130,
-height: 58,
-alignment: Alignment.centerLeft,
-padding: const EdgeInsets.symmetric(horizontal: 10),
-child: const Text('Form overall',
-style: TextStyle(fontWeight: FontWeight.w800)),
+Expanded(
+child: Text('${x.teacher}  ·  ${x.form} ${x.subject}',
+style: const TextStyle(
+fontWeight: FontWeight.w700, fontSize: 14.5)),
 ),
-for (final f in forms) overallCell(f),
+Text(x.term,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
 ]),
+const SizedBox(height: 8),
+Row(children: [
+const SizedBox(
+width: 112,
+child: Text('Scheme of work',
+style: TextStyle(fontSize: 12))),
+Expanded(
+child: bar(
+x.total == 0 ? 0 : x.elapsed / x.total,
+const Color(0xFF6A1B9A))),
+SizedBox(
+width: 92,
+child: Text('  week ${x.elapsed}/${x.total}',
+style: const TextStyle(fontSize: 12))),
 ]),
-),
-),
-const SizedBox(height: 10),
+const SizedBox(height: 6),
+Row(children: [
+const SizedBox(
+width: 112,
+child: Text('Lesson plans',
+style: TextStyle(fontSize: 12))),
+Expanded(child: bar(x.coverage ?? 0, _col(x.coverage))),
+SizedBox(
+width: 92,
+child: Text('  ${x.covered}/${x.elapsed} weeks',
+style: TextStyle(
+fontSize: 12,
+fontWeight: FontWeight.w700,
+color: _col(x.coverage)))),
+]),
+const SizedBox(height: 6),
 Text(
-'Pass = any grade except F. Each cell: class average mark, its grade, '
-'the share of students who passed the subject and how many students '
-'have a mark. The overall row uses each student\'s average over all '
-'their subjects.',
-style: const TextStyle(fontSize: 12, color: Colors.black54)),
+'Topics filled: ${x.filled}/${x.total}  ·  '
+'Lesson plans saved: ${x.plans}  ·  '
+'Last lesson plan: ${x.lastPlan.isEmpty ? 'none' : x.lastPlan}'
+'${x.current.isEmpty ? '' : '\nThis week: ${x.current}'}',
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+]),
+),
+),
+if (missing.isNotEmpty) ...[
+const SizedBox(height: 10),
+const Text('Without a scheme of work in this term',
+style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+const SizedBox(height: 6),
+Wrap(spacing: 6, runSpacing: 6, children: [
+for (final x in missing)
+Chip(
+label: Text(x, style: const TextStyle(fontSize: 12)),
+visualDensity: VisualDensity.compact),
+]),
+],
+],
 ]);
 }
 }
