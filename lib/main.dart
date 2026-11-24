@@ -39183,8 +39183,17 @@ colorSchemeSeed: const Color(0xFF3498DB),
 scaffoldBackgroundColor: const Color(0xFFF2F2F2),
 ),
 // Lets people highlight and copy text everywhere in the system.
-builder: (context, child) =>
-SelectionArea(child: child ?? const SizedBox.shrink()),
+// An Overlay sits above the Navigator so the copy / select-all menu has
+// somewhere to appear (SelectionArea above the Navigator has none).
+builder: (context, child) => Overlay(
+initialEntries: [
+OverlayEntry(
+builder: (_) => SelectionArea(
+child: child ?? const SizedBox.shrink(),
+),
+),
+],
+),
 home: StreamBuilder<User?>(
 stream: FirebaseAuth.instance.authStateChanges(),
 builder: (context, snap) {
