@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:label="exam_manager"
+        android:label="M.Mooge Secondary School"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
