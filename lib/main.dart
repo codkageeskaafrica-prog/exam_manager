@@ -20801,7 +20801,9 @@ Widget _noPhoneReport(List<StudentInfo> students,
 Map<String, SectionInfo> secById, String scope) {
 final list = [
 for (final s in students)
-if (s.phoneText.isEmpty && secById.containsKey(s.sectionId)) s
+if ((s.phoneText.isEmpty || s.emisId.trim().isEmpty) &&
+secById.containsKey(s.sectionId))
+s
 ]..sort((a, b) {
 final c = secById[a.sectionId]!
     .label
@@ -20824,35 +20826,45 @@ return [
 for (final e in groups.entries)
 _DrTable(
 title: 'Class ${e.key}',
-headers: const ['No.', 'Student name', 'Class', 'Phone number'],
+headers: const [
+'No.',
+'Student name',
+'Class',
+'Phone number',
+'EMIS ID'
+],
 rows: [
 for (var i = 0; i < e.value.length; i++)
 [
 '${i + 1}',
 e.value[i].name,
 secById[e.value[i].sectionId]!.fullName,
-'',
+e.value[i].phoneText, // empty = write the number in
+e.value[i].emisId.trim(), // empty = write the ID in
 ]
 ],
-weights: const [1, 6, 3, 4],
+weights: const [1, 6, 3, 4, 4],
 left: const {1},
-text: const {1, 2, 3},
+text: const {1, 2, 3, 4},
 notes: [
-'${e.value.length} student${e.value.length == 1 ? '' : 's'} '
-'without a phone number'
+'${e.value.length} student${e.value.length == 1 ? '' : 's'}: '
+'${e.value.where((x) => x.phoneText.isEmpty).length} without '
+'a phone number, '
+'${e.value.where((x) => x.emisId.trim().isEmpty).length} '
+'without an EMIS ID'
 ],
 ),
 ];
 }
 
 final period =
-'Students without a phone number   |   $scope   |   ${list.length} in total'
+'Students without a phone number or EMIS ID   |   $scope   |   ${list.length} in total'
 '   |   Date: ${DateFormat('d MMM yyyy').format(DateTime.now())}';
-const title = 'STUDENTS WITHOUT PHONE NUMBER';
+const title = 'STUDENTS WITHOUT PHONE NUMBER OR EMIS ID';
 return _ReportMenuButton(
 label: 'Download / print',
 fileName: () => _safeFile(
-'Students-without-phone-${scope.replaceAll(' ', '-')}'),
+'Students-without-phone-or-EMIS-${scope.replaceAll(' ', '-')}'),
 build: () async =>
 DailyAttendanceReport.pdf(tables(), period, title: title),
 buildXlsx: () async =>
@@ -20883,6 +20895,7 @@ final k = SectionInfo.code(sec.form, sec.classKey);
 classCount[k] = (classCount[k] ?? 0) + 1;
 }
 final noPhone = visible.where((x) => x.phoneText.isEmpty).length;
+final noEmis = visible.where((x) => x.emisId.trim().isEmpty).length;
 final forms = [
 for (final f in ExamService.forms)
 if (secs.any((s) => s.form == f)) f,
@@ -20931,7 +20944,9 @@ stat(Icons.school_outlined, '${classCount.length} Classes'),
 stat(Icons.people_alt_outlined, '${visible.length} Students'),
 if (noPhone > 0)
 stat(Icons.phone_disabled_outlined, '$noPhone without phone'),
-if (noPhone > 0)
+if (noEmis > 0)
+stat(Icons.badge_outlined, '$noEmis without EMIS ID'),
+if (noPhone > 0 || noEmis > 0)
 _noPhoneReport(visible, secById, 'All classes'),
 ]),
 ),
@@ -21128,13 +21143,17 @@ shown.length == visible.length
 ? '${visible.length} student'
 '${visible.length == 1 ? '' : 's'}'
 '${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}'
+'${shown.where((x) => x.emisId.trim().isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.emisId.trim().isEmpty).length} without EMIS ID'}'
     : '${shown.length} of ${visible.length} students'
-'${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}',
+'${shown.where((x) => x.phoneText.isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.phoneText.isEmpty).length} without phone'}'
+'${shown.where((x) => x.emisId.trim().isEmpty).isEmpty ? '' : '  ·  ${shown.where((x) => x.emisId.trim().isEmpty).length} without EMIS ID'}',
 style:
 const TextStyle(fontSize: 12, color: Colors.black54)),
 ),
 ),
-if (listMode && shown.any((x) => x.phoneText.isEmpty))
+if (listMode &&
+shown.any((x) =>
+x.phoneText.isEmpty || x.emisId.trim().isEmpty))
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
 child: Align(
