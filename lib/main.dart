@@ -39461,13 +39461,19 @@ const ExamManagerApp({super.key});
 @override
 Widget build(BuildContext context) {
 return ValueListenableBuilder<String>(
+valueListenable: activeYear,
+builder: (_, year, __) => ValueListenableBuilder<String>(
 valueListenable: appName,
-builder: (_, name, __) => _buildApp(name),
+builder: (_, name, __) => _buildApp(name, year),
+),
 );
 }
 
-Widget _buildApp(String name) {
+Widget _buildApp(String name, String year) {
 return MaterialApp(
+// A new key on the whole app throws away every screen (and its cached
+// streams) so everything reloads from the year that was picked.
+key: ValueKey('year-$year'),
 title: name,
 debugShowCheckedModeBanner: false,
 theme: ThemeData(
@@ -39484,12 +39490,7 @@ cursorColor: Color(0xFF1976D2),
 // Lets people highlight and copy text everywhere in the system.
 // An Overlay sits above the Navigator so the copy / select-all menu has
 // somewhere to appear (SelectionArea above the Navigator has none).
-builder: (context, child) => ValueListenableBuilder<String>(
-valueListenable: activeYear,
-// A new key rebuilds every screen, so all lists reload for the year.
-builder: (_, year, __) => KeyedSubtree(
-key: ValueKey('year-$year'),
-child: Overlay(
+builder: (context, child) => Overlay(
 initialEntries: [
 OverlayEntry(
 builder: (_) => SelectionArea(
@@ -39497,8 +39498,6 @@ child: child ?? const SizedBox.shrink(),
 ),
 ),
 ],
-),
-),
 ),
 home: StreamBuilder<User?>(
 stream: FirebaseAuth.instance.authStateChanges(),
