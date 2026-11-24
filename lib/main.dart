@@ -22932,6 +22932,12 @@ Color.lerp(cs.primary, Colors.black, 0.35)!,
 ]),
 borderRadius: BorderRadius.circular(18),
 ),
+child: Theme(
+data: Theme.of(context).copyWith(
+textSelectionTheme: const TextSelectionThemeData(
+selectionColor: Color(0xB3FFC107),
+),
+),
 child: Row(children: [
 CircleAvatar(
 radius: 28,
@@ -22973,6 +22979,7 @@ if (no.isNotEmpty) chip('ID $no'),
 ),
 ),
 ]),
+),
 );
 },
 );
@@ -39181,6 +39188,12 @@ theme: ThemeData(
 useMaterial3: true,
 colorSchemeSeed: const Color(0xFF3498DB),
 scaffoldBackgroundColor: const Color(0xFFF2F2F2),
+// Clearly visible highlight for selected text.
+textSelectionTheme: const TextSelectionThemeData(
+selectionColor: Color(0x802196F3),
+selectionHandleColor: Color(0xFF1976D2),
+cursorColor: Color(0xFF1976D2),
+),
 ),
 // Lets people highlight and copy text everywhere in the system.
 // An Overlay sits above the Navigator so the copy / select-all menu has
