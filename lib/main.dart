@@ -1047,7 +1047,7 @@ class ExamService {
       final gradeCount = <String, int>{};
       for (final x in scored) {
         final gr = _gradeOf(g.results[x.id]!.average!,
-            max: _gradeMax(exam, SchoolService.formOf(x)));
+            max: _gradeMax(exam, SchoolService.formOf(x)), form: SchoolService.formOf(x));
         gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
       }
 
@@ -1107,7 +1107,7 @@ class ExamService {
               final gr = avg == null
                   ? null
                   : _gradeOf(avg,
-                  max: _gradeMax(exam, SchoolService.formOf(x)));
+                  max: _gradeMax(exam, SchoolService.formOf(x)), form: SchoolService.formOf(x));
               return [
                 cell('${i + 1}'),
                 cell(x.name, left: true),
@@ -1140,8 +1140,8 @@ class ExamService {
           'results${groupAvg == null ? '' : ' | class average ${_fmtMark(double.parse(groupAvg.toStringAsFixed(1)))}'}';
       final key = [
         for (var i = 0; i < AppSettings.gradeLetters.length; i++)
-          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
-        'F below ${_fmtMark(st.grades.last)}',
+          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.gradesFor(_formOfStudents(g.students))[i])}',
+        'F below ${_fmtMark(st.gradesFor(_formOfStudents(g.students)).last)}',
       ].join('   ');
       final counts = [
         for (final l in [...AppSettings.gradeLetters, 'F'])
@@ -1379,7 +1379,7 @@ class ExamService {
               final r = g.rows[i];
               final c = r.combined;
               final p = r.percent;
-              final gr = p == null ? null : _gradeOf(p);
+              final gr = p == null ? null : _gradeOf(p, form: SchoolService.formOf(r.student));
               if (r.partial.isNotEmpty) anyPartial = true;
               return [
                 cell('${i + 1}'),
@@ -1411,7 +1411,7 @@ class ExamService {
           : scored.fold(0.0, (a, r) => a + r.percent!) / scored.length;
       final gradeCount = <String, int>{};
       for (final r in scored) {
-        final gr = _gradeOf(r.percent!);
+        final gr = _gradeOf(r.percent!, form: SchoolService.formOf(r.student));
         gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
       }
       final totals = [for (final r in g.rows) if (r.combined != null) r.combined!];
@@ -1422,8 +1422,8 @@ class ExamService {
           'results${full ? (groupAvg == null ? '' : ' | average ${_pct1(groupAvg)}%') : (totalAvg == null ? '' : ' | average total ${_n1(totalAvg)}')}';
       final key = [
         for (var i = 0; i < AppSettings.gradeLetters.length; i++)
-          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
-        'F below ${_fmtMark(st.grades.last)}',
+          '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.gradesFor(g.rows.isEmpty ? '' : SchoolService.formOf(g.rows.first.student))[i])}',
+        'F below ${_fmtMark(st.gradesFor(g.rows.isEmpty ? '' : SchoolService.formOf(g.rows.first.student)).last)}',
       ].join('   ');
       final counts = [
         for (final l in [...AppSettings.gradeLetters, 'F'])
@@ -1867,7 +1867,7 @@ class ExamService {
     final gradeCount = <String, int>{};
     for (final x in scored) {
       final gr = _gradeOf(g.results[x.id]!.average!,
-          max: _gradeMax(exam, SchoolService.formOf(x)));
+          max: _gradeMax(exam, SchoolService.formOf(x)), form: SchoolService.formOf(x));
       gradeCount[gr] = (gradeCount[gr] ?? 0) + 1;
     }
     return (
@@ -1891,12 +1891,12 @@ class ExamService {
       if ((gradeCount[l] ?? 0) > 0) '$l: ${gradeCount[l]}'
   ].join('   ');
 
-  static String _resultGradeKey() {
-    final st = appSettings.value;
+  static String _resultGradeKey([String form = '']) {
+    final g = appSettings.value.gradesFor(form);
     return [
       for (var i = 0; i < AppSettings.gradeLetters.length; i++)
-        '${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
-      'F below ${_fmtMark(st.grades.last)}',
+        '${AppSettings.gradeLetters[i]} >= ${_fmtMark(g[i])}',
+      'F below ${_fmtMark(g.last)}',
     ].join('   ');
   }
 
@@ -1999,7 +1999,7 @@ class ExamService {
         final avg = res?.average;
         final gr = avg == null
             ? null
-            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(x)));
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(x)), form: SchoolService.formOf(x));
         final line = StringBuffer('<row r="$r">');
         var k = 0;
         line.write(nc(k++, r, r - 5, 2)); // serial number 1, 2, 3...
@@ -2041,7 +2041,7 @@ class ExamService {
         r++;
       }
       rows.write(
-          '<row r="$r">${sc(0, r, 'Grading (average mark): ${_resultGradeKey()}', 11)}</row>');
+          '<row r="$r">${sc(0, r, 'Grading (average mark): ${_resultGradeKey(_formOfStudents(g.students))}', 11)}</row>');
 
       final colsXml = StringBuffer('<cols>');
       var ci = 1;
@@ -2286,7 +2286,7 @@ class ExamService {
         final avg = res?.average;
         final gr = avg == null
             ? null
-            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(s)));
+            : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(s)), form: SchoolService.formOf(s));
         final z = i.isOdd;
         rows.write(tr([
           tc(posW, '${i + 1}', sz: sz, zebraRow: z),
@@ -2336,7 +2336,7 @@ class ExamService {
       if (counts.isNotEmpty) {
         body.write(para('Grades: $counts', jc: 'left', sz: 18, sp: 10));
       }
-      body.write(para('Grading (average mark): ${_resultGradeKey()}',
+      body.write(para('Grading (average mark): ${_resultGradeKey(_formOfStudents(g.students))}',
           b: false, jc: 'left', sz: 17, sp: 10));
     }
 
@@ -7067,8 +7067,9 @@ class AssignmentService {
     }
   }
 
-  /// Stamps the general letterhead + footer on the file and saves it as one
-  /// more assignment of this subject and form.
+  /// Saves the file as one more assignment of this subject and form.
+  /// A PDF is saved exactly as it is (no letterhead / footer is added);
+  /// Word files and images still get the school letterhead + footer.
   Future<void> upload({
     required String subject,
     required String form,
@@ -7077,40 +7078,50 @@ class AssignmentService {
     required PlatformFile file,
     void Function(String status)? onStatus,
   }) async {
-    final letterhead = await exams.getLetterhead();
-    if (letterhead == null) {
-      throw Exception(
-          'No school letterhead yet. Tap the image icon at the top to upload it first.');
-    }
     final bytes = file.bytes;
     if (bytes == null) throw Exception('Could not read file bytes.');
-    final isDocx = (file.extension ?? '').toLowerCase() == 'docx';
+    final ext = (file.extension ?? '').toLowerCase();
+    final isDocx = ext == 'docx';
+    final isPdf = ext == 'pdf';
     final footer = footerFor(subject, form, teacher);
 
-    onStatus?.call('Adding letterhead and footer...');
-    final Uint8List stamped = isDocx
-        ? await exams.stampDocx(
-        docx: bytes,
-        letterhead: letterhead,
-        footer: footer,
-        heading: null,
-        autoFormat: false,
-        numberQuestions: false,
-        includeLogo: false)
-        : await exams.stampDocument(
-        file: file,
-        letterhead: letterhead,
-        footer: footer,
-        includeLogo: false);
+    final Uint8List stamped;
+    if (isPdf) {
+      // uploaded directly, untouched
+      stamped = bytes;
+    } else {
+      final letterhead = await exams.getLetterhead();
+      if (letterhead == null) {
+        throw Exception(
+            'No school letterhead yet. Tap the image icon at the top to upload it first.');
+      }
+      onStatus?.call('Adding letterhead and footer...');
+      stamped = isDocx
+          ? await exams.stampDocx(
+          docx: bytes,
+          letterhead: letterhead,
+          footer: footer,
+          heading: null,
+          autoFormat: false,
+          numberQuestions: false,
+          includeLogo: false)
+          : await exams.stampDocument(
+          file: file,
+          letterhead: letterhead,
+          footer: footer,
+          includeLogo: false);
+    }
 
     final baseName = file.name.replaceAll(RegExp(r'\.[^.]+$'), '');
-    final fileName = isDocx ? file.name : '$baseName.pdf';
+    final fileName = (isDocx || isPdf) ? file.name : '$baseName.pdf';
     final kb = (stamped.length / 1024).round();
     if (stamped.length > maxBytes) {
-      throw Exception(
-          'File is too large ($kb KB after adding the letterhead). The limit is '
-              '${maxBytes ~/ (1024 * 1024)} MB. Please make its pictures smaller '
-              'or use a smaller letterhead image.');
+      throw Exception(isPdf
+          ? 'File is too large ($kb KB). The limit is '
+          '${maxBytes ~/ (1024 * 1024)} MB. Please compress the PDF.'
+          : 'File is too large ($kb KB after adding the letterhead). The limit is '
+          '${maxBytes ~/ (1024 * 1024)} MB. Please make its pictures smaller '
+          'or use a smaller letterhead image.');
     }
 
     onStatus?.call('Saving $kb KB...');
@@ -7154,6 +7165,26 @@ class AssignmentService {
       name,
       (d['contentType'] as String?) ?? 'application/octet-stream',
     );
+  }
+
+  /// Sends one assignment straight to the printer (PDF files). Word files
+  /// cannot be printed from the app: they must be downloaded.
+  Future<void> printOne(AssignmentRecord r) async {
+    final d = (await _files.doc(r.id).get()).data();
+    if (d == null || d['dataBase64'] == null) {
+      throw Exception('The file was not found.');
+    }
+    final stored = ((d['fileName'] as String?) ?? r.fileName).toLowerCase();
+    final type = '${d['contentType'] ?? ''}'.toLowerCase();
+    if (!stored.endsWith('.pdf') && !type.contains('pdf')) {
+      throw Exception(
+          'Word files cannot be printed from here. Download it and print '
+              'it from Word.');
+    }
+    final bytes = await _readBytes(r.id, d);
+    final name = '${_clean(r.form)}-${_clean(r.subject)}-'
+        '${_clean(r.title.isEmpty ? 'Assignment' : r.title)}';
+    await Printing.layoutPdf(name: name, onLayout: (_) async => bytes);
   }
 
   Future<void> delete(AssignmentRecord r) async {
@@ -7752,6 +7783,14 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
   Future<void> _preview() async {
     final f = _file;
     if (f == null) return;
+    if ((f.extension ?? '').toLowerCase() == 'pdf' && f.bytes != null) {
+      // a PDF is uploaded as it is: preview the file itself
+      await showDialog(
+        context: context,
+        builder: (_) => PreviewDialog(bytes: f.bytes!),
+      );
+      return;
+    }
     setState(() {
       _busy = true;
       _status = 'Building preview...';
@@ -7837,6 +7876,14 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
     }
   }
 
+  Future<void> _print(AssignmentRecord r) async {
+    try {
+      await widget.service.printOne(r);
+    } catch (e) {
+      _toast(_err(e));
+    }
+  }
+
   Future<void> _delete(AssignmentRecord r) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -7879,6 +7926,11 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
               ].join(' · '),
               overflow: TextOverflow.ellipsis),
           trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+            IconButton(
+              tooltip: 'Print this assignment',
+              icon: const Icon(Icons.print),
+              onPressed: _busy ? null : () => _print(r),
+            ),
             IconButton(
               tooltip: 'Download',
               icon: const Icon(Icons.download),
@@ -7996,9 +8048,10 @@ class _AssignmentDialogState extends State<AssignmentDialog> {
             ),
             const SizedBox(height: 6),
             const Text(
-              'Word (.docx) recommended; PDF and images also work. The school '
-                  'letterhead and the footer are added automatically to every '
-                  'page. You can upload as many assignments as you need.',
+              'PDF files are uploaded exactly as they are (no letterhead or '
+                  'footer is added). Word (.docx) files and images get the '
+                  'school letterhead and the footer on every page. You can '
+                  'upload as many assignments as you need.',
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
             if (_status != null) ...[
@@ -9553,8 +9606,11 @@ class _HomeItem {
   });
 }
 
-/// First screen after login. Order: Exam, Sections, Attendance, Result, Settings.
-class HomeScreen extends StatelessWidget {
+/// First screen after login.
+///  - Computer / tablet (width >= 900): permanent sidebar (can be collapsed)
+///    and the pages open INSIDE the content area, so the sidebar stays.
+///  - Phone: menu button + drawer with the same menu; pages open full screen.
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   static final _items = <_HomeItem>[
@@ -9665,74 +9721,127 @@ class HomeScreen extends StatelessWidget {
   ];
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(mainAxisSize: MainAxisSize.min, children: [
-          const AppLogo(place: LogoPlace.home, height: 36),
-          const SizedBox(width: 10),
-          Flexible(
-            child: ValueListenableBuilder<String>(
-              valueListenable: appName,
-              builder: (_, name, __) =>
-                  Text(name, overflow: TextOverflow.ellipsis),
-            ),
-          ),
-        ]),
-        actions: [
-          const AccountBadge(),
-          IconButton(
-            tooltip: 'Change password',
-            icon: const Icon(Icons.lock_reset),
-            onPressed: () => showChangePasswordDialog(context),
-          ),
-          IconButton(
-            tooltip: 'Sign out',
-            icon: const Icon(Icons.logout),
-            onPressed: () => _signOut(context),
-          ),
-          const SizedBox(width: 8),
-        ],
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeNavObserver extends NavigatorObserver {
+  final void Function(String? page) onChange;
+  _HomeNavObserver(this.onChange);
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      onChange(route.settings.name);
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      onChange(previousRoute?.settings.name);
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) =>
+      onChange(newRoute?.settings.name);
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const double _wideAt = 900;
+  final _nav = GlobalKey<NavigatorState>();
+  late final _HomeNavObserver _observer = _HomeNavObserver((p) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _selected != p) setState(() => _selected = p);
+    });
+  });
+  String? _selected; // AppPages.* of the open page (null = dashboard)
+  bool _collapsed = false;
+
+  void _open(_HomeItem item, {required bool wide}) {
+    if (!wide) {
+      Navigator.of(context).push(MaterialPageRoute(
+          settings: RouteSettings(name: item.page), builder: item.builder));
+      return;
+    }
+    final n = _nav.currentState;
+    if (n == null) return;
+    if (_selected == item.page) return;
+    n.popUntil((r) => r.isFirst);
+    n.push(MaterialPageRoute(
+        settings: RouteSettings(name: item.page), builder: item.builder));
+  }
+
+  void _goHome() => _nav.currentState?.popUntil((r) => r.isFirst);
+
+  PreferredSizeWidget _plainBar() => AppBar(
+    title: Row(mainAxisSize: MainAxisSize.min, children: [
+      const AppLogo(place: LogoPlace.home, height: 36),
+      const SizedBox(width: 10),
+      Flexible(
+        child: ValueListenableBuilder<String>(
+          valueListenable: appName,
+          builder: (_, name, __) =>
+              Text(name, overflow: TextOverflow.ellipsis),
+        ),
       ),
-      body: StreamBuilder<UserProfile>(
-        stream: UserProfile.watchMine(),
-        builder: (context, snap) {
-          if (!snap.hasData && !snap.hasError) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          // If the profile cannot be read, nothing is hidden (rules problem).
-          final profile = snap.data;
-          if (profile != null && profile.legacy) {
-            final u = FirebaseAuth.instance.currentUser;
-            if (u != null) ensureUserProfile(u);
-          }
-          if (profile != null &&
-              profile.role == 'student' &&
-              profile.studentId.isEmpty) {
-            return _LinkStudentBody(uid: profile.uid);
-          }
-          if (profile != null &&
-              profile.role == 'student' &&
-              profile.studentId.isNotEmpty) {
-            // A student only sees the own results and attendance.
-            return ValueListenableBuilder<AppSettings>(
+    ]),
+    actions: [
+      const AccountBadge(),
+      IconButton(
+        tooltip: 'Change password',
+        icon: const Icon(Icons.lock_reset),
+        onPressed: () => showChangePasswordDialog(context),
+      ),
+      IconButton(
+        tooltip: 'Sign out',
+        icon: const Icon(Icons.logout),
+        onPressed: () => _signOut(context),
+      ),
+      const SizedBox(width: 8),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<UserProfile>(
+      stream: UserProfile.watchMine(),
+      builder: (context, snap) {
+        if (!snap.hasData && !snap.hasError) {
+          return Scaffold(
+              appBar: _plainBar(),
+              body: const Center(child: CircularProgressIndicator()));
+        }
+        // If the profile cannot be read, nothing is hidden (rules problem).
+        final profile = snap.data;
+        if (profile != null && profile.legacy) {
+          final u = FirebaseAuth.instance.currentUser;
+          if (u != null) ensureUserProfile(u);
+        }
+        if (profile != null &&
+            profile.role == 'student' &&
+            profile.studentId.isEmpty) {
+          return Scaffold(
+              appBar: _plainBar(), body: _LinkStudentBody(uid: profile.uid));
+        }
+        if (profile != null &&
+            profile.role == 'student' &&
+            profile.studentId.isNotEmpty) {
+          // A student only sees the own results and attendance.
+          return Scaffold(
+            appBar: _plainBar(),
+            body: ValueListenableBuilder<AppSettings>(
               valueListenable: appSettings,
               builder: (context, st, _) => StudentPortal(
                   studentId: profile.studentId,
                   allowed: profile.effectiveAccess(st)),
-            );
-          }
-          return ValueListenableBuilder<AppSettings>(
-            valueListenable: appSettings,
-            builder: (context, st, _) {
-              final allowed =
-              profile == null ? AppPages.all : profile.effectiveAccess(st);
-              final items = [
-                for (final i in _items)
-                  if (allowed.contains(i.page)) i
-              ];
-              if (items.isEmpty) {
-                return const Center(
+            ),
+          );
+        }
+        return ValueListenableBuilder<AppSettings>(
+          valueListenable: appSettings,
+          builder: (context, st, _) {
+            final allowed =
+            profile == null ? AppPages.all : profile.effectiveAccess(st);
+            final items = [
+              for (final i in HomeScreen._items)
+                if (allowed.contains(i.page)) i
+            ];
+            if (items.isEmpty) {
+              return Scaffold(
+                appBar: _plainBar(),
+                body: const Center(
                   child: Padding(
                     padding: EdgeInsets.all(24),
                     child: Text(
@@ -9740,67 +9849,529 @@ class HomeScreen extends StatelessWidget {
                             'Ask the administrator to give you access.',
                         textAlign: TextAlign.center),
                   ),
-                );
-              }
-              return Column(children: [
-                const _ReminderInbox(),
+                ),
+              );
+            }
+            return LayoutBuilder(builder: (context, c) {
+              final wide = c.maxWidth >= _wideAt;
+              return wide ? _wideShell(items) : _phoneShell(items);
+            });
+          },
+        );
+      },
+    );
+  }
+
+  _HomeSidebar _sidebar(List<_HomeItem> items,
+      {required bool wide, bool collapsed = false, VoidCallback? afterTap}) {
+    return _HomeSidebar(
+      items: items,
+      selected: _selected,
+      collapsed: collapsed,
+      onHome: () {
+        afterTap?.call();
+        if (wide) _goHome();
+      },
+      onSelect: (i) {
+        afterTap?.call();
+        _open(i, wide: wide);
+      },
+      onToggle: wide ? () => setState(() => _collapsed = !_collapsed) : null,
+    );
+  }
+
+  Widget _dashboard(List<_HomeItem> items, bool wide) => _HomeDashboard(
+      items: items, onOpen: (i) => _open(i, wide: wide), wide: wide);
+
+  // ---------- computer / tablet ----------
+  Widget _wideShell(List<_HomeItem> items) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      backgroundColor: Color.alphaBlend(cs.primary.withOpacity(0.045), cs.surface),
+      body: Row(children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          width: _collapsed ? 84 : 272,
+          child: _sidebar(items, wide: true, collapsed: _collapsed),
+        ),
+        Expanded(
+          child: ClipRect(
+            child: Navigator(
+              key: _nav,
+              observers: [_observer],
+              onGenerateRoute: (_) => MaterialPageRoute(
+                  builder: (_) => Scaffold(
+                    backgroundColor: Color.alphaBlend(cs.primary.withOpacity(0.045), cs.surface),
+                    body: _dashboard(items, true),
+                  )),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // ---------- phone ----------
+  Widget _phoneShell(List<_HomeItem> items) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      backgroundColor: Color.alphaBlend(cs.primary.withOpacity(0.045), cs.surface),
+      appBar: AppBar(
+        scrolledUnderElevation: 0,
+        title: Row(mainAxisSize: MainAxisSize.min, children: [
+          const AppLogo(place: LogoPlace.home, height: 30),
+          const SizedBox(width: 10),
+          Flexible(
+            child: ValueListenableBuilder<String>(
+              valueListenable: appName,
+              builder: (_, name, __) => Text(name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.w700)),
+            ),
+          ),
+        ]),
+      ),
+      drawer: Drawer(
+        width: 300,
+        child: Builder(
+          builder: (dctx) => _sidebar(items,
+              wide: false, afterTap: () => Navigator.of(dctx).pop()),
+        ),
+      ),
+      body: _dashboard(items, false),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar (also used as the phone drawer)
+// ---------------------------------------------------------------------------
+class _HomeSidebar extends StatelessWidget {
+  final List<_HomeItem> items;
+  final String? selected;
+  final bool collapsed;
+  final VoidCallback onHome;
+  final void Function(_HomeItem) onSelect;
+  final VoidCallback? onToggle;
+  const _HomeSidebar({
+    required this.items,
+    required this.selected,
+    required this.collapsed,
+    required this.onHome,
+    required this.onSelect,
+    this.onToggle,
+  });
+
+  Widget _tile(BuildContext context,
+      {required IconData icon,
+        required String label,
+        required Color color,
+        required bool active,
+        required VoidCallback onTap}) {
+    final cs = Theme.of(context).colorScheme;
+    final chip = AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: 38,
+      height: 38,
+      decoration: BoxDecoration(
+        color: active ? color : color.withOpacity(0.13),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(icon, size: 21, color: active ? Colors.white : color),
+    );
+    final row = Material(
+      color: active ? color.withOpacity(0.10) : Colors.transparent,
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        hoverColor: color.withOpacity(0.06),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            mainAxisAlignment:
+            collapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
+            children: [
+              chip,
+              if (!collapsed) ...[
+                const SizedBox(width: 12),
                 Expanded(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(24),
-                      child: Wrap(
-                        spacing: 20,
-                        runSpacing: 20,
-                        alignment: WrapAlignment.center,
-                        children: [for (final i in items) _HomeCard(item: i)],
+                  child: Text(label,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight:
+                          active ? FontWeight.w700 : FontWeight.w500,
+                          color: active ? color : cs.onSurface)),
+                ),
+                if (active)
+                  Container(
+                      width: 6,
+                      height: 22,
+                      decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(6))),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      child: collapsed ? Tooltip(message: label, child: row) : row,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Material(
+      color: cs.surface,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+              right: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+        ),
+        child: SafeArea(
+          child: Column(children: [
+            // ----- brand -----
+            Padding(
+              padding: EdgeInsets.fromLTRB(collapsed ? 0 : 16, 16, 8, 10),
+              child: Row(
+                mainAxisAlignment: collapsed
+                    ? MainAxisAlignment.center
+                    : MainAxisAlignment.start,
+                children: [
+                  const AppLogo(place: LogoPlace.home, height: 40),
+                  if (!collapsed) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ValueListenableBuilder<String>(
+                        valueListenable: appName,
+                        builder: (_, name, __) => Text(name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 15.5,
+                                height: 1.2,
+                                fontWeight: FontWeight.w800)),
                       ),
                     ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            // ----- menu -----
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: 8),
+                children: [
+                  _tile(context,
+                      icon: Icons.space_dashboard_rounded,
+                      label: 'Home',
+                      color: cs.primary,
+                      active: selected == null,
+                      onTap: onHome),
+                  if (!collapsed)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(22, 14, 16, 6),
+                      child: Text('MENU',
+                          style: TextStyle(
+                              fontSize: 11,
+                              letterSpacing: 1.2,
+                              fontWeight: FontWeight.w700,
+                              color: cs.onSurfaceVariant)),
+                    )
+                  else
+                    const Divider(height: 22, indent: 18, endIndent: 18),
+                  for (final i in items)
+                    _tile(context,
+                        icon: i.icon,
+                        label: i.title,
+                        color: i.color,
+                        active: selected == i.page,
+                        onTap: () => onSelect(i)),
+                ],
+              ),
+            ),
+            // ----- account -----
+            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+              child: collapsed
+                  ? Column(children: [
+                const AccountBadge(),
+                IconButton(
+                    tooltip: 'Change password',
+                    icon: const Icon(Icons.lock_reset),
+                    onPressed: () => showChangePasswordDialog(context)),
+                IconButton(
+                    tooltip: 'Sign out',
+                    icon: const Icon(Icons.logout),
+                    onPressed: () => _signOut(context)),
+                if (onToggle != null)
+                  IconButton(
+                      tooltip: 'Expand menu',
+                      icon: const Icon(Icons.keyboard_double_arrow_right),
+                      onPressed: onToggle),
+              ])
+                  : Column(children: [
+                Row(children: [
+                  const Flexible(child: AccountBadge()),
+                  const Spacer(),
+                  if (onToggle != null)
+                    IconButton(
+                        tooltip: 'Collapse menu',
+                        icon: const Icon(Icons.keyboard_double_arrow_left),
+                        onPressed: onToggle),
+                ]),
+                Row(children: [
+                  Expanded(
+                    child: TextButton.icon(
+                      onPressed: () => showChangePasswordDialog(context),
+                      icon: const Icon(Icons.lock_reset, size: 18),
+                      label: const Text('Password'),
+                    ),
                   ),
-                ),
-              ]);
-            },
-          );
-        },
+                  Expanded(
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                          foregroundColor: cs.error),
+                      onPressed: () => _signOut(context),
+                      icon: const Icon(Icons.logout, size: 18),
+                      label: const Text('Sign out'),
+                    ),
+                  ),
+                ]),
+              ]),
+            ),
+          ]),
+        ),
       ),
     );
   }
 }
 
-class _HomeCard extends StatelessWidget {
-  final _HomeItem item;
-  const _HomeCard({required this.item});
+// ---------------------------------------------------------------------------
+// Dashboard (greeting + responsive grid of cards)
+// ---------------------------------------------------------------------------
+class _HomeDashboard extends StatelessWidget {
+  final List<_HomeItem> items;
+  final void Function(_HomeItem) onOpen;
+  final bool wide;
+  const _HomeDashboard(
+      {required this.items, required this.onOpen, required this.wide});
+
+  String _greeting() {
+    final h = DateTime.now().hour;
+    return h < 12
+        ? 'Good morning'
+        : (h < 17 ? 'Good afternoon' : 'Good evening');
+  }
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 250,
-      height: 210,
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        elevation: 2,
-        child: InkWell(
-          onTap: () => Navigator.of(context)
-              .push(MaterialPageRoute(builder: item.builder)),
+    final cs = Theme.of(context).colorScheme;
+    return LayoutBuilder(builder: (context, c) {
+      final w = c.maxWidth;
+      final phone = w < 600;
+      final pad = phone ? 16.0 : (w < 1000 ? 24.0 : 36.0);
+      final cols = phone ? 2 : (w ~/ 250).clamp(2, 5);
+      return CustomScrollView(slivers: [
+        SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircleAvatar(
-                  radius: 36,
-                  backgroundColor: item.color.withOpacity(0.15),
-                  child: Icon(item.icon, size: 38, color: item.color),
+            padding: EdgeInsets.fromLTRB(pad, pad, pad, 0),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const _ReminderInbox(),
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.all(phone ? 18 : 26),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(phone ? 22 : 28),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      cs.primary,
+                      Color.lerp(cs.primary, const Color(0xFF6A1B9A), 0.55)!,
+                    ],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                        color: cs.primary.withOpacity(0.28),
+                        blurRadius: 24,
+                        offset: const Offset(0, 10)),
+                  ],
                 ),
-                const SizedBox(height: 14),
-                Text(item.title,
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                Text(item.subtitle,
-                    textAlign: TextAlign.center,
-                    style:
-                    const TextStyle(fontSize: 12, color: Colors.black54)),
-              ],
+                child: Row(children: [
+                  Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(_greeting(),
+                              style: TextStyle(
+                                  color: Colors.white.withOpacity(0.85),
+                                  fontSize: phone ? 14 : 16)),
+                          const SizedBox(height: 4),
+                          ValueListenableBuilder<String>(
+                            valueListenable: appName,
+                            builder: (_, name, __) => Text(name,
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: phone ? 21 : 28,
+                                    fontWeight: FontWeight.w800)),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                              DateFormat('EEEE, d MMMM yyyy')
+                                  .format(DateTime.now()),
+                              style: TextStyle(
+                                  color: Colors.white.withOpacity(0.8),
+                                  fontSize: phone ? 12.5 : 14)),
+                        ]),
+                  ),
+                  if (!phone)
+                    Icon(Icons.school_rounded,
+                        size: 72, color: Colors.white.withOpacity(0.22)),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 24, bottom: 12, left: 4),
+                child: Text('Quick access',
+                    style: TextStyle(
+                        fontSize: phone ? 17 : 19,
+                        fontWeight: FontWeight.w800,
+                        color: cs.onSurface)),
+              ),
+            ]),
+          ),
+        ),
+        SliverPadding(
+          padding: EdgeInsets.fromLTRB(pad, 0, pad, pad + 8),
+          sliver: SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: cols,
+              mainAxisSpacing: phone ? 12 : 18,
+              crossAxisSpacing: phone ? 12 : 18,
+              mainAxisExtent: phone ? 150 : 176,
+            ),
+            delegate: SliverChildBuilderDelegate(
+                  (_, i) => _HomeCard(item: items[i], onTap: () => onOpen(items[i]), compact: phone),
+              childCount: items.length,
+            ),
+          ),
+        ),
+      ]);
+    });
+  }
+}
+
+class _HomeCard extends StatefulWidget {
+  final _HomeItem item;
+  final VoidCallback onTap;
+  final bool compact;
+  const _HomeCard(
+      {required this.item, required this.onTap, this.compact = false});
+
+  @override
+  State<_HomeCard> createState() => _HomeCardState();
+}
+
+class _HomeCardState extends State<_HomeCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final it = widget.item;
+    final r = widget.compact ? 20.0 : 24.0;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        transform: Matrix4.translationValues(0, _hover ? -4 : 0, 0),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(r),
+          border: Border.all(
+              color: _hover
+                  ? it.color.withOpacity(0.55)
+                  : cs.outlineVariant.withOpacity(0.5)),
+          boxShadow: [
+            BoxShadow(
+                color: (_hover ? it.color : Colors.black)
+                    .withOpacity(_hover ? 0.18 : 0.05),
+                blurRadius: _hover ? 22 : 10,
+                offset: Offset(0, _hover ? 10 : 4)),
+          ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(r),
+            onTap: widget.onTap,
+            child: Padding(
+              padding: EdgeInsets.all(widget.compact ? 14 : 18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Container(
+                      width: widget.compact ? 42 : 50,
+                      height: widget.compact ? 42 : 50,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(15),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            it.color,
+                            Color.lerp(it.color, Colors.black, 0.18)!
+                          ],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                              color: it.color.withOpacity(0.35),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4)),
+                        ],
+                      ),
+                      child: Icon(it.icon,
+                          color: Colors.white,
+                          size: widget.compact ? 22 : 26),
+                    ),
+                    const Spacer(),
+                    AnimatedOpacity(
+                      duration: const Duration(milliseconds: 180),
+                      opacity: _hover ? 1 : 0.35,
+                      child: Icon(Icons.arrow_outward_rounded,
+                          size: 20, color: it.color),
+                    ),
+                  ]),
+                  const Spacer(),
+                  Text(it.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: widget.compact ? 15.5 : 17.5,
+                          fontWeight: FontWeight.w800,
+                          color: cs.onSurface)),
+                  const SizedBox(height: 4),
+                  Text(it.subtitle,
+                      maxLines: widget.compact ? 2 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: widget.compact ? 11.5 : 12.5,
+                          height: 1.3,
+                          color: cs.onSurfaceVariant)),
+                ],
+              ),
             ),
           ),
         ),
@@ -11970,7 +12541,16 @@ class AppSettings {
   final Map<String, ExamStructure> examStructure;
 
   /// Lowest average mark for the grades A, B, C, D and E (below E is an F).
+  /// These are the grades of every form that has no grades of its own.
   final List<double> grades;
+
+  /// Grades of the forms that differ from [grades] (form -> A..E limits),
+  /// set in Settings > Grades & rules (e.g. Form4 has other mark limits and
+  /// so its own grades).
+  final Map<String, List<double>> formGrades;
+
+  /// The grade limits (A..E) to use for a student of [form].
+  List<double> gradesFor(String form) => formGrades[form] ?? grades;
 
   /// Attendance rate (in %) from which the report colour is green / orange.
   /// Below [rateWarn] it is red.
@@ -12074,6 +12654,7 @@ class AppSettings {
     this.examLimits = const {},
     this.examStructure = const {},
     this.grades = const [80.0, 70.0, 60.0, 50.0, 40.0],
+    this.formGrades = const {},
     this.rateGood = 90.0,
     this.rateWarn = 75.0,
     this.exams = const [],
@@ -12304,6 +12885,26 @@ class AppSettings {
       }
           : d.examStructure,
       grades: grades,
+      formGrades: () {
+        // stored as a list [{form, grades}] so that a save replaces it whole
+        final fg = m['formGrades'];
+        final out = <String, List<double>>{};
+        if (fg is List) {
+          for (final e in fg) {
+            if (e is! Map) continue;
+            final f = e['form'];
+            final gl = e['grades'];
+            if (f is String &&
+                f.isNotEmpty &&
+                gl is List &&
+                gl.length == gradeLetters.length &&
+                gl.every((x) => x is num)) {
+              out[f] = [for (final x in gl) (x as num).toDouble()];
+            }
+          }
+        }
+        return out;
+      }(),
       rateGood: dbl('rateGood', d.rateGood),
       rateWarn: dbl('rateWarn', d.rateWarn),
       exams: ex is List
@@ -13291,10 +13892,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
   TextEditingController(text: _fmtMark(appSettings.value.rateGood));
   late final _warn =
   TextEditingController(text: _fmtMark(appSettings.value.rateWarn));
+  // Grades of the forms ticked to share one set (_grade) and, when some
+  // forms are not ticked, a second set for them (_gradeB).
   late final _grade = [
     for (final g in appSettings.value.grades)
       TextEditingController(text: _fmtMark(g)),
   ];
+  late final _gradeB = [
+    for (final g in _initGradeB()) TextEditingController(text: _fmtMark(g)),
+  ];
+  Set<String>? _gradeSel; // forms that share the main set of grades
+
+  List<double> _initGradeB() {
+    final st = appSettings.value;
+    for (final f in ExamService.forms) {
+      final g = st.formGrades[f];
+      if (g != null) return g;
+    }
+    return st.grades;
+  }
+
+  Set<String> _initGradeSel() => {
+    for (final f in ExamService.forms)
+      if (!appSettings.value.formGrades.containsKey(f)) f
+  };
   final _newExam = TextEditingController();
   late final _t1Weeks =
   TextEditingController(text: '${appSettings.value.term1Weeks}');
@@ -13343,7 +13964,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     for (final c in [
-      _good, _warn, _newExam, _appName, ..._grade, _cur, _methods, ..._fee.values,
+      _good, _warn, _newExam, _appName, ..._grade, ..._gradeB, _cur, _methods, ..._fee.values,
       _t1Weeks, _t2Weeks, _lessonMin,
     ]) {
       c.dispose();
@@ -13550,23 +14171,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _saveResults() async {
+    final forms = ExamService.forms;
+    final sel = _gradeSel ?? {...forms};
+    final ticked = [for (final f in forms) if (sel.contains(f)) f];
+    final others = [for (final f in forms) if (!sel.contains(f)) f];
+    if (ticked.isEmpty) {
+      _toast('Tick at least one form.');
+      return;
+    }
     final top = appSettings.value.largestMax;
-    final limits = [for (final c in _grade) _num(c)];
-    if (limits.any((v) => v == null)) {
-      _toast('Enter a number for every grade.');
-      return;
+    List<double>? read(List<TextEditingController> c, String who) {
+      final limits = [for (final x in c) _num(x)];
+      if (limits.any((v) => v == null)) {
+        _toast('$who: enter a number for every grade.');
+        return null;
+      }
+      final v = [for (final x in limits) x!];
+      var ok = v.first <= top && v.last >= 0;
+      for (var i = 1; i < v.length; i++) {
+        if (v[i] >= v[i - 1]) ok = false;
+      }
+      if (!ok) {
+        _toast('$who: the limits must go down from A to E (for example 80, '
+            '70, 60, 50, 40) and cannot be higher than the highest subject '
+            'mark.');
+        return null;
+      }
+      return v;
     }
-    final v = [for (final x in limits) x!];
-    var ok = v.first <= top && v.last >= 0;
-    for (var i = 1; i < v.length; i++) {
-      if (v[i] >= v[i - 1]) ok = false;
+
+    final a = read(_grade, others.isEmpty ? 'Grades' : ticked.join(', '));
+    if (a == null) return;
+    List<double>? b;
+    if (others.isNotEmpty) {
+      b = read(_gradeB, others.join(', '));
+      if (b == null) return;
     }
-    if (!ok) {
-      _toast('The limits must go down from A to E (for example 80, 70, 60, '
-          '50, 40) and cannot be higher than the highest subject mark.');
-      return;
-    }
-    await _save({'grades': v}, 'Results settings saved');
+    final differs = b != null &&
+        [for (var i = 0; i < a.length; i++) a[i] == b[i]].contains(false);
+    await _save({
+      'grades': a,
+      // an empty list = every form uses the same grades
+      'formGrades': [
+        if (differs)
+          for (final f in others) {'form': f, 'grades': b}
+      ],
+    }, 'Results settings saved');
   }
 
   /// Mark limits of ONE exam, per form: the ticked forms share one set of
@@ -13603,7 +14253,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     var loadedB = texts(b);
     String? err;
 
-    String? check(List<TextEditingController> c, String who) {
+    String? check(List<TextEditingController> c, String who,
+        List<String> formsOfSet) {
       final lo = _num(c[0]) ?? 0;
       final hi = _num(c[1]);
       final tl = _num(c[2]) ?? 0;
@@ -13619,11 +14270,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       } else if (tl < 0 || (th > 0 && tl > th)) {
         return '$who: the lowest exam total must be 0 or more and not above '
             'the highest exam total.';
-      } else if (appSettings.value.grades.first > hi &&
-          hi >= appSettings.value.largestMax) {
-        return '$who: grade A starts at '
-            '${_fmtMark(appSettings.value.grades.first)}, above this '
-            'highest mark. Change the grades first.';
+      } else if (hi >= appSettings.value.largestMax) {
+        // grade A of the forms in this set must not be above the highest mark
+        final st = appSettings.value;
+        final aStart = [for (final f in formsOfSet) st.gradesFor(f).first]
+            .fold<double>(0, (x, y) => x > y ? x : y);
+        if (aStart > hi) {
+          return '$who: grade A starts at ${_fmtMark(aStart)}, above this '
+              'highest mark. Change the grades first.';
+        }
       }
       return null;
     }
@@ -13758,8 +14413,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     return;
                   }
                   final twoSets = others.isNotEmpty;
-                  final e = check(a, twoSets ? ticked.join(', ') : 'Limits') ??
-                      (twoSets ? check(b, others.join(', ')) : null);
+                  final e = check(a, twoSets ? ticked.join(', ') : 'Limits',
+                      ticked) ??
+                      (twoSets ? check(b, others.join(', '), others) : null);
                   if (e != null) {
                     setD(() => err = e);
                     return;
@@ -14505,24 +15161,66 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _saveButton('Save academic settings', _saveAcademic),
       ]);
 
-  Widget _resultsCard() => _card('Results', Icons.emoji_events, [
-    const Text('Grades', style: TextStyle(fontWeight: FontWeight.w600)),
-    const SizedBox(height: 2),
-    const Text('The lowest average mark for each grade. Below E is F.',
-        style: _hint),
-    const SizedBox(height: 12),
-    Wrap(spacing: 10, runSpacing: 10, children: [
-      for (var i = 0; i < _grade.length; i++)
-        SizedBox(
-          width: 96,
-          child: _numField(_grade[i], '${AppSettings.gradeLetters[i]} from'),
-        ),
-    ]),
-    const SizedBox(height: 6),
-    const Text('Marks that are already saved are not changed.', style: _hint),
-    const SizedBox(height: 8),
-    _saveButton('Save results settings', _saveResults),
-  ]);
+  Widget _resultsCard() {
+    final forms = ExamService.forms;
+    _gradeSel ??= _initGradeSel();
+    final sel = _gradeSel!;
+    final ticked = [for (final f in forms) if (sel.contains(f)) f];
+    final others = [for (final f in forms) if (!sel.contains(f)) f];
+    Widget fields(List<TextEditingController> c) =>
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          for (var i = 0; i < c.length; i++)
+            SizedBox(
+              width: 96,
+              child: _numField(c[i], '${AppSettings.gradeLetters[i]} from'),
+            ),
+        ]);
+    return _card('Results', Icons.emoji_events, [
+      const Text('Grades', style: TextStyle(fontWeight: FontWeight.w600)),
+      const SizedBox(height: 2),
+      const Text(
+          'The lowest average mark for each grade. Below E is F. Tick the '
+              'forms that share the same grades; the forms that are not '
+              'ticked (for example a form with other mark limits) get their '
+              'own grades below.',
+          style: _hint),
+      const SizedBox(height: 10),
+      Wrap(spacing: 8, runSpacing: 4, children: [
+        for (final f in forms)
+          FilterChip(
+            label: Text(f),
+            selected: sel.contains(f),
+            onSelected: _busy
+                ? null
+                : (on) => setState(() => on ? sel.add(f) : sel.remove(f)),
+          ),
+      ]),
+      const SizedBox(height: 14),
+      Text(
+          ticked.isEmpty
+              ? 'Tick at least one form.'
+              : (others.isEmpty
+              ? 'Grades for all forms'
+              : 'Grades for ${ticked.join(', ')}'),
+          style: const TextStyle(fontWeight: FontWeight.w700)),
+      const SizedBox(height: 8),
+      fields(_grade),
+      if (others.isNotEmpty && ticked.isNotEmpty) ...[
+        const SizedBox(height: 16),
+        const Divider(height: 1),
+        const SizedBox(height: 12),
+        Text('Grades for ${others.join(', ')}',
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        fields(_gradeB),
+      ],
+      const SizedBox(height: 6),
+      const Text('Marks that are already saved are not changed.',
+          style: _hint),
+      const SizedBox(height: 8),
+      _saveButton('Save results settings', _saveResults),
+    ]);
+  }
 
   Widget _signersCard() =>
       _card('Report card signatures', Icons.edit_note, [
@@ -15152,8 +15850,139 @@ int idsGenerated,
 int idConflicts,
 int phonesReplaced,
 int namesFixed,
-int loginKept
+int loginKept,
+int detailsUpdated
 });
+
+/// What an upload WOULD do, shown to the person before anything is saved.
+class ImportPreview {
+  final List<({String name, String cls})> newStudents;
+  final List<({String name, String cls, List<String> changes})> changed;
+  final List<String> newSections;
+  final int unchanged, skipped, noPhone;
+  const ImportPreview({
+    required this.newStudents,
+    required this.changed,
+    required this.newSections,
+    required this.unchanged,
+    required this.skipped,
+    required this.noPhone,
+  });
+  bool get isEmpty =>
+      newStudents.isEmpty && changed.isEmpty && newSections.isEmpty;
+}
+
+/// Lists what will change and asks for confirmation. true = save it.
+Future<bool> showImportPreview(BuildContext context, ImportPreview p) async {
+  if (p.isEmpty) {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Nothing to update'),
+        content: Text('Every student in the file is already saved with the '
+            'same information${p.unchanged > 0 ? ' (${p.unchanged} students)' : ''}. '
+            'Nothing was changed.'),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
+    return false;
+  }
+  const maxShown = 150;
+  const small = TextStyle(fontSize: 12.5, color: Colors.black87);
+  Widget title(String t, int n) => Padding(
+    padding: const EdgeInsets.only(top: 14, bottom: 4),
+    child: Text('$t ($n)',
+        style: const TextStyle(fontWeight: FontWeight.w700)),
+  );
+  Widget more(int total) => total <= maxShown
+      ? const SizedBox.shrink()
+      : Padding(
+    padding: const EdgeInsets.only(top: 4),
+    child: Text('... and ${total - maxShown} more',
+        style: const TextStyle(fontSize: 12, color: Colors.black54)),
+  );
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Confirm changes'),
+      content: SizedBox(
+        width: 540,
+        child: SingleChildScrollView(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                    'Nothing is saved yet. Only what is new will be written: '
+                        'new students and new or changed information. '
+                        '${p.unchanged} students already up to date are left '
+                        'as they are.',
+                    style: const TextStyle(fontSize: 13, color: Colors.black54)),
+                if (p.newSections.isNotEmpty) ...[
+                  title('New classes to create', p.newSections.length),
+                  Text(p.newSections.join(', '), style: small),
+                ],
+                if (p.newStudents.isNotEmpty) ...[
+                  title('New students to add', p.newStudents.length),
+                  for (final n in p.newStudents.take(maxShown))
+                    Text('\u2022 ${n.name}  \u2014  ${n.cls}', style: small),
+                  more(p.newStudents.length),
+                  if (p.noPhone > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                          '${p.noPhone} new students have no phone number '
+                              '(they cannot log in).',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black54)),
+                    ),
+                ],
+                if (p.changed.isNotEmpty) ...[
+                  title('Existing students to update', p.changed.length),
+                  for (final c in p.changed.take(maxShown))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${c.name}  \u2014  ${c.cls}',
+                                style: small.copyWith(
+                                    fontWeight: FontWeight.w600)),
+                            for (final ch in c.changes)
+                              Text('    $ch',
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.black87)),
+                          ]),
+                    ),
+                  more(p.changed.length),
+                ],
+                if (p.skipped > 0) ...[
+                  const SizedBox(height: 10),
+                  Text('${p.skipped} rows will be skipped (empty, invalid or '
+                      'repeated).',
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.black54)),
+                ],
+              ]),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel')),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(ctx, true),
+          icon: const Icon(Icons.check),
+          label: const Text('Apply changes'),
+        ),
+      ],
+    ),
+  );
+  return ok == true;
+}
 
 String importSummaryText(ImportOutcome r) {
   final l = <String>[
@@ -15169,6 +15998,9 @@ String importSummaryText(ImportOutcome r) {
     if (r.phonesReplaced > 0)
       '\u2022 Phone numbers replaced for ${r.phonesReplaced}.',
     if (r.namesFixed > 0) '\u2022 Name corrected for ${r.namesFixed}.',
+    if (r.detailsUpdated > 0)
+      '\u2022 Gender / Primary school / EMIS ID / Certificate saved or '
+          'updated for ${r.detailsUpdated} students.',
     if (r.loginKept > 0)
       '\u2022 ${r.loginKept} students already have a login: the phone number '
           'they log in with was kept as the first one.',
@@ -15304,6 +16136,11 @@ class StudentInfo {
 
   /// When the student was added (null while the server time is pending).
   final DateTime? createdAt;
+
+  /// Details that can come from the uploaded list ('' = not known):
+  /// Male / Female, the primary school, the EMIS ID, and how the student
+  /// joined (Certificate / Transfer).
+  final String gender, primarySchool, emisId, certificate;
   const StudentInfo(
       {required this.id,
         required this.name,
@@ -15312,6 +16149,10 @@ class StudentInfo {
         this.phones = const [],
         this.accountUid = '',
         this.studentNo = '',
+        this.gender = '',
+        this.primarySchool = '',
+        this.emisId = '',
+        this.certificate = '',
         this.createdAt});
 
   /// For lists and reports: all numbers on one line, '' when there is none.
@@ -16638,7 +17479,8 @@ class SchoolService {
   /// Student name). Missing sections are created. A student that is already
   /// saved (same class + name) is NOT added again: it is updated with the
   /// data of the file (Student ID, phone numbers, name).
-  Future<ImportOutcome> importFile(PlatformFile file) async {
+  Future<ImportOutcome?> importFile(PlatformFile file,
+      {Future<bool> Function(ImportPreview p)? confirm}) async {
     final bytes = file.bytes;
     if (bytes == null) throw Exception('Could not read the file.');
     final ext = (file.extension ?? '').toLowerCase();
@@ -16731,6 +17573,71 @@ class SchoolService {
         caseSensitive: false);
     final skipCols = <int>{};
     int? nameCol;
+
+    // Extra columns: Gender, Primary school, EMIS ID, Certificate / Transfer.
+    // They are never the student name, a phone number or the Student ID.
+    final extraHead = <String, RegExp>{
+      'gender': RegExp(r'gender|gendar|\bsex\b|jins|الجنس', caseSensitive: false),
+      'primarySchool': RegExp(
+          r'primary|elementary|previous\s*school|former\s*school|last\s*school|dugsiga',
+          caseSensitive: false),
+      'emisId': RegExp(r'emis', caseSensitive: false),
+      'certificate': RegExp(r'certificate|certificat|transfer|shahaado|شهادة|تحويل',
+          caseSensitive: false),
+    };
+    final extraCols = <String, int>{};
+    for (var i = 0; i < table.length && i < 5; i++) {
+      for (var j = 0; j < table[i].length; j++) {
+        for (final e in extraHead.entries) {
+          if (!extraCols.containsKey(e.key) &&
+              !extraCols.containsValue(j) &&
+              e.value.hasMatch(table[i][j])) {
+            extraCols[e.key] = j;
+          }
+        }
+      }
+      if (extraCols.isNotEmpty) break;
+    }
+    skipCols.addAll(extraCols.values);
+    String normGender(String v) {
+      final t = v.trim().toLowerCase();
+      if (t.isEmpty) return '';
+      if (RegExp(r'^(m|male|boy|lab|ragga|ذكر)$').hasMatch(t)) return 'Male';
+      if (RegExp(r'^(f|female|girl|dumar|dhedig|أنثى|انثى)$').hasMatch(t)) {
+        return 'Female';
+      }
+      return v.trim();
+    }
+
+    String normCert(String v) {
+      final t = v.trim().toLowerCase();
+      if (t.isEmpty) return '';
+      if (t.startsWith('cert')) return 'Certificate';
+      if (t.startsWith('trans')) return 'Transfer';
+      return v.trim();
+    }
+
+    Map<String, String> extrasOfRow(List<String> row) {
+      String at(String k) {
+        final j = extraCols[k];
+        return j == null || j >= row.length ? '' : row[j].trim();
+      }
+
+      return {
+        'gender': normGender(at('gender')),
+        'primarySchool': at('primarySchool'),
+        'emisId': cleanStudentNo(at('emisId')),
+        'certificate': normCert(at('certificate')),
+      };
+    }
+
+    const extraLabels = {
+      'gender': 'Gender',
+      'primarySchool': 'Primary school',
+      'emisId': 'EMIS ID',
+      'certificate': 'Certificate/Transfer',
+    };
+
     for (var i = 0; i < table.length && i < 5; i++) {
       final row = table[i];
       var found = false;
@@ -16769,6 +17676,7 @@ class SchoolService {
     List<String> phonesOfRow(List<String> row) {
       final out = <String>[];
       for (var j = 0; j < row.length; j++) {
+        if (extraCols.containsValue(j)) continue; // e.g. the EMIS ID
         if (phoneCols.isNotEmpty && !phoneCols.contains(j)) continue;
         for (final p in phonesIn(row[j])) {
           if (!out.contains(p)) out.add(p);
@@ -16785,7 +17693,9 @@ class SchoolService {
     final idCols = <int>{};
     for (var i = 0; i < table.length && i < 5; i++) {
       for (var j = 0; j < table[i].length; j++) {
-        if (!phoneCols.contains(j) && idHeadRe.hasMatch(table[i][j])) {
+        if (!phoneCols.contains(j) &&
+            !extraCols.containsValue(j) &&
+            idHeadRe.hasMatch(table[i][j])) {
           idCols.add(j);
         }
       }
@@ -16839,14 +17749,24 @@ class SchoolService {
     var newSections = 0, newStudents = 0, skipped = 0;
     var updated = 0, noPhone = 0;
 
-    // A student that is already saved is updated with the data of the file.
-    void syncExisting(
-        String docId, String fileName, List<String> phones, List<String> row) {
+    // What the upload will do, shown to the person before saving.
+    final pvNew = <({String name, String cls})>[];
+    final pvChanged = <({String name, String cls, List<String> changes})>[];
+    final pvSections = <String>[];
+    var detailsUpdated = 0;
+
+    // A student that is already saved: only what is new or different in the
+    // file is written (an empty cell never erases saved data).
+    void syncExisting(String docId, String fileName, List<String> phones,
+        List<String> row, String cls) {
       final d = stuData[docId] ?? const <String, dynamic>{};
       final upd = <String, Object?>{};
-      if (fileName.isNotEmpty && '${d['name'] ?? ''}' != fileName) {
+      final ch = <String>[];
+      final curName = '${d['name'] ?? ''}';
+      if (fileName.isNotEmpty && curName != fileName) {
         upd['name'] = fileName;
         namesFixed++;
+        ch.add('Name: $curName \u2192 $fileName');
       }
       if (phones.isNotEmpty) {
         final curPhones = _phoneList(d['phones'], d['phone']);
@@ -16862,14 +17782,38 @@ class SchoolService {
           upd['phone'] = next.first;
           upd['username'] = next.first;
           phonesReplaced++;
+          ch.add('Phone: ${curPhones.isEmpty ? '(none)' : curPhones.join(' / ')}'
+              ' \u2192 ${next.join(' / ')}');
         }
       }
-      upd.addAll(noFields(docId, row));
+      final noBefore = stuNo[docId]?.no;
+      final nf = noFields(docId, row);
+      upd.addAll(nf);
+      if (nf.isNotEmpty) {
+        ch.add('Student ID: ${noBefore ?? '(none)'} \u2192 ${nf['studentNo']}'
+            '${nf['studentNoAuto'] == true ? ' (generated)' : ''}');
+      }
+      var exChanged = false;
+      for (final e in extrasOfRow(row).entries) {
+        if (e.value.isEmpty) continue;
+        final cur = '${d[e.key] ?? ''}'.trim();
+        if (cur == e.value) continue;
+        upd[e.key] = e.value;
+        ch.add('${extraLabels[e.key]}: ${cur.isEmpty ? '(empty)' : cur}'
+            ' \u2192 ${e.value}');
+        exChanged = true;
+      }
+      if (exChanged) detailsUpdated++;
       if (upd.isEmpty) {
         unchanged++;
         return;
       }
       updated++;
+      pvChanged.add((
+      name: fileName.isNotEmpty ? fileName : curName,
+      cls: cls,
+      changes: ch
+      ));
       writes.add((b) => b.update(_students.doc(docId), {
         ...upd,
         'updatedBy': _uid,
@@ -16880,7 +17824,10 @@ class SchoolService {
     for (var i = 0; i < table.length; i++) {
       final row = table[i];
       if (row.every((c) => c.trim().isEmpty)) continue;
-      final parsed = _parseRow(row, skipCols: skipCols, nameCol: nameCol);
+      final parsed = _parseRow(
+          [for (var j = 0; j < row.length; j++) extraCols.containsValue(j) ? '' : row[j]],
+          skipCols: skipCols,
+          nameCol: nameCol);
       if (parsed == null) {
         if (i > 0) skipped++; // the first row is normally the header
         continue;
@@ -16897,7 +17844,8 @@ class SchoolService {
         final alt = classStudents[ck];
         if (alt != null) {
           if (handled.add(alt.id)) {
-            syncExisting(alt.id, name, phonesOfRow(row), row);
+            syncExisting(alt.id, name, phonesOfRow(row), row,
+                SectionInfo.code(form, section));
           } else {
             skipped++;
           }
@@ -16911,6 +17859,7 @@ class SchoolService {
         secIds[key] = newId;
         id = newId;
         newSections++;
+        pvSections.add(SectionInfo.code(form, section));
         writes.add((b) => b.set(ref, {
           'form': form,
           'name': section,
@@ -16928,7 +17877,7 @@ class SchoolService {
         // Already saved in this section: it is UPDATED, not added again.
         final old = existingDocs['$sid|$lname'];
         if (old != null && handled.add(old.id)) {
-          syncExisting(old.id, name, phones, row);
+          syncExisting(old.id, name, phones, row, thisClass);
           continue;
         }
         skipped++;
@@ -16951,8 +17900,10 @@ class SchoolService {
       }
       classesWithName.add(thisClass);
       newStudents++;
+      pvNew.add((name: name, cls: thisClass));
       if (phones.isEmpty) noPhone++;
       final nn = noForNew(row);
+      final exNew = extrasOfRow(row);
       addedLog.add({
         'type': 'added',
         'studentName': name,
@@ -16967,6 +17918,10 @@ class SchoolService {
         'phones': phones,
         // the first phone number is the username and the password
         'username': phones.isEmpty ? '' : phones.first,
+        ...{
+          for (final e in exNew.entries)
+            if (e.value.isNotEmpty) e.key: e.value
+        },
         'createdBy': _uid,
         'createdAt': FieldValue.serverTimestamp(),
       }));
@@ -16974,6 +17929,18 @@ class SchoolService {
     if (writes.isEmpty && skipped == 0 && unchanged == 0) {
       throw Exception(
           'No valid rows found. The columns must be: Form, Section, Student name.');
+    }
+    // Show what will change and ask before anything is saved.
+    if (confirm != null) {
+      final ok = await confirm(ImportPreview(
+        newStudents: pvNew,
+        changed: pvChanged,
+        newSections: pvSections,
+        unchanged: unchanged,
+        skipped: skipped,
+        noPhone: noPhone,
+      ));
+      if (!ok) return null; // cancelled: nothing was saved
     }
     for (var i = 0; i < writes.length; i += 400) {
       final batch = _db.batch();
@@ -16996,7 +17963,8 @@ class SchoolService {
     idConflicts: idConflicts,
     phonesReplaced: phonesReplaced,
     namesFixed: namesFixed,
-    loginKept: loginKept);
+    loginKept: loginKept,
+    detailsUpdated: detailsUpdated);
   }
 
   /// Deletes the section together with its students and attendance records.
@@ -17153,6 +18121,50 @@ class SchoolService {
   return ids;
 }
 
+/// Adds ONE student with every detail. An empty Student ID is generated.
+Future<String> addStudentFull({
+  required String sectionId,
+  required String name,
+  String studentNo = '',
+  String gender = '',
+  String phoneText = '',
+  String primarySchool = '',
+  String emisId = '',
+  String certificate = '',
+}) async {
+  final phones = phonesIn(phoneText);
+  final custom = studentNo.trim();
+  final no = custom.isNotEmpty
+      ? custom
+      : (await freshStudentNos(1)).first;
+  final ref = _students.doc();
+  await ref.set({
+    'studentNo': no,
+    'studentNoAuto': custom.isEmpty,
+    'sectionId': sectionId,
+    'name': name.trim(),
+    'gender': gender,
+    'phone': phones.isEmpty ? '' : phones.first,
+    'phones': phones,
+    'username': phones.isEmpty ? '' : phones.first,
+    'primarySchool': primarySchool.trim(),
+    'emisId': emisId.trim(),
+    'certificate': certificate,
+    'createdBy': _uid,
+    'createdAt': FieldValue.serverTimestamp(),
+  });
+  final label = (await _sectionLabels())[sectionId] ?? '';
+  await logStudentEvents([
+    {
+      'type': 'added',
+      'studentId': ref.id,
+      'studentName': name.trim(),
+      'to': label,
+    }
+  ]);
+  return ref.id;
+}
+
 Future<void> deleteStudent(String id) async {
   Map<String, dynamic>? m;
   try {
@@ -17228,6 +18240,10 @@ Stream<List<StudentInfo>> watchAllStudents() =>
             phones: _phoneList(d.data()['phones'], d.data()['phone']),
             accountUid: '${d.data()['accountUid'] ?? ''}',
             studentNo: '${d.data()['studentNo'] ?? ''}'.trim(),
+            gender: '${d.data()['gender'] ?? ''}'.trim(),
+            primarySchool: '${d.data()['primarySchool'] ?? ''}'.trim(),
+            emisId: '${d.data()['emisId'] ?? ''}'.trim(),
+            certificate: '${d.data()['certificate'] ?? ''}'.trim(),
             createdAt: (d.data()['createdAt'] as Timestamp?)?.toDate()),
     ]);
 
@@ -18628,8 +19644,12 @@ child: Text(
 'comma. The FIRST phone number becomes the student\'s '
 'username and password.\n\n'
 'Every class in the file (1A, 1B, 2C, 4B...) is created '
-'automatically if it does not exist yet. '
-'Students that are already in a section are skipped.',
+'automatically if it does not exist yet.\n\n'
+'Optional columns: Gender, Primary school, EMIS ID and '
+'Certificate/Transfer.\n\n'
+'If you upload the list again, only what is new is saved. '
+'Before anything is saved you will see exactly what will '
+'change, and you can cancel.',
 ),
 ),
 actions: [
@@ -18654,7 +19674,9 @@ if (res == null || res.files.isEmpty || !mounted) return;
 setState(() => _busy = true);
 final messenger = ScaffoldMessenger.of(context);
 try {
-final r = await widget.service.importFile(res.files.first);
+final r = await widget.service.importFile(res.files.first,
+confirm: (p) async => mounted && await showImportPreview(context, p));
+if (r == null) return; // cancelled or nothing to update
 if (mounted) await showImportOutcome(context, r);
 // every uploaded student with a phone number gets the login now
 if (mounted) {
@@ -19071,44 +20093,111 @@ if (secs.isEmpty) {
 _toast('There are no sections yet. Upload a student list first.');
 return;
 }
-final c = TextEditingController();
 var sectionId =
 secs.any((s) => s.id == presetId) ? presetId! : secs.first.id;
-final res = await showDialog<({String sectionId, List<String> names})>(
+var addMore = true;
+while (addMore && mounted) {
+addMore = false;
+final nameC = TextEditingController();
+final idC = TextEditingController();
+final phoneC = TextEditingController();
+final schoolC = TextEditingController();
+final emisC = TextEditingController();
+var gender = '';
+var cert = '';
+String? err;
+final res = await showDialog<bool>(
 context: context,
 builder: (ctx) => StatefulBuilder(
 builder: (ctx, setD) => AlertDialog(
-title: const Text('Add students'),
+title: const Text('Add student'),
 content: SizedBox(
-width: 380,
+width: 420,
 child: SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
 DropdownButtonFormField<String>(
 value: sectionId,
+isExpanded: true,
 decoration: const InputDecoration(
 labelText: 'Class / section',
 border: OutlineInputBorder()),
 items: [
 for (final s in secs)
-DropdownMenuItem(value: s.id, child: Text(s.fullName)),
+DropdownMenuItem(
+value: s.id, child: Text(s.fullName)),
 ],
 onChanged: (v) => setD(() => sectionId = v ?? sectionId),
 ),
 const SizedBox(height: 12),
 TextField(
-controller: c,
+controller: nameC,
 autofocus: true,
-minLines: 4,
-maxLines: 10,
-keyboardType: TextInputType.multiline,
+textCapitalization: TextCapitalization.words,
+decoration: InputDecoration(
+labelText: 'Full name *',
+errorText: err,
+border: const OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+DropdownButtonFormField<String>(
+value: gender,
+decoration: const InputDecoration(
+labelText: 'Gender', border: OutlineInputBorder()),
+items: const [
+DropdownMenuItem(value: '', child: Text('Not set')),
+DropdownMenuItem(value: 'Male', child: Text('Male')),
+DropdownMenuItem(
+value: 'Female', child: Text('Female')),
+],
+onChanged: (v) => setD(() => gender = v ?? ''),
+),
+const SizedBox(height: 12),
+TextField(
+controller: idC,
+decoration: const InputDecoration(
+labelText: 'Student ID',
+helperText: 'Leave empty to generate it',
+border: OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+TextField(
+controller: phoneC,
+keyboardType: TextInputType.phone,
+decoration: const InputDecoration(
+labelText: 'Phone numbers',
+helperText: 'Separate several numbers with a comma. '
+'The first one is the username / password.',
+helperMaxLines: 3,
+border: OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+TextField(
+controller: schoolC,
 textCapitalization: TextCapitalization.words,
 decoration: const InputDecoration(
-labelText: 'Student names',
-helperText: 'One student per line. Add the phone after a '
-'comma: Ali Hassan, 0634123456',
-helperMaxLines: 3,
-border: OutlineInputBorder(),
+labelText: 'Primary school',
+border: OutlineInputBorder()),
 ),
+const SizedBox(height: 12),
+TextField(
+controller: emisC,
+decoration: const InputDecoration(
+labelText: 'EMIS ID', border: OutlineInputBorder()),
+),
+const SizedBox(height: 12),
+DropdownButtonFormField<String>(
+value: cert,
+decoration: const InputDecoration(
+labelText: 'Certificate / Transfer',
+border: OutlineInputBorder()),
+items: const [
+DropdownMenuItem(value: '', child: Text('Not set')),
+DropdownMenuItem(
+value: 'Certificate', child: Text('Certificate')),
+DropdownMenuItem(
+value: 'Transfer', child: Text('Transfer')),
+],
+onChanged: (v) => setD(() => cert = v ?? ''),
 ),
 ]),
 ),
@@ -19117,55 +20206,77 @@ actions: [
 TextButton(
 onPressed: () => Navigator.pop(ctx),
 child: const Text('Cancel')),
+TextButton(
+onPressed: () {
+if (nameC.text.trim().isEmpty) {
+setD(() => err = 'Enter the student name');
+return;
+}
+addMore = true;
+Navigator.pop(ctx, true);
+},
+child: const Text('Add & next'),
+),
 FilledButton(
-onPressed: () => Navigator.pop(ctx, (
-sectionId: sectionId,
-names: [
-for (final l in c.text.split('\n'))
-if (l.trim().isNotEmpty) l.trim(),
-],
-)),
+onPressed: () {
+if (nameC.text.trim().isEmpty) {
+setD(() => err = 'Enter the student name');
+return;
+}
+Navigator.pop(ctx, true);
+},
 child: const Text('Add'),
 ),
 ],
 ),
 ),
 );
-c.dispose();
-if (res == null || res.names.isEmpty || !mounted) return;
-// Skip names that are already in that section (and repeated lines).
-final seen = <String>{
-for (final s in all)
-if (s.sectionId == res.sectionId) s.name.trim().toLowerCase(),
-};
-({String name, String phone}) parseLine(String l) {
-final m = RegExp(r'^(.*?)\s*[,;|\t]\s*(.+)$').firstMatch(l);
-return m == null
-? (name: l.trim(), phone: '')
-    : (name: m[1]!.trim(), phone: m[2]!);
-}
+final name = nameC.text.trim();
+final stuNo = idC.text.trim();
+final phoneText = phoneC.text.trim();
+final school = schoolC.text.trim();
+final emis = emisC.text.trim();
+nameC.dispose();
+idC.dispose();
+phoneC.dispose();
+schoolC.dispose();
+emisC.dispose();
+if (res != true || name.isEmpty || !mounted) return;
 
-final fresh = [
-for (final l in res.names)
-if (parseLine(l).name.isNotEmpty &&
-seen.add(parseLine(l).name.toLowerCase()))
-parseLine(l),
-];
-final skipped = res.names.length - fresh.length;
-if (fresh.isEmpty) {
-_toast('Nothing added: ${skipped == 1 ? 'that student is' : 'those students are'} already in the section.');
+final dupName = all.any((s) =>
+s.sectionId == sectionId &&
+s.name.trim().toLowerCase() == name.toLowerCase());
+if (dupName) {
+_toast('$name is already in that section.');
+addMore = false;
+return;
+}
+if (stuNo.isNotEmpty &&
+all.any((s) => s.studentNo.toLowerCase() == stuNo.toLowerCase())) {
+_toast('Student ID $stuNo is already used by another student.');
+addMore = false;
 return;
 }
 try {
-final newIds = await _service.addStudentsWithPhones(res.sectionId, fresh);
-_toast('Added ${fresh.length} student${fresh.length == 1 ? '' : 's'}'
-'${skipped > 0 ? ' ($skipped already there, skipped)' : ''}');
-// every student with a phone number gets the login right away
-if (mounted && fresh.any((x) => phonesIn(x.phone).isNotEmpty)) {
-await runAccountCreation(context, ids: newIds, quiet: true);
+final id = await _service.addStudentFull(
+sectionId: sectionId,
+name: name,
+studentNo: stuNo,
+gender: gender,
+phoneText: phoneText,
+primarySchool: school,
+emisId: emis,
+certificate: cert,
+);
+_toast('Added $name');
+// a student with a phone number gets the login right away
+if (mounted && phonesIn(phoneText).isNotEmpty) {
+await runAccountCreation(context, ids: [id], quiet: true);
 }
 } catch (e) {
 _toast('Failed: ${_err(e)}');
+return;
+}
 }
 }
 
@@ -19560,17 +20671,21 @@ width: 400,
 child: Text(
 'Choose an Excel (.xlsx) or CSV file. '
 'Use these columns: the class, the student name and the phone number:\n\n'
-'Class  |  Student name  |  Phone\n'
-'1A  |  Ali Hassan  |  0634123456\n'
-'1B  |  Amina Yusuf  |  0634765432\n'
-'2C  |  Omar Abdi  |  0634111222\n\n'
+'Class  |  Student name  |  Phone  |  Gender  |  Primary school  |  EMIS ID  |  Certificate/Transfer\n'
+'1A  |  Ali Hassan  |  0634123456  |  Male  |  Hodan Primary  |  102345  |  Certificate\n'
+'1B  |  Amina Yusuf  |  0634765432  |  Female  |  Nasteexo Primary  |  102346  |  Transfer\n\n'
+'Gender, Primary school, EMIS ID and Certificate/Transfer are '
+'optional columns.\n\n'
 'Separate Form | Section | Student name columns also work.\n\n'
 'Add a Phone column (Phone, Mobile or Tel) to save the phone '
 'numbers. The FIRST phone number becomes the student\'s '
 'username and password.\n\n'
 'A class that does not exist yet (1A, 2C, 4B...) is created '
-'automatically. Students that are already in a section are '
-'skipped, so it is safe to upload the same file again.\n\n'
+'automatically.\n\n'
+'If you upload the list again, only what is new is saved: new '
+'students and new or changed information of students who are '
+'already saved. Before anything is saved you will see exactly '
+'what will change, and you can cancel.\n\n'
 'Tip: use the download button to get an empty template.',
 ),
 ),
@@ -19595,7 +20710,9 @@ allowedExtensions: ['xlsx', 'csv', 'txt'],
 if (res == null || res.files.isEmpty || !mounted) return;
 setState(() => _busy = true);
 try {
-final r = await _service.importFile(res.files.first);
+final r = await _service.importFile(res.files.first,
+confirm: (p) async => mounted && await showImportPreview(context, p));
+if (r == null) return; // cancelled or nothing to update
 if (mounted) await showImportOutcome(context, r);
 // every uploaded student with a phone number gets the login now
 if (mounted) {
@@ -19628,16 +20745,20 @@ _toast('Download failed: ${_err(e)}');
 
 Future<void> _exportList(
 List<StudentInfo> shown, Map<String, SectionInfo> secById) {
-final b = StringBuffer('Class,Student name,Phone\r\n');
+final b = StringBuffer('Class,Student name,Phone,Gender,Primary school,'
+'EMIS ID,Certificate/Transfer\r\n');
 for (final s in shown) {
 b.write('${_csvCell(secById[s.sectionId]?.label ?? '')},'
-'${_csvCell(s.name)},${_csvCell(s.phone)}\r\n');
+'${_csvCell(s.name)},${_csvCell(s.phone)},${_csvCell(s.gender)},'
+'${_csvCell(s.primarySchool)},${_csvCell(s.emisId)},'
+'${_csvCell(s.certificate)}\r\n');
 }
 return _saveCsv('Students-${DateTime.now().year}.csv', b.toString());
 }
 
 Future<void> _template() =>
-_saveCsv('Students-template.csv', 'Class,Student name,Phone\r\n');
+_saveCsv('Students-template.csv',
+'Class,Student name,Phone,Gender,Primary school,EMIS ID,Certificate/Transfer\r\n');
 
 // ---------------- Screen ----------------
 Widget _frame(Widget body,
@@ -20455,8 +21576,8 @@ final avgs = [for (final e in exams) data[e]!.average!];
 final overall = avgs.fold(0.0, (a, b) => a + b) / avgs.length;
 // grade limits are percentages: marks are compared with the highest
 // subject mark of the exam (20, 50 ...), not with 100
-final mx = _gradeMax(exams.first);
-final overallG = _gradeOf(overall, max: mx);
+final mx = _gradeMax(exams.first, _form);
+final overallG = _gradeOf(overall, max: mx, form: _form);
 final multi = exams.length > 1;
 
 double? subAvg(String sub) {
@@ -20502,7 +21623,7 @@ textAlign: TextAlign.center,
 style: TextStyle(fontWeight: FontWeight.w800, color: c)),
 );
 Widget markPill(double v) =>
-pill(_fmtMark(v), _gradeColor(_gradeOf(v, max: mx)));
+pill(_fmtMark(v), _gradeColor(_gradeOf(v, max: mx, form: _form)));
 Widget gradeBadge(String g, {double size = 34}) => Container(
 width: size,
 height: size,
@@ -20549,7 +21670,7 @@ style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: c)),
 }
 
 // grading key, e.g. "A 80+ · B 70+ · ... · F below 40"
-final limits = appSettings.value.grades;
+final limits = appSettings.value.gradesFor(_form);
 final key = [
 for (var i = 0; i < limits.length; i++)
 '${AppSettings.gradeLetters[i]} ${_fmtMark(limits[i])}+',
@@ -20615,7 +21736,7 @@ Text(f1(bestV),
 style: TextStyle(
 fontSize: 12,
 fontWeight: FontWeight.w700,
-color: _gradeColor(_gradeOf(bestV, max: mx)))),
+color: _gradeColor(_gradeOf(bestV, max: mx, form: _form)))),
 ]),
 ),
 ]),
@@ -20706,7 +21827,7 @@ decoration: BoxDecoration(color: cs.primary.withAlpha(18)),
 children: [
 label('Grade'),
 for (var i = 0; i < exams.length; i++)
-cell(gradeBadge(_gradeOf(avgs[i], max: _gradeMax(exams[i])))),
+cell(gradeBadge(_gradeOf(avgs[i], max: _gradeMax(exams[i], _form), form: _form))),
 if (multi) cell(gradeBadge(overallG)),
 ]),
 ],
@@ -20728,7 +21849,7 @@ style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
 
 Widget _examCard(String exam, ResultMarks r) {
 final avg = r.average!;
-final g = _gradeOf(avg, max: _gradeMax(exam));
+final g = _gradeOf(avg, max: _gradeMax(exam, _form), form: _form);
 return Card(
 child: Padding(
 padding: const EdgeInsets.all(16),
@@ -22082,6 +23203,9 @@ const green = Color(0xFF16A085);
 const orange = Color(0xFFE67E22);
 const purple = Color(0xFF8E44AD);
 final gender = '${m['gender'] ?? ''}'.trim();
+final primarySchool = '${m['primarySchool'] ?? ''}'.trim();
+final emisId = '${m['emisId'] ?? ''}'.trim();
+final certificate = '${m['certificate'] ?? ''}'.trim();
 final created = m['createdAt'] as Timestamp?;
 final updated = m['updatedAt'] as Timestamp?;
 return Card(
@@ -22171,6 +23295,13 @@ phones.isEmpty
     : Column(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [for (final p in phones) _tv(p)])),
+_tile(Icons.school_outlined, green, 'Primary school',
+_tv(primarySchool.isEmpty ? 'Not set' : primarySchool)),
+_tile(Icons.numbers, green, 'EMIS ID',
+_tv(emisId.isEmpty ? 'Not set' : emisId)),
+_tile(Icons.workspace_premium_outlined, green,
+'Certificate / Transfer',
+_tv(certificate.isEmpty ? 'Not set' : certificate)),
 _tile(
 Icons.event_available_outlined,
 green,
@@ -22302,7 +23433,7 @@ v.average! /
 _gradeMax(v.exam, widget.section.form) *
 100) /
 vs.length;
-final g = _gradeOf(oPct);
+final g = _gradeOf(oPct, form: widget.section.form);
 return _statTile(Icons.emoji_events_outlined, 'Average', _f1(o),
 _gradeColor(g), 'Grade $g');
 },
@@ -22364,7 +23495,7 @@ if (v.average != null)
 v.average! / _gradeMax(v.exam, widget.section.form) * 100
 ].fold(0.0, (a, b) => a + b) /
 avgs.length;
-final g = _gradeOf(overallPct);
+final g = _gradeOf(overallPct, form: widget.section.form);
 final bySub = <String, List<double>>{};
 for (final v in views) {
 v.counted.forEach((k, x) => (bySub[k] ??= []).add(x));
@@ -22443,7 +23574,7 @@ Future<_RcData> _cardData(_ExamView v) async {
 final avg = v.average;
 final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
 final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
-final g = avg == null ? null : _gradeOf(avg, max: maxMark);
+final g = avg == null ? null : _gradeOf(avg, max: maxMark, form: widget.section.form);
 final subs = <String>[
 for (final s in ExamService.subjects)
 if (v.marks.containsKey(s) || v.cheatedSubs.contains(s)) s,
@@ -22477,7 +23608,7 @@ _RcRow(
 s,
 v.marks[s],
 maxMark,
-v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!, max: maxMark),
+v.marks[s] == null ? '-' : _gradeOf(v.marks[s]!, max: maxMark, form: widget.section.form),
 v.cheatedAll || v.cheatedSubs.contains(s),
 ),
 ],
@@ -22489,9 +23620,9 @@ grade: g,
 cheatedAll: v.cheatedAll,
 belowMin: limits.totalMin > 0 && avg != null && v.total < limits.totalMin,
 scale: [
-for (var i = 0; i < st.grades.length; i++)
-'${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.grades[i])}',
-'F below ${_fmtMark(st.grades.last)}',
+for (var i = 0; i < st.gradesFor(widget.section.form).length; i++)
+'${AppSettings.gradeLetters[i]} >= ${_fmtMark(st.gradesFor(widget.section.form)[i])}',
+'F below ${_fmtMark(st.gradesFor(widget.section.form).last)}',
 ],
 attTotal: attTotal,
 attPresent: attPresent,
@@ -22572,7 +23703,7 @@ Widget _examCard(_ExamView v, bool expanded) {
 final avg = v.average;
 final limits = appSettings.value.limitsFor(v.exam, widget.section.form);
 final maxMark = limits.maxMark > 0 ? limits.maxMark : 100.0;
-final g = avg == null ? null : _gradeOf(avg, max: maxMark);
+final g = avg == null ? null : _gradeOf(avg, max: maxMark, form: widget.section.form);
 final gs = g ?? 'F'; // grade used where an average exists
 final subs = <String>[
 for (final s in ExamService.subjects)
@@ -22619,7 +23750,7 @@ return w == null ? Expanded(child: x) : SizedBox(width: w, child: x);
 Widget subjectRow(int i, String sub) {
 final cheated = v.cheatedAll || v.cheatedSubs.contains(sub);
 final mark = v.marks[sub];
-final gr = mark == null ? null : _gradeOf(mark, max: maxMark);
+final gr = mark == null ? null : _gradeOf(mark, max: maxMark, form: widget.section.form);
 final c = cheated
 ? kCheatColor
     : gr == null
@@ -22839,11 +23970,11 @@ style: const TextStyle(fontSize: 12.5, height: 1.45)));
 final scale = _rcPanel(
 'GRADE SCALE',
 Wrap(spacing: 6, runSpacing: 6, children: [
-for (var i = 0; i < st.grades.length; i++)
+for (var i = 0; i < st.gradesFor(widget.section.form).length; i++)
 _rcChip(
-'${AppSettings.gradeLetters[i]} ≥ ${_fmtMark(st.grades[i])}',
+'${AppSettings.gradeLetters[i]} ≥ ${_fmtMark(st.gradesFor(widget.section.form)[i])}',
 _rcZebra),
-_rcChip('F below ${_fmtMark(st.grades.last)}',
+_rcChip('F below ${_fmtMark(st.gradesFor(widget.section.form).last)}',
 kRed.withAlpha(30)),
 ]),
 );
@@ -25009,7 +26140,8 @@ return out;
 
 // ---------------- PDF (and Print) ----------------
 static Future<Uint8List> pdf(List<_DrTable> tables, String period,
-{String title = 'DAILY ATTENDANCE REPORT'}) async {
+{String title = 'DAILY ATTENDANCE REPORT',
+bool singleSheet = false}) async {
 final doc = pw.Document();
 final lb = schoolLogo.value.bytes;
 final logo = lb == null ? null : pw.MemoryImage(lb);
@@ -25028,11 +26160,9 @@ fontWeight: head || color != null
     : pw.FontWeight.normal,
 color: color)),
 );
-for (final tb in tables) {
-doc.addPage(pw.MultiPage(
-pageFormat: PdfPageFormat.a4,
-margin: const pw.EdgeInsets.all(28),
-build: (ctx) => [
+// Logo + title + period: on every page, or once at the top when the whole
+// report is put on a single sheet.
+pw.Widget heading() =>
 pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
 if (logo != null) ...[
 pw.Image(logo, height: 46),
@@ -25049,8 +26179,9 @@ pw.SizedBox(height: 2),
 pw.Text(_t(period), style: const pw.TextStyle(fontSize: 10)),
 ]),
 ),
-]),
-pw.SizedBox(height: 10),
+]);
+// Title band, table and notes of ONE table.
+List<pw.Widget> tableBody(_DrTable tb) => [
 pw.Container(
 width: double.infinity,
 color: navy,
@@ -25096,15 +26227,42 @@ child: pw.Text(_t(n),
 style: pw.TextStyle(
 fontSize: 10, fontWeight: pw.FontWeight.bold)),
 ),
+];
+if (singleSheet) {
+// ONE continuous document: heading once, then every table one after
+// the other (a new page starts only when the page is really full).
+doc.addPage(pw.MultiPage(
+pageFormat: PdfPageFormat.a4,
+margin: const pw.EdgeInsets.all(28),
+build: (ctx) => [
+heading(),
+pw.SizedBox(height: 10),
+for (var i = 0; i < tables.length; i++) ...[
+if (i > 0) pw.SizedBox(height: 16),
+...tableBody(tables[i]),
+],
 ],
 ));
+} else {
+for (final tb in tables) {
+doc.addPage(pw.MultiPage(
+pageFormat: PdfPageFormat.a4,
+margin: const pw.EdgeInsets.all(28),
+build: (ctx) => [
+heading(),
+pw.SizedBox(height: 10),
+...tableBody(tb),
+],
+));
+}
 }
 return Uint8List.fromList(await doc.save());
 }
 
 // ---------------- Excel ----------------
 static Uint8List xlsx(List<_DrTable> tables, String period,
-{String title = 'DAILY ATTENDANCE REPORT'}) {
+{String title = 'DAILY ATTENDANCE REPORT',
+bool singleSheet = false}) {
 const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 String col(int i) {
 var n = i + 1;
@@ -25141,8 +26299,15 @@ return u;
 
 final sheets = <String>[];
 final names = <String>[];
-for (final tb in tables) {
-final cols = tb.headers.length;
+// Normal: one worksheet per table. Single sheet: every table stacked on
+// ONE worksheet (title once at the top, a blank row between tables).
+final groups = singleSheet && tables.isNotEmpty
+? <List<_DrTable>>[tables]
+    : <List<_DrTable>>[
+for (final t in tables) [t]
+];
+for (final group in groups) {
+final cols = group.map((t) => t.headers.length).reduce((a, b) => a > b ? a : b);
 final rows = StringBuffer();
 final merges = <String>[];
 String band(int r, String text, int style) {
@@ -25157,14 +26322,21 @@ return b.toString();
 
 rows.write(band(1, title, 5));
 rows.write(band(2, period, 10));
-rows.write(band(3, tb.title, 10));
-final head = StringBuffer('<row r="5" ht="26" customHeight="1">');
-for (var c = 0; c < cols; c++) {
-head.write(sc(c, 5, tb.headers[c], 1));
+var r = 3;
+var freezeRow = 5;
+for (var gi = 0; gi < group.length; gi++) {
+final tb = group[gi];
+rows.write(band(r, tb.title, 10));
+r++;
+if (!singleSheet) r++; // keep the original layout (blank row 4)
+final head = StringBuffer('<row r="$r" ht="26" customHeight="1">');
+for (var c = 0; c < tb.headers.length; c++) {
+head.write(sc(c, r, tb.headers[c], 1));
 }
 head.write('</row>');
 rows.write(head);
-var r = 6;
+if (gi == 0) freezeRow = r;
+r++;
 for (final row in tb.rows) {
 final line = StringBuffer('<row r="$r">');
 for (var c = 0; c < row.length; c++) {
@@ -25189,17 +26361,25 @@ for (final n in tb.notes) {
 rows.write('<row r="$r">${sc(0, r, n, 6)}</row>');
 r++;
 }
+if (singleSheet) r++; // blank row before the next table
+}
 final colsXml = StringBuffer('<cols>');
 for (var c = 0; c < cols; c++) {
-final w = (tb.weights[c] * 8).clamp(8, 44);
+var wt = 1.0;
+for (final t in group) {
+if (c < t.weights.length && t.weights[c] > wt) wt = t.weights[c];
+}
+final w = (wt * 8).clamp(8, 44);
 colsXml.write(
 '<col min="${c + 1}" max="${c + 1}" width="$w" customWidth="1"/>');
 }
 colsXml.write('</cols>');
+final pane = singleSheet
+? ''
+    : '<pane ySplit="$freezeRow" topLeftCell="A${freezeRow + 1}" activePane="bottomLeft" state="frozen"/>';
 sheets.add('$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
 '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
-'<sheetViews><sheetView workbookViewId="0">'
-'<pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/>'
+'<sheetViews><sheetView workbookViewId="0">$pane'
 '</sheetView></sheetViews>'
 '<sheetFormatPr defaultRowHeight="16"/>'
 '$colsXml<sheetData>$rows</sheetData>'
@@ -25208,7 +26388,7 @@ sheets.add('$xmlHead<worksheet xmlns="http://schemas.openxmlformats.org/spreadsh
 '<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
 '<pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0"/>'
 '</worksheet>');
-names.add(sheetName(tb.title));
+names.add(singleSheet ? 'Daily attendance' : sheetName(group.first.title));
 }
 
 const rel =
@@ -25284,7 +26464,8 @@ return Uint8List.fromList(bytes);
 
 // ---------------- Word ----------------
 static Uint8List docx(List<_DrTable> tables, String period,
-{String title = 'DAILY ATTENDANCE REPORT'}) {
+{String title = 'DAILY ATTENDANCE REPORT',
+bool singleSheet = false}) {
 String x(String t) => ExamService._xml(_t(t));
 const ns =
 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -25334,9 +26515,13 @@ final widths = [
 for (final w in tb.weights) (pageW * w / total).floor()
 ];
 widths[1] += pageW - widths.fold<int>(0, (a, b) => a + b);
-body.write(para(title,
-sz: 30, sp: 30, pageBreak: ti > 0));
+if (!singleSheet || ti == 0) {
+// single sheet: the heading appears once, at the very top
+body.write(para(title, sz: 30, sp: 30));
 body.write(para(period, b: false, sz: 20, sp: 20));
+} else {
+body.write(para('', b: false, sz: 20, sp: 120)); // gap between tables
+}
 body.write(
 '<w:tbl><w:tblPr><w:tblW w:w="$pageW" w:type="dxa"/>$tblBorders'
 '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>'
@@ -25663,6 +26848,8 @@ String _view = 'entry'; // 'entry' (take attendance) | 'report' (analysis)
 Future<_DrAnalysis>? _anFuture;
 bool _rDetail = true; // the download also lists the students of each class
 String _rShift = ''; // '' = Shift A + Shift B
+/// Download / print all classes on one continuous sheet (no page per class).
+final ValueNotifier<bool> _rSingleSheet = ValueNotifier<bool>(false);
 String _rStatus = ''; // '' = all students, 'a' = absent, 'p' = never absent
 String _show = 'all'; // list filter: all | p (present) | a (absent)
 
@@ -26464,15 +27651,19 @@ Align(
 alignment: Alignment.centerLeft,
 child: _ReportMenuButton(
 label: 'Download / print',
+singleSheet: _rSingleSheet,
 fileName: () => _safeFile(
 'Daily-attendance-report-${DateFormat('yyyy-MM-dd').format(_rFrom)}'
 '${_rFrom == _rTo ? '' : '-to-${DateFormat('yyyy-MM-dd').format(_rTo)}'}'),
 build: () async => DailyAttendanceReport.pdf(
-await _reportTables(), _reportPeriod),
+await _reportTables(), _reportPeriod,
+singleSheet: _rSingleSheet.value),
 buildXlsx: () async => DailyAttendanceReport.xlsx(
-await _reportTables(), _reportPeriod),
+await _reportTables(), _reportPeriod,
+singleSheet: _rSingleSheet.value),
 buildDocx: () async => DailyAttendanceReport.docx(
-await _reportTables(), _reportPeriod),
+await _reportTables(), _reportPeriod,
+singleSheet: _rSingleSheet.value),
 ),
 ),
 const SizedBox(height: 12),
@@ -31363,14 +32554,19 @@ return x == 'absent' || x == 'new' || x == 'cheated';
 /// B from 70 ...) are PERCENTAGES, so the mark is turned into a percentage
 /// of [max] first (the highest subject mark of the exam, e.g. 20 -> 12.2 is
 /// 61% = C). With the default max of 100 the mark is used as it is.
-String _gradeOf(double avg, {double max = 100}) {
+String _gradeOf(double avg, {double max = 100, String form = ''}) {
 final pct = max > 0 ? avg / max * 100 : avg;
-final limits = appSettings.value.grades;
+// the grade limits of the student's form (Settings > Grades & rules)
+final limits = appSettings.value.gradesFor(form);
 for (var i = 0; i < limits.length; i++) {
 if (pct >= limits[i] - 1e-9) return AppSettings.gradeLetters[i];
 }
 return 'F';
 }
+
+/// The form of a group of students (the first student's form).
+String _formOfStudents(List<StudentInfo> students) =>
+students.isEmpty ? '' : SchoolService.formOf(students.first);
 
 /// Highest subject mark of [exam] for [form] (100 when not set).
 double _gradeMax(String exam, [String form = '']) {
@@ -31685,7 +32881,7 @@ if (sum) ...[
 c == null ? '' : _n1(r.totalMax),
 p == null ? '' : _pct1(p),
 ],
-p == null ? '' : _gradeOf(p),
+p == null ? '' : _gradeOf(p, form: SchoolService.formOf(r.student)),
 c == null ? '' : '${r.rank}',
 ],
 ].join(','));
@@ -32049,9 +33245,14 @@ final bool enabled;
 final bool iconOnly;
 final String label;
 
+/// When given, the menu shows a "Single sheet" tick box. The report
+/// builders read [singleSheet].value when the person taps.
+final ValueNotifier<bool>? singleSheet;
+
 /// Shown to teachers too (the Academic page); other reports are admin only.
 final bool allowScoped;
 const _ReportMenuButton({
+this.singleSheet,
 required this.build,
 this.buildXlsx,
 this.buildDocx,
@@ -32121,7 +33322,27 @@ child: SizedBox(
 width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5)),
 );
 }
-final items = [
+final single = widget.singleSheet;
+final items = <PopupMenuEntry<String>>[
+if (single != null) ...[
+PopupMenuItem<String>(
+padding: EdgeInsets.zero,
+child: StatefulBuilder(
+builder: (ctx, setM) => CheckboxListTile(
+dense: true,
+controlAffinity: ListTileControlAffinity.leading,
+value: single.value,
+title: const Text('Single sheet (all classes together)'),
+subtitle: const Text('No page break between classes'),
+onChanged: (v) {
+single.value = v ?? false;
+setM(() {});
+},
+),
+),
+),
+const PopupMenuDivider(),
+],
 if (widget.buildXlsx != null)
 const PopupMenuItem(
 value: 'xlsx',
@@ -34551,7 +35772,7 @@ var failed = false;
 if (real > 0) {
 final avg = sum / real;
 if (rule == null) {
-failed = _gradeOf(avg, max: _gradeMax(exam, form)) == 'F';
+failed = _gradeOf(avg, max: _gradeMax(exam, form), form: form) == 'F';
 } else if (rule.total) {
 failed = blank == 0 && sum < rule.below - 1e-9;
 } else {
@@ -35385,7 +36606,7 @@ final avg = r?.average;
 final g = avg == null
 ? null
     : _gradeOf(avg,
-max: _gradeMax(_ResultPrefs.exam, SchoolService.formOf(s)));
+max: _gradeMax(_ResultPrefs.exam, SchoolService.formOf(s)), form: SchoolService.formOf(s));
 // Marks are typed straight in the list (not for a student login).
 final sForm = secOf[s.sectionId]?.form;
 final inlineSubs = teacherScope.value.isStudent
@@ -35680,7 +36901,7 @@ return v.isEmpty ? null : v.fold<double>(0.0, (a, b) => a + b) / v.length;
 }
 
 String _gradeFor(StudentInfo s, double avg) =>
-_gradeOf(avg, max: _gradeMax(widget.exam, SchoolService.formOf(s)));
+_gradeOf(avg, max: _gradeMax(widget.exam, SchoolService.formOf(s)), form: SchoolService.formOf(s));
 
 /// Failed: by the rule the administrator set for this exam (average or
 /// total below a number); with no rule = grade F (average below the lowest
@@ -36425,12 +37646,12 @@ fontWeight: FontWeight.w800)),
 const SizedBox(width: 6),
 Text(
 _gradeOf(avg,
-max: _gradeMax(widget.exam, SchoolService.formOf(s))),
+max: _gradeMax(widget.exam, SchoolService.formOf(s)), form: SchoolService.formOf(s)),
 style: TextStyle(
 fontWeight: FontWeight.w800,
 color: _gradeColor(_gradeOf(avg,
 max: _gradeMax(
-widget.exam, SchoolService.formOf(s)))))),
+widget.exam, SchoolService.formOf(s)), form: SchoolService.formOf(s))))),
 ]),
 ),
 ]),
@@ -36783,7 +38004,7 @@ if (r.marks.isEmpty && r.cheatedSubs.isEmpty) {
 return const Text('No result yet.');
 }
 final avg = r.average;
-final g = avg == null ? null : _gradeOf(avg, max: _gradeMax(exam));
+final g = avg == null ? null : _gradeOf(avg, max: _gradeMax(exam, SchoolService.formOf(student)), form: SchoolService.formOf(student));
 return SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
 for (final sub in ExamService.subjects)
@@ -37023,7 +38244,7 @@ final total = r.marks.values.fold(0.0, (a, b) => a + b);
 final avg = r.marks.isEmpty ? null : total / r.marks.length;
 final g = avg == null
 ? null
-    : _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''));
+    : _gradeOf(avg, max: _gradeMax(widget.exam, widget.form ?? ''), form: widget.form ?? '');
 
 return AlertDialog(
 title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -37961,6 +39182,9 @@ useMaterial3: true,
 colorSchemeSeed: const Color(0xFF3498DB),
 scaffoldBackgroundColor: const Color(0xFFF2F2F2),
 ),
+// Lets people highlight and copy text everywhere in the system.
+builder: (context, child) =>
+SelectionArea(child: child ?? const SizedBox.shrink()),
 home: StreamBuilder<User?>(
 stream: FirebaseAuth.instance.authStateChanges(),
 builder: (context, snap) {
