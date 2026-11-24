@@ -377,6 +377,196 @@ class ZipImportPlan {
   const ZipImportPlan({required this.items, required this.skipped});
 }
 
+// ======================= ACADEMIC YEARS =======================
+// Every academic year has its own students, classes, exams, results,
+// attendance, discipline ... The year the school started with keeps living
+// in the original collections (so nothing old is moved or lost); every other
+// year is stored under  years/<year>/<collection>.  Users, teachers and the
+// general settings are shared by all years.
+
+/// '' = the base year (the original collections). Changing it rebuilds the app.
+final ValueNotifier<String> activeYear = ValueNotifier<String>('');
+
+/// The year that lives in the original collections, e.g. 2026-2027.
+final ValueNotifier<String> baseYear = ValueNotifier<String>('');
+
+/// All the years that were opened so far (newest first).
+final ValueNotifier<List<String>> knownYears =
+ValueNotifier<List<String>>(const []);
+
+/// The year shown on screen.
+String get shownYear =>
+    activeYear.value.isNotEmpty ? activeYear.value : baseYear.value;
+
+extension YearScope on FirebaseFirestore {
+  /// A collection that belongs to one academic year.
+  CollectionReference<Map<String, dynamic>> yearCol(String name) {
+    final y = activeYear.value;
+    if (y.isEmpty || y == baseYear.value) return collection(name);
+    return collection('years').doc(y).collection(name);
+  }
+}
+
+final RegExp _yearFormat = RegExp(r'^(\d{4})-(\d{4})$');
+
+bool validYearName(String y) {
+  final m = _yearFormat.firstMatch(y.trim());
+  if (m == null) return false;
+  return int.parse(m.group(2)!) == int.parse(m.group(1)!) + 1;
+}
+
+/// Reads the list of years (and which one is the base year).
+Future<void> loadYears() async {
+  try {
+    final ref =
+    FirebaseFirestore.instance.collection('settings').doc('years');
+    final d = await ref.get();
+    final m = d.data() ?? {};
+    var base = '${m['base'] ?? ''}'.trim();
+    if (base.isEmpty) {
+      base = (await ExamService().getHeading()).academicYear.trim();
+      try {
+        await ref.set({
+          'base': base,
+          'list': [base]
+        }, SetOptions(merge: true));
+      } catch (_) {}
+    }
+    final list = <String>{
+      base,
+      if (m['list'] is List)
+        for (final e in m['list'] as List)
+          if ('$e'.trim().isNotEmpty) '$e'.trim(),
+    }.toList()
+      ..sort((a, b) => b.compareTo(a));
+    baseYear.value = base;
+    knownYears.value = list;
+  } catch (_) {
+    if (baseYear.value.isEmpty) {
+      baseYear.value = (await ExamService().getHeading().catchError(
+              (_) => const ExamHeading()))
+          .academicYear
+          .trim();
+    }
+    if (knownYears.value.isEmpty && baseYear.value.isNotEmpty) {
+      knownYears.value = [baseYear.value];
+    }
+  }
+}
+
+/// Open another academic year: everything on screen reloads from that year.
+void switchYear(String year) {
+  final y = year.trim();
+  final next = (y == baseYear.value) ? '' : y;
+  if (next == activeYear.value) return;
+  ResultService.resetYearCaches();
+  SchoolService.sectionFormById.clear();
+  _AcademicStore.cache.clear();
+  activeYear.value = next;
+}
+
+/// Adds a new year to the list (and remembers it for everyone).
+Future<void> addYear(String year) async {
+  final y = year.trim();
+  if (!validYearName(y)) return;
+  if (!knownYears.value.contains(y)) {
+    knownYears.value = [...knownYears.value, y]
+      ..sort((a, b) => b.compareTo(a));
+  }
+  try {
+    await FirebaseFirestore.instance.collection('settings').doc('years').set({
+      'base': baseYear.value,
+      'list': FieldValue.arrayUnion([y]),
+    }, SetOptions(merge: true));
+  } catch (_) {}
+}
+
+Future<void> showYearDialog(BuildContext context) async {
+  await loadYears();
+  if (!context.mounted) return;
+  final ctl = TextEditingController();
+  String? err;
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: const Text('Switch academic year'),
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                  'Each year has its own students, classes, exams, results '
+                      'and attendance. Pick a year to open it.',
+                  style: TextStyle(fontSize: 13, color: Colors.black54)),
+              const SizedBox(height: 10),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(children: [
+                    for (final y in knownYears.value)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                            y == shownYear
+                                ? Icons.radio_button_checked
+                                : Icons.radio_button_unchecked,
+                            color: Theme.of(ctx).colorScheme.primary),
+                        title: Text(y,
+                            style: TextStyle(
+                                fontWeight: y == shownYear
+                                    ? FontWeight.w800
+                                    : FontWeight.w500)),
+                        subtitle: y == baseYear.value
+                            ? const Text('Original records')
+                            : null,
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          switchYear(y);
+                        },
+                      ),
+                  ]),
+                ),
+              ),
+              const Divider(),
+              TextField(
+                controller: ctl,
+                decoration: InputDecoration(
+                  labelText: 'Open a new year (e.g. 2027-2028)',
+                  errorText: err,
+                  isDense: true,
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close')),
+          FilledButton(
+            onPressed: () async {
+              final y = ctl.text.trim();
+              if (!validYearName(y)) {
+                setD(() => err = 'Use the form 2027-2028');
+                return;
+              }
+              await addYear(y);
+              if (ctx.mounted) Navigator.pop(ctx);
+              switchYear(y);
+            },
+            child: const Text('Open new year'),
+          ),
+        ],
+      ),
+    ),
+  );
+  ctl.dispose();
+}
+
 class ExamService {
   static const defaultSubjects = [
     'English', 'Somali', 'Arabic', 'Islamic', 'Maths',
@@ -412,11 +602,11 @@ class ExamService {
   }
 
   final _db = FirebaseFirestore.instance;
-  CollectionReference<Map<String, dynamic>> get _files => _db.collection('files');
+  CollectionReference<Map<String, dynamic>> get _files => _db.yearCol('files');
 
   static const maxFileBytes = 700 * 1024; // Firestore doc limit is 1 MiB
 
-  CollectionReference<Map<String, dynamic>> get _col => _db.collection('exams');
+  CollectionReference<Map<String, dynamic>> get _col => _db.yearCol('exams');
 
   /// Live map of docId -> record. Missing docs mean "Pending".
   /// Only the records of the active exam (the base exam owns the records
@@ -5540,7 +5730,7 @@ class ExamLayoutService {
   static final _db = FirebaseFirestore.instance;
 
   static DocumentReference<Map<String, dynamic>> _ref(String exam) =>
-      _db.collection('examLayouts').doc(SchoolService.subjectKey(exam));
+      _db.yearCol('examLayouts').doc(SchoolService.subjectKey(exam));
 
   /// Runs [f]; if it fails, the error says which step failed.
   static Future<T> _step<T>(String what, Future<T> Function() f) async {
@@ -5579,7 +5769,7 @@ class ExamLayoutService {
         for (final e in (jsonDecode('${m['students']}') as Map).entries)
           '${e.key}': '${e.value}'
       };
-      final stu = await _db.collection('students').get();
+      final stu = await _db.yearCol('students').get();
       String norm(String n) {
         final w = n
             .toLowerCase()
@@ -5611,9 +5801,9 @@ class ExamLayoutService {
   /// "deletedStudents" (a backup) and then deleted.
   static Future<int> removeDuplicateStudents({required bool remove}) async {
     final secs = await _step('reading collection "sections"',
-            () => _db.collection('sections').get());
+            () => _db.yearCol('sections').get());
     final stu = await _step('reading collection "students"',
-            () => _db.collection('students').get());
+            () => _db.yearCol('students').get());
     final info = {for (final d in secs.docs) d.id: SectionInfo.fromDoc(d)};
     String norm(String n) {
       final w = n
@@ -5656,7 +5846,7 @@ class ExamLayoutService {
     for (var i = 0; i < extra.length; i += 200) {
       final b = _db.batch();
       for (final x in extra.skip(i).take(200)) {
-        b.set(_db.collection('deletedStudents').doc(x.id), {
+        b.set(_db.yearCol('deletedStudents').doc(x.id), {
           ...x.data(),
           'deletedReason': 'duplicate',
           'deletedAt': FieldValue.serverTimestamp(),
@@ -5676,9 +5866,9 @@ class ExamLayoutService {
   /// layout of [exam].
   static Future<void> save(String exam) async {
     final secs = await _step('reading collection "sections"',
-            () => _db.collection('sections').get());
+            () => _db.yearCol('sections').get());
     final stu = await _step('reading collection "students"',
-            () => _db.collection('students').get());
+            () => _db.yearCol('students').get());
     await _step('writing collection "examLayouts"', () => _ref(exam).set({
       'exam': exam,
       'sections': jsonEncode([
@@ -5705,10 +5895,10 @@ class ExamLayoutService {
   /// not inherit the sections of the exam that was just left (those stay
   /// saved in that exam's own layout). Returns how many students moved.
   static Future<int> resetToUndivided() async {
-    final secsCol = _db.collection('sections');
+    final secsCol = _db.yearCol('sections');
     final secs = await _step('reading collection "sections"', () => secsCol.get());
     final stu = await _step('reading collection "students"',
-            () => _db.collection('students').get());
+            () => _db.yearCol('students').get());
     final infos = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
     final byId = {for (final i in infos) i.id: i};
 
@@ -5811,11 +6001,11 @@ class ExamLayoutService {
         '${e.key}': '${e.value}'
     };
     final tIds = {for (final t in tSecs) '${t['id']}'};
-    final secsCol = _db.collection('sections');
+    final secsCol = _db.yearCol('sections');
     final curSecs =
     await _step('reading collection "sections"', () => secsCol.get());
     final curStu = await _step('reading collection "students"',
-            () => _db.collection('students').get());
+            () => _db.yearCol('students').get());
     final curInfo = {for (final x in curSecs.docs) x.id: SectionInfo.fromDoc(x)};
 
     // 1) the section documents of that exam (same ids as when saved)
@@ -6175,10 +6365,10 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
 Future<String> _studentFormOf(String studentId) async {
   try {
     final db = FirebaseFirestore.instance;
-    final st = await db.collection('students').doc(studentId).get();
+    final st = await db.yearCol('students').doc(studentId).get();
     final sid = '${st.data()?['sectionId'] ?? ''}';
     if (sid.isEmpty) return '';
-    final sec = await db.collection('sections').doc(sid).get();
+    final sec = await db.yearCol('sections').doc(sid).get();
     return sec.exists ? SectionInfo.fromDoc(sec).form : '';
   } catch (_) {
     return '';
@@ -6903,9 +7093,9 @@ class AssignmentService {
   final ExamService exams = ExamService();
 
   CollectionReference<Map<String, dynamic>> get _meta =>
-      _db.collection('assignments');
+      _db.yearCol('assignments');
   CollectionReference<Map<String, dynamic>> get _files =>
-      _db.collection('assignmentFiles');
+      _db.yearCol('assignmentFiles');
 
   // A Firestore document holds about 1 MiB, so a bigger file is stored in
   // parts: part 0 in assignmentFiles/{id} (with the details) and the others
@@ -8175,7 +8365,7 @@ Future<void> logStudentEvents(List<Map<String, dynamic>> events) async {
     for (var i = 0; i < events.length; i += 400) {
       final batch = db.batch();
       for (final e in events.skip(i).take(400)) {
-        batch.set(db.collection('studentLog').doc(), {
+        batch.set(db.yearCol('studentLog').doc(), {
           'studentId': '',
           'studentName': '',
           'from': '',
@@ -8194,7 +8384,7 @@ Future<void> logStudentEvents(List<Map<String, dynamic>> events) async {
 /// section id -> readable class label (3C, 3C - Section B ...).
 Future<Map<String, String>> _sectionLabels() async {
   try {
-    final snap = await FirebaseFirestore.instance.collection('sections').get();
+    final snap = await FirebaseFirestore.instance.yearCol('sections').get();
     return {
       for (final d in snap.docs) d.id: SectionInfo.fromDoc(d).fullName
     };
@@ -8267,7 +8457,7 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
         final u = (await db.collection('users').doc(uid).get()).data();
         final sid = '${u?['studentId'] ?? ''}';
         if (sid.isNotEmpty) {
-          final st = (await db.collection('students').doc(sid).get()).data();
+          final st = (await db.yearCol('students').doc(sid).get()).data();
           label = _secLabels?['${st?['sectionId'] ?? ''}'] ?? '';
         }
       } catch (_) {}
@@ -8387,7 +8577,7 @@ class _ActivityLogCardState extends State<_ActivityLogCard> {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       // one range on one field: needs no composite index
       stream: FirebaseFirestore.instance
-          .collection('studentLog')
+          .yearCol('studentLog')
           .where('time',
           isGreaterThanOrEqualTo: Timestamp.fromDate(_range.start))
           .where('time', isLessThan: Timestamp.fromDate(end))
@@ -9198,7 +9388,7 @@ class _ScopeGateState extends State<_ScopeGate> {
         } else {
           _stuDone = false;
           _stuSub = FirebaseFirestore.instance
-              .collection('students')
+              .yearCol('students')
               .doc(sid)
               .snapshots()
               .listen((d) {
@@ -9398,9 +9588,9 @@ class _LinkStudentBodyState extends State<_LinkStudentBody> {
   final _db = FirebaseFirestore.instance;
   final _q = TextEditingController();
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _stu =
-  _db.collection('students').snapshots();
+  _db.yearCol('students').snapshots();
   late final Stream<List<SectionInfo>> _sec = _db
-      .collection('sections')
+      .yearCol('sections')
       .snapshots()
       .map((s) => s.docs.map(SectionInfo.fromDoc).toList());
   bool _busy = false;
@@ -9436,7 +9626,7 @@ class _LinkStudentBodyState extends State<_LinkStudentBody> {
     try {
       // Check first (a student can belong to one account only), then write
       // both documents together.
-      final ref = _db.collection('students').doc(studentId);
+      final ref = _db.yearCol('students').doc(studentId);
       final snap = await ref.get();
       if (!snap.exists) throw Exception('This student no longer exists.');
       final owner = snap.data()?['accountUid'];
@@ -9948,6 +10138,71 @@ class _HomeScreenState extends State<HomeScreen> {
 // ---------------------------------------------------------------------------
 // Sidebar (also used as the phone drawer)
 // ---------------------------------------------------------------------------
+/// "2026-2027  Switch" under the school name in the sidebar.
+class _YearSwitchButton extends StatefulWidget {
+  const _YearSwitchButton();
+  @override
+  State<_YearSwitchButton> createState() => _YearSwitchButtonState();
+}
+
+class _YearSwitchButtonState extends State<_YearSwitchButton> {
+  @override
+  void initState() {
+    super.initState();
+    if (baseYear.value.isEmpty) loadYears();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<String>(
+      valueListenable: baseYear,
+      builder: (_, __, ___) => ValueListenableBuilder<String>(
+        valueListenable: activeYear,
+        builder: (_, __, ___) {
+          final y = shownYear;
+          return Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 6,
+              children: [
+                if (y.isNotEmpty)
+                  Text(y,
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          color: activeYear.value.isEmpty
+                              ? cs.onSurfaceVariant
+                              : cs.error,
+                          fontWeight: activeYear.value.isEmpty
+                              ? FontWeight.w500
+                              : FontWeight.w800)),
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () => showYearDialog(context),
+                  child: Padding(
+                    padding:
+                    const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.autorenew, size: 15, color: cs.primary),
+                      const SizedBox(width: 3),
+                      Text('Switch',
+                          style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: cs.primary)),
+                    ]),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _HomeSidebar extends StatelessWidget {
   final List<_HomeItem> items;
   final String? selected;
@@ -10049,15 +10304,22 @@ class _HomeSidebar extends StatelessWidget {
                   if (!collapsed) ...[
                     const SizedBox(width: 10),
                     Expanded(
-                      child: ValueListenableBuilder<String>(
-                        valueListenable: appName,
-                        builder: (_, name, __) => Text(name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 15.5,
-                                height: 1.2,
-                                fontWeight: FontWeight.w800)),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ValueListenableBuilder<String>(
+                            valueListenable: appName,
+                            builder: (_, name, __) => Text(name,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 15.5,
+                                    height: 1.2,
+                                    fontWeight: FontWeight.w800)),
+                          ),
+                          if (!teacherScope.value.isStudent)
+                            const _YearSwitchButton(),
+                        ],
                       ),
                     ),
                   ],
@@ -10598,7 +10860,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
     });
     // every section of the school (the page is school-wide, so a teacher's
     // form restriction is not applied here)
-    _secSub = _db.collection('sections').snapshots().listen((s) {
+    _secSub = _db.yearCol('sections').snapshots().listen((s) {
       final l = s.docs.map(SectionInfo.fromDoc).toList()
         ..sort((a, b) =>
             a.label.toLowerCase().compareTo(b.label.toLowerCase()));
@@ -10617,7 +10879,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
   /// The date range is filtered by Firestore; class and severity are filtered
   /// on the device (no composite indexes needed).
   Stream<List<DisciplineRecord>> _buildStream() {
-    Query<Map<String, dynamic>> q = _db.collection('discipline');
+    Query<Map<String, dynamic>> q = _db.yearCol('discipline');
     final r = _range;
     if (r != null) {
       q = q
@@ -10683,7 +10945,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
     if (data == null) return;
     final who = me.name.trim().isNotEmpty ? me.name.trim() : me.email;
     try {
-      final col = _db.collection('discipline');
+      final col = _db.yearCol('discipline');
       if (rec == null) {
         await col.add({
           ...data,
@@ -10729,7 +10991,7 @@ class _DisciplineScreenState extends State<DisciplineScreen> {
     );
     if (ok != true) return;
     try {
-      await _db.collection('discipline').doc(r.id).delete();
+      await _db.yearCol('discipline').doc(r.id).delete();
       _snack('Incident deleted.');
     } catch (e) {
       _snack('Could not delete: $e');
@@ -11058,7 +11320,7 @@ class _IncidentDialogState extends State<_IncidentDialog> {
     setState(() => _loading = true);
     try {
       final snap =
-      await FirebaseFirestore.instance.collection('students').get();
+      await FirebaseFirestore.instance.yearCol('students').get();
       final l = [
         for (final d in snap.docs)
           (
@@ -13148,7 +13410,7 @@ class SchoolListsService {
 
   static Future<bool> _hasExams(String field, String value) async {
     final q = await _db
-        .collection('exams')
+        .yearCol('exams')
         .where(field, isEqualTo: value)
         .limit(1)
         .get();
@@ -13287,7 +13549,7 @@ class SchoolListsService {
   }
 
   static Future<int> _sectionCount(String form) async =>
-      (await _db.collection('sections').where('form', isEqualTo: form).get())
+      (await _db.yearCol('sections').where('form', isEqualTo: form).get())
           .docs
           .length;
 
@@ -13310,7 +13572,7 @@ class SchoolListsService {
       'updatedBy': FirebaseAuth.instance.currentUser?.uid,
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-    final secs = await _db.collection('sections').where('form', isEqualTo: old).get();
+    final secs = await _db.yearCol('sections').where('form', isEqualTo: old).get();
     var batch = _db.batch();
     var n = 0;
     for (final d in secs.docs) {
@@ -15308,7 +15570,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _busy = true);
     try {
       final db = FirebaseFirestore.instance;
-      final q = await db.collection('exams').where('exam', isEqualTo: exam).get();
+      final q = await db.yearCol('exams').where('exam', isEqualTo: exam).get();
       if (q.docs.any((d) => d.data()['hasFile'] == true)) {
         throw Exception('"$exam" already has uploaded papers of its own. '
             'Remove them first (set them back to Pending), then try again.');
@@ -16239,14 +16501,14 @@ class StudentAccounts {
     final db = FirebaseFirestore.instance;
     final res = StudentAccountsResult();
     final List<DocumentSnapshot<Map<String, dynamic>>> docs = ids == null
-        ? (await db.collection('students').get()).docs
+        ? (await db.yearCol('students').get()).docs
         : [
-      for (final id in ids) await db.collection('students').doc(id).get()
+      for (final id in ids) await db.yearCol('students').doc(id).get()
     ];
     final secForm = <String, String>{};
     final secInfo = <String, SectionInfo>{};
     try {
-      for (final d in (await db.collection('sections').get()).docs) {
+      for (final d in (await db.yearCol('sections').get()).docs) {
         secForm[d.id] = '${d.data()['form'] ?? ''}';
         secInfo[d.id] = SectionInfo.fromDoc(d);
       }
@@ -16458,7 +16720,7 @@ class StudentAccounts {
         if (sid.isNotEmpty && sid != id) return 'taken'; // another student
       }
       final batch = db.batch();
-      batch.update(db.collection('students').doc(id), {
+      batch.update(db.yearCol('students').doc(id), {
         'accountUid': user.uid,
         // the phone that is the login is always the first phone
         'phone': phone,
@@ -16674,11 +16936,11 @@ String _loginReportDate() =>
 class SchoolService {
   final _db = FirebaseFirestore.instance;
   CollectionReference<Map<String, dynamic>> get _sections =>
-      _db.collection('sections');
+      _db.yearCol('sections');
   CollectionReference<Map<String, dynamic>> get _students =>
-      _db.collection('students');
+      _db.yearCol('students');
   CollectionReference<Map<String, dynamic>> get _attendance =>
-      _db.collection('attendance');
+      _db.yearCol('attendance');
 
   String? get _uid => FirebaseAuth.instance.currentUser?.uid;
 
@@ -20486,7 +20748,7 @@ if (ok != true || !mounted) return;
 setState(() => _busy = true);
 try {
 final db = FirebaseFirestore.instance;
-final col = db.collection('students');
+final col = db.yearCol('students');
 for (var i = 0; i < pairs.length; i += 200) {
 final batch = db.batch();
 for (final p in pairs.skip(i).take(200)) {
@@ -21414,7 +21676,7 @@ Widget build(BuildContext context) {
 final cs = Theme.of(context).colorScheme;
 return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
 stream: FirebaseFirestore.instance
-    .collection('students')
+    .yearCol('students')
     .doc(studentId)
     .snapshots(),
 builder: (context, snap) {
@@ -21429,7 +21691,7 @@ final name = '${m['name'] ?? ''}';
 final phone = '${m['phone'] ?? ''}';
 return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
 future: FirebaseFirestore.instance
-    .collection('sections')
+    .yearCol('sections')
     .doc('${m['sectionId']}')
     .get(),
 builder: (context, sec) {
@@ -21494,7 +21756,7 @@ String _form = ''; // the student's form (to know what is released)
 
 Future<Map<String, ResultMarks>> _load() async {
 _form = await _studentFormOf(widget.studentId);
-final col = FirebaseFirestore.instance.collection('results');
+final col = FirebaseFirestore.instance.yearCol('results');
 // also the marks entered on this student's twin record (class <-> section)
 final twin = (await ResultService().twinMap())[widget.studentId];
 QuerySnapshot<Map<String, dynamic>> q;
@@ -22598,7 +22860,7 @@ return e == examName;
 /// field paths cannot share one whereIn). If both copies were marked for
 /// the same date and subject, it is counted once (the opened record wins).
 Future<List<_AttEntry>> _loadAttendanceOf(String id) async {
-final col = FirebaseFirestore.instance.collection('attendance');
+final col = FirebaseFirestore.instance.yearCol('attendance');
 String? twin;
 try {
 twin = (await ResultService().twinMap())[id];
@@ -22647,7 +22909,7 @@ return list;
 class _StudentDetailScreenState extends State<StudentDetailScreen> {
 late final Stream<DocumentSnapshot<Map<String, dynamic>>> _docStream =
 FirebaseFirestore.instance
-    .collection('students')
+    .yearCol('students')
     .doc(widget.student.id)
     .snapshots();
 late Future<List<_AttEntry>> _attFuture = _loadAttendance();
@@ -22692,7 +22954,7 @@ Future<_RealSection> _loadRealSection() async {
 final db = FirebaseFirestore.instance;
 try {
 final base = widget.section;
-final secs = await db.collection('sections').get();
+final secs = await db.yearCol('sections').get();
 final all = [for (final d in secs.docs) SectionInfo.fromDoc(d)];
 final divided = all.any((x) =>
 x.isSub && x.form == base.form && x.classKey == base.classKey);
@@ -22711,7 +22973,7 @@ if (x.id == secId && x.isSub) real = x;
 int? size;
 try {
 final q = await db
-    .collection('students')
+    .yearCol('students')
     .where('sectionId', isEqualTo: (real ?? base).id)
     .get();
 size = q.docs.length;
@@ -22725,7 +22987,7 @@ return const _RealSection(null, false, null);
 /// The marks of every exam this student has (also the marks entered on the
 /// twin record: class <-> section).
 Future<Map<String, ResultMarks>> _loadResults() async {
-final col = FirebaseFirestore.instance.collection('results');
+final col = FirebaseFirestore.instance.yearCol('results');
 final id = widget.student.id;
 final twin = (await ResultService().twinMap())[id];
 _twin = twin;
@@ -23051,7 +23313,7 @@ final ids = <String>{widget.student.id, if (tw.data != null) tw.data!}
     .toList();
 return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
 stream: FirebaseFirestore.instance
-    .collection('discipline')
+    .yearCol('discipline')
     .where('studentId', whereIn: ids)
     .snapshots(),
 builder: (context, snap) {
@@ -24184,7 +24446,7 @@ late final Future<String?> _twinId = ResultService()
 Stream<DocumentSnapshot<Map<String, dynamic>>> _twinDocs() async* {
 final t = await _twinId;
 if (t == null) return;
-yield* FirebaseFirestore.instance.collection('students').doc(t).snapshots();
+yield* FirebaseFirestore.instance.yearCol('students').doc(t).snapshots();
 }
 
 late final Stream<DocumentSnapshot<Map<String, dynamic>>> _twinDocStream =
@@ -24269,7 +24531,7 @@ final text = r.trim();
 final messenger = ScaffoldMessenger.of(context);
 final value = text.isEmpty ? FieldValue.delete() : text;
 try {
-final col = FirebaseFirestore.instance.collection('students');
+final col = FirebaseFirestore.instance.yearCol('students');
 await col.doc(widget.student.id).update({'attendanceNote': value});
 final t = await _twinId;
 if (t != null) {
@@ -24451,7 +24713,7 @@ gender == oldGender) {
 return;
 }
 try {
-final col = FirebaseFirestore.instance.collection('students');
+final col = FirebaseFirestore.instance.yearCol('students');
 final twin = (await ResultService().twinMap())[widget.student.id];
 if (no.isNotEmpty && no != oldNo) {
 final dup = await col.where('studentNo', isEqualTo: no).limit(5).get();
@@ -24553,7 +24815,7 @@ note: current,
 );
 if (r == null || !mounted) return;
 try {
-final col = FirebaseFirestore.instance.collection('attendance');
+final col = FirebaseFirestore.instance.yearCol('attendance');
 final noteChanged = r.note != current;
 for (var i = 0; i < list.length; i++) {
 final e = list[i];
@@ -24583,7 +24845,7 @@ builder: (_) => _AdminAddAttendanceDialog(name: widget.student.name),
 if (r == null || !mounted) return;
 try {
 final id = SchoolService()._attId(widget.student.sectionId, r.date, r.subject);
-await FirebaseFirestore.instance.collection('attendance').doc(id).set({
+await FirebaseFirestore.instance.yearCol('attendance').doc(id).set({
 'sectionId': widget.student.sectionId,
 'date': r.date,
 'subject': r.subject.trim(),
@@ -24614,7 +24876,7 @@ if (r == null || !mounted) return;
 final text = r.trim();
 final messenger = ScaffoldMessenger.of(context);
 try {
-final col = FirebaseFirestore.instance.collection('attendance');
+final col = FirebaseFirestore.instance.yearCol('attendance');
 for (final e in list) {
 if (e.docId.isEmpty) continue;
 await col.doc(e.docId).update({
@@ -25556,7 +25818,7 @@ final key = DateFormat('yyyy-MM-dd');
 // leave periods: a student on leave counts as "Leave" on those days
 final leaves = <Map<String, String>>[];
 try {
-final lq = await FirebaseFirestore.instance.collection('studentLeaves').get();
+final lq = await FirebaseFirestore.instance.yearCol('studentLeaves').get();
 for (final d in lq.docs) {
 final m = d.data();
 leaves.add({
@@ -25571,7 +25833,7 @@ l['studentId'] == sid &&
 l['from']!.compareTo(date) <= 0 &&
 l['to']!.compareTo(date) >= 0);
 final snap = await FirebaseFirestore.instance
-    .collection('dailyAttendance')
+    .yearCol('dailyAttendance')
     .where('date', isGreaterThanOrEqualTo: key.format(from))
     .where('date', isLessThanOrEqualTo: key.format(to))
     .get();
@@ -25647,7 +25909,7 @@ final nm = <String, int>{};
 final nmNames = <String, String>{};
 try {
 final nd = await FirebaseFirestore.instance
-    .collection('classNumbers')
+    .yearCol('classNumbers')
     .doc(cls.id)
     .get();
 final raw = nd.data()?['nums'];
@@ -25868,7 +26130,7 @@ final key = DateFormat('yyyy-MM-dd');
 final leaves = <Map<String, String>>[];
 try {
 final lq =
-await FirebaseFirestore.instance.collection('studentLeaves').get();
+await FirebaseFirestore.instance.yearCol('studentLeaves').get();
 for (final d in lq.docs) {
 final m = d.data();
 leaves.add({
@@ -25883,7 +26145,7 @@ l['studentId'] == sid &&
 l['from']!.compareTo(date) <= 0 &&
 l['to']!.compareTo(date) >= 0);
 final snap = await FirebaseFirestore.instance
-    .collection('dailyAttendance')
+    .yearCol('dailyAttendance')
     .where('date', isGreaterThanOrEqualTo: key.format(from))
     .where('date', isLessThanOrEqualTo: key.format(to))
     .get();
@@ -26659,9 +26921,9 @@ static const _absentColor = Color(0xFFC62828);
 final _db = FirebaseFirestore.instance;
 late final Stream<UserProfile> _me = UserProfile.watchMine();
 late final Stream<QuerySnapshot<Map<String, dynamic>>> _secs =
-_db.collection('sections').snapshots();
+_db.yearCol('sections').snapshots();
 late final Stream<QuerySnapshot<Map<String, dynamic>>> _stus =
-_db.collection('students').snapshots();
+_db.yearCol('students').snapshots();
 
 String? _classId;
 
@@ -26675,7 +26937,7 @@ static const _leaveColor = Color(0xFF1565C0);
 @override
 void initState() {
 super.initState();
-_leaveSub = _db.collection('studentLeaves').snapshots().listen((q) {
+_leaveSub = _db.yearCol('studentLeaves').snapshots().listen((q) {
 if (!mounted) return;
 setState(() {
 _leaves = [
@@ -26779,7 +27041,7 @@ color: _absentColor),
 onPressed: () async {
 try {
 await _db
-    .collection('studentLeaves')
+    .yearCol('studentLeaves')
     .doc(l['id'])
     .delete();
 _leaves.removeWhere((x) => x['id'] == l['id']);
@@ -26835,7 +27097,7 @@ icon: const Icon(Icons.save, size: 18),
 label: const Text('Give leave'),
 onPressed: () async {
 try {
-final ref = await _db.collection('studentLeaves').add({
+final ref = await _db.yearCol('studentLeaves').add({
 'studentId': stu['id'],
 'studentName': stu['name'],
 'sectionId': _classId,
@@ -26892,7 +27154,7 @@ final sig = ([for (final r in students) r['id']!]..sort()).join(',');
 if (_numSig[cid] == sig || _numBusy.contains(cid)) return;
 _numBusy.add(cid);
 try {
-final ref = _db.collection('classNumbers').doc(cid);
+final ref = _db.yearCol('classNumbers').doc(cid);
 final saved = <String, int>{};
 final savedNames = <String, String>{};
 try {
@@ -26998,7 +27260,7 @@ Future<void> _saveNumbers(String cid, Map<String, int> nums,
 List<Map<String, String>> students) async {
 final names = _rollNames(nums, students);
 try {
-await _db.collection('classNumbers').doc(cid).set({
+await _db.yearCol('classNumbers').doc(cid).set({
 'nums': nums,
 'names': names,
 'updatedAt': FieldValue.serverTimestamp()
@@ -27068,7 +27330,7 @@ _savedAt = null;
 _loadedKey = key;
 });
 try {
-final d = await _db.collection('dailyAttendance').doc(key).get();
+final d = await _db.yearCol('dailyAttendance').doc(key).get();
 if (!mounted || _loadedKey != key) return;
 final m = d.data()?['marks'];
 final rs = d.data()?['reasons'];
@@ -27184,7 +27446,7 @@ final id = _classId;
 if (id == null) return;
 setState(() => _saving = true);
 try {
-await _db.collection('dailyAttendance').doc(_docId).set({
+await _db.yearCol('dailyAttendance').doc(_docId).set({
 'sectionId': id,
 'date': _dateKey,
 'session': _session,
@@ -29497,7 +29759,7 @@ State<FinanceScreen> createState() => _FinanceScreenState();
 class _FinanceScreenState extends State<FinanceScreen> {
 final _service = SchoolService();
 late final Stream<List<SectionInfo>> _secStream = _service.watchSections();
-final _col = FirebaseFirestore.instance.collection('payments');
+final _col = FirebaseFirestore.instance.yearCol('payments');
 /// The class picked in the list. [_allId] = every class (the default).
 static const _allId = '__all__';
 String? _sectionId = _allId;
@@ -30284,7 +30546,7 @@ if (!s.isSub) s
 ];
 final students = await svc.watchAllStudents().first;
 final snap = await FirebaseFirestore.instance
-    .collection('payments')
+    .yearCol('payments')
     .where('month', isEqualTo: _key)
     .get();
 var twins = <String, String>{};
@@ -33480,7 +33742,7 @@ subjects: [for (final x in (m['subjects'] as List? ?? const [])) '$x'],
 // (reopened by a person; this also overrides the deadline). A document
 // without a form (older version) applies to every form.
 class SubjectLockService {
-static final _col = FirebaseFirestore.instance.collection('subjectStatus');
+static final _col = FirebaseFirestore.instance.yearCol('subjectStatus');
 
 /// exam -> 'subject|form' -> 'complete' | 'open'   (empty form = all forms)
 static final ValueNotifier<Map<String, Map<String, String>>> byExam =
@@ -33585,7 +33847,7 @@ await batch.commit();
 }
 
 class CheatService {
-static final _col = FirebaseFirestore.instance.collection('cheating');
+static final _col = FirebaseFirestore.instance.yearCol('cheating');
 
 /// exam -> studentId -> entry
 static final ValueNotifier<Map<String, Map<String, CheatEntry>>> byExam =
@@ -33712,7 +33974,7 @@ double? get average => marks.isEmpty ? null : total / marks.length;
 
 class ResultService {
 final _db = FirebaseFirestore.instance;
-CollectionReference<Map<String, dynamic>> get _col => _db.collection('results');
+CollectionReference<Map<String, dynamic>> get _col => _db.yearCol('results');
 String? get _uid => FirebaseAuth.instance.currentUser?.uid;
 
 static String _id(String studentId, String exam) =>
@@ -33720,7 +33982,7 @@ static String _id(String studentId, String exam) =>
 
 /// Every student of the school.
 Stream<List<StudentInfo>> watchAllStudents() =>
-_db.collection('students').snapshots().map((s) {
+_db.yearCol('students').snapshots().map((s) {
 final sc = teacherScope.value;
 final l = [
 for (final d in s.docs)
@@ -33766,6 +34028,11 @@ if (teacherScope.value.allowsSubject(e.key)) e.key: e.value
 static Map<String, String> _twinCache = const {};
 static Map<String, String> _stuSection = {};
 static DateTime? _twinAt;
+static void resetYearCaches() {
+_twinCache = const {};
+_stuSection = {};
+_twinAt = null;
+}
 
 Future<Map<String, String>> twinMap() async {
 final at = _twinAt;
@@ -33773,9 +34040,9 @@ if (at != null && DateTime.now().difference(at) < const Duration(seconds: 30)) {
 return _twinCache;
 }
 try {
-final secs = await _db.collection('sections').get();
+final secs = await _db.yearCol('sections').get();
 final secOf = {for (final d in secs.docs) d.id: SectionInfo.fromDoc(d)};
-final stu = await _db.collection('students').get();
+final stu = await _db.yearCol('students').get();
 // same words in any order, ignoring case and punctuation
 String norm(String n) {
 final w = n
@@ -33980,7 +34247,7 @@ DateFormat('yyyy-MM-dd').format(appSettings.value.subjectDateOf(s)!)
 ]..sort();
 if (keys.isEmpty) return;
 sub = FirebaseFirestore.instance
-    .collection('attendance')
+    .yearCol('attendance')
     .where('date', isGreaterThanOrEqualTo: keys.first)
     .where('date', isLessThanOrEqualTo: keys.last)
     .snapshots()
@@ -34740,7 +35007,7 @@ final uid = FirebaseAuth.instance.currentUser?.uid;
 if (uid == null) return const SizedBox.shrink();
 return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
 stream: FirebaseFirestore.instance
-    .collection('notifications')
+    .yearCol('notifications')
     .where('uid', isEqualTo: uid)
     .where('read', isEqualTo: false)
     .snapshots(),
@@ -34996,7 +35263,7 @@ try {
 final me = FirebaseAuth.instance.currentUser?.uid;
 final batch = FirebaseFirestore.instance.batch();
 for (final x in items) {
-batch.set(FirebaseFirestore.instance.collection('notifications').doc(), {
+batch.set(FirebaseFirestore.instance.yearCol('notifications').doc(), {
 'uid': x.uid,
 'title': x.title,
 'body': x.body,
@@ -38758,7 +39025,7 @@ await auth.signOut();
 try {
 final db = FirebaseFirestore.instance;
 final q = await db
-    .collection('students')
+    .yearCol('students')
     .where('phone', isEqualTo: digits)
     .get();
 final free = [
@@ -38777,7 +39044,7 @@ final st = free.first;
 var form = '';
 try {
 final sec =
-await db.collection('sections').doc('${st.data()['sectionId']}').get();
+await db.yearCol('sections').doc('${st.data()['sectionId']}').get();
 form = '${sec.data()?['form'] ?? ''}';
 } catch (_) {}
 final batch = db.batch();
@@ -39217,7 +39484,12 @@ cursorColor: Color(0xFF1976D2),
 // Lets people highlight and copy text everywhere in the system.
 // An Overlay sits above the Navigator so the copy / select-all menu has
 // somewhere to appear (SelectionArea above the Navigator has none).
-builder: (context, child) => Overlay(
+builder: (context, child) => ValueListenableBuilder<String>(
+valueListenable: activeYear,
+// A new key rebuilds every screen, so all lists reload for the year.
+builder: (_, year, __) => KeyedSubtree(
+key: ValueKey('year-$year'),
+child: Overlay(
 initialEntries: [
 OverlayEntry(
 builder: (_) => SelectionArea(
@@ -39225,6 +39497,8 @@ child: child ?? const SizedBox.shrink(),
 ),
 ),
 ],
+),
+),
 ),
 home: StreamBuilder<User?>(
 stream: FirebaseAuth.instance.authStateChanges(),
@@ -39335,7 +39609,7 @@ if (u.role == 'student' && u.studentId.isNotEmpty) {
 try {
 // free the student record so it can be linked again
 await db
-    .collection('students')
+    .yearCol('students')
     .doc(u.studentId)
     .update({'accountUid': FieldValue.delete()});
 } catch (_) {}
@@ -39901,7 +40175,7 @@ this.hint,
 @override
 Widget build(BuildContext context) =>
 StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-stream: FirebaseFirestore.instance.collection('sections').snapshots(),
+stream: FirebaseFirestore.instance.yearCol('sections').snapshots(),
 builder: (context, snap) {
 if (snap.hasError) {
 return Text('Could not load the classes: ${snap.error}',
@@ -40092,7 +40366,7 @@ String form = '',
 }) async {
 final uid = await userUidOfTeacher(teacherId);
 if (uid == null) return false;
-await FirebaseFirestore.instance.collection('notifications').add({
+await FirebaseFirestore.instance.yearCol('notifications').add({
 'uid': uid,
 'teacherId': teacherId,
 'title': title,
@@ -40441,7 +40715,7 @@ String? error, assignError;
 // form -> the classes (A, B ...) that exist in it, read from the sections
 final classKeys = <String, List<String>>{};
 try {
-final qs = await FirebaseFirestore.instance.collection('sections').get();
+final qs = await FirebaseFirestore.instance.yearCol('sections').get();
 final tmp = <String, Set<String>>{};
 for (final d in qs.docs) {
 final sec = SectionInfo.fromDoc(d);
@@ -41360,9 +41634,9 @@ class _AcademicPerformanceTabState extends State<AcademicPerformanceTab>
 with AutomaticKeepAliveClientMixin {
 String? _term; // null = the current term
 late final Stream<QuerySnapshot<Map<String, dynamic>>> _schemes =
-FirebaseFirestore.instance.collection('schemesOfWork').snapshots();
+FirebaseFirestore.instance.yearCol('schemesOfWork').snapshots();
 late final Stream<QuerySnapshot<Map<String, dynamic>>> _plans =
-FirebaseFirestore.instance.collection('lessonPlans').snapshots();
+FirebaseFirestore.instance.yearCol('lessonPlans').snapshots();
 
 @override
 bool get wantKeepAlive => true;
@@ -41872,7 +42146,7 @@ final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 final all = <Map<String, dynamic>>[];
 try {
 final q = await FirebaseFirestore.instance
-    .collection('schemesOfWork')
+    .yearCol('schemesOfWork')
     .where('form', isEqualTo: form)
     .where('subject', isEqualTo: subject)
     .get();
@@ -42242,7 +42516,7 @@ _AcademicStore.cache[id] = data;
 final messenger = ScaffoldMessenger.of(context);
 try {
 await FirebaseFirestore.instance
-    .collection('schemesOfWork')
+    .yearCol('schemesOfWork')
     .doc(id)
     .set({...data, 'updatedAt': FieldValue.serverTimestamp()});
 if (!quiet) {
@@ -42288,7 +42562,7 @@ final id = _safeFile('${_form}_${_subject}_${_term}_$uid');
 Map<String, dynamic>? saved;
 try {
 final d = await FirebaseFirestore.instance
-    .collection('schemesOfWork')
+    .yearCol('schemesOfWork')
     .doc(id)
     .get();
 if (d.exists) saved = {...?d.data(), 'id': d.id};
@@ -42369,7 +42643,7 @@ final scoped = teacherScope.value.scoped;
 final items = <Map<String, dynamic>>[];
 try {
 Query<Map<String, dynamic>> q =
-FirebaseFirestore.instance.collection('schemesOfWork');
+FirebaseFirestore.instance.yearCol('schemesOfWork');
 if (scoped) q = q.where('teacherId', isEqualTo: me);
 final snap = await q.get();
 for (final d in snap.docs) {
@@ -42439,7 +42713,7 @@ child: const Text('Delete')),
 if (yes != true) return;
 try {
 await FirebaseFirestore.instance
-    .collection('schemesOfWork')
+    .yearCol('schemesOfWork')
     .doc('${m['id']}')
     .delete();
 } catch (_) {}
@@ -42994,7 +43268,7 @@ final id = _planId;
 if (!_generated || id == null) return;
 final messenger = ScaffoldMessenger.of(context);
 try {
-await FirebaseFirestore.instance.collection('lessonPlans').doc(id).set({
+await FirebaseFirestore.instance.yearCol('lessonPlans').doc(id).set({
 'form': _form,
 'subject': _subject,
 'classId': _cls!.id,
@@ -43022,7 +43296,7 @@ final id = _planId;
 if (id == null) return;
 try {
 final d = await FirebaseFirestore.instance
-    .collection('lessonPlans')
+    .yearCol('lessonPlans')
     .doc(id)
     .get();
 if (!mounted || id != _planId || !d.exists) return;
@@ -43061,7 +43335,7 @@ super.dispose();
 
 Future<void> _loadSections() async {
 try {
-final q = await FirebaseFirestore.instance.collection('sections').get();
+final q = await FirebaseFirestore.instance.yearCol('sections').get();
 if (!mounted) return;
 setState(() => _allSecs = [for (final d in q.docs) SectionInfo.fromDoc(d)]);
 } catch (_) {}
@@ -43095,7 +43369,7 @@ if (s.isSub && s.form == c.form && s.classKey == c.name.toUpperCase())
 s.id
 ];
 final q = await FirebaseFirestore.instance
-    .collection('students')
+    .yearCol('students')
     .where('sectionId', whereIn: ids.take(30).toList())
     .get();
 final seen = <String>{};
