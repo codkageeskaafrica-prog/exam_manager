@@ -6571,11 +6571,11 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
 }
 
 /// The form (Form1...) of a student, from the student's section ('' unknown).
-/// 27 Noofembar 2026 (Somali month names).
+/// 27 November 2026 (the exact month name).
 String _somaliDate(DateTime d) {
   const m = [
-    'Janaayo', 'Febraayo', 'Maarso', 'Abriil', 'Maajo', 'Juun', 'Luuliyo',
-    'Agoosto', 'Sebtembar', 'Oktoobar', 'Noofembar', 'Diseembar',
+    'January', 'February', 'March', 'April', 'May', 'June', 'July',
+    'August', 'September', 'October', 'November', 'December',
   ];
   return '${d.day} ${m[d.month - 1]} ${d.year}';
 }
