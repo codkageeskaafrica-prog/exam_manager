@@ -6458,20 +6458,78 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
   if (!isSystemAdmin) return; // only the administrator
   final messenger = ScaffoldMessenger.of(context);
   final closed = <String>{...appSettings.value.closedFormsOf(exam)};
+  DateTime? relDate = appSettings.value.releaseDateTimeOf(exam);
+  final noteC = TextEditingController(text: appSettings.value.releaseNoteOf(exam));
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setD) => AlertDialog(
         title: Text('Forms released for "$exam"'),
-        content: _FormReleasePicker(
-          closed: closed,
-          onToggle: (f, on) =>
-              setD(() => on ? closed.remove(f) : closed.add(f)),
-          onSet: (c) => setD(() {
-            closed
-              ..clear()
-              ..addAll(c);
-          }),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _FormReleasePicker(
+                    closed: closed,
+                    onToggle: (f, on) =>
+                        setD(() => on ? closed.remove(f) : closed.add(f)),
+                    onSet: (c) => setD(() {
+                      closed
+                        ..clear()
+                        ..addAll(c);
+                    }),
+                  ),
+                  const SizedBox(height: 14),
+                  const Divider(height: 1),
+                  const SizedBox(height: 12),
+                  const Text('Official release date and note:',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  const Text(
+                      'Students whose results are not released yet see this '
+                          'date and note.',
+                      style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.event, size: 18),
+                        label: Text(relDate == null
+                            ? 'Set release date'
+                            : DateFormat('d MMM yyyy').format(relDate!)),
+                        onPressed: () async {
+                          final p = await showDatePicker(
+                            context: ctx,
+                            initialDate: relDate ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime(2100),
+                          );
+                          if (p != null) setD(() => relDate = p);
+                        },
+                      ),
+                    ),
+                    if (relDate != null)
+                      IconButton(
+                        tooltip: 'Clear the date',
+                        icon: const Icon(Icons.clear),
+                        onPressed: () => setD(() => relDate = null),
+                      ),
+                  ]),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: noteC,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      labelText: 'Note for the students (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ]),
+          ),
         ),
         actions: [
           TextButton(
@@ -6484,6 +6542,8 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
       ),
     ),
   );
+  final note = noteC.text.trim();
+  noteC.dispose();
   if (ok != true) return;
   try {
     await appSettings.update({
@@ -6492,6 +6552,14 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
           for (final f in ExamService.forms)
             if (closed.contains(f)) f
         ],
+      },
+      'examReleaseInfo': {
+        SchoolService.subjectKey(exam): {
+          'date': relDate == null
+              ? ''
+              : DateFormat('yyyy-MM-dd').format(relDate!),
+          'note': note,
+        },
       },
     });
     messenger.showSnackBar(
@@ -6503,6 +6571,15 @@ Future<void> editReleasedForms(BuildContext context, String exam) async {
 }
 
 /// The form (Form1...) of a student, from the student's section ('' unknown).
+/// 27 Noofembar 2026 (Somali month names).
+String _somaliDate(DateTime d) {
+  const m = [
+    'Janaayo', 'Febraayo', 'Maarso', 'Abriil', 'Maajo', 'Juun', 'Luuliyo',
+    'Agoosto', 'Sebtembar', 'Oktoobar', 'Noofembar', 'Diseembar',
+  ];
+  return '${d.day} ${m[d.month - 1]} ${d.year}';
+}
+
 Future<String> _studentFormOf(String studentId) async {
   try {
     final db = FirebaseFirestore.instance;
@@ -12997,6 +13074,11 @@ class AppSettings {
   /// SchoolService.subjectKey(exam). Every form is released until closed.
   final Map<String, List<String>> examFormsClosed;
 
+  /// Official release date and a note for the students, per exam (key =
+  /// subjectKey(exam)): {'date': 'yyyy-MM-dd' or '', 'note': text}. Shown to
+  /// the students while their results are not released yet.
+  final Map<String, Map<String, String>> examReleaseInfo;
+
   /// Fail rule chosen by the administrator, per exam (key = subjectKey(exam)):
   /// {'below': 50, 'basis': 'average' | 'total'}. No rule = failed means
   /// grade F (average below the lowest grade limit).
@@ -13085,6 +13167,7 @@ class AppSettings {
     this.closedExams = const [],
     this.attendanceClosedExams = const [],
     this.examFormsClosed = const {},
+    this.examReleaseInfo = const {},
     this.failRules = const {},
     this.activeExam = '',
     this.paperBaseExam = '',
@@ -13218,6 +13301,20 @@ class AppSettings {
   bool isFormReleased(String e, String form) =>
       form.isEmpty || !closedFormsOf(e).contains(form);
 
+  /// The official release date of exam [e] as saved ('yyyy-MM-dd', '' = none).
+  String releaseDateOf(String e) =>
+      examReleaseInfo[SchoolService.subjectKey(e)]?['date'] ?? '';
+
+  /// The same date as a DateTime (null when not set).
+  DateTime? releaseDateTimeOf(String e) {
+    final t = releaseDateOf(e).trim();
+    return t.isEmpty ? null : DateTime.tryParse(t);
+  }
+
+  /// The note the administrator wrote for the students of exam [e].
+  String releaseNoteOf(String e) =>
+      examReleaseInfo[SchoolService.subjectKey(e)]?['note'] ?? '';
+
   /// '\nNot released: Form1, Form3' (empty when every form is released).
   String closedFormsLine(String e) {
     final c = [for (final f in ExamService.forms) if (closedFormsOf(e).contains(f)) f];
@@ -13286,6 +13383,7 @@ class AppSettings {
     final ce = m['closedExams'];
     final ace = m['attendanceClosedExams'];
     final efc = m['examFormsClosed'];
+    final eri = m['examReleaseInfo'];
     final grades =
     g is List && g.length == gradeLetters.length && g.every((e) => e is num)
         ? [for (final e in g) (e as num).toDouble()]
@@ -13372,6 +13470,16 @@ class AppSettings {
             ],
       }
           : d.examFormsClosed,
+      examReleaseInfo: eri is Map
+          ? {
+        for (final e in eri.entries)
+          if (e.value is Map)
+            '${e.key}': {
+              'date': '${(e.value as Map)['date'] ?? ''}'.trim(),
+              'note': '${(e.value as Map)['note'] ?? ''}'.trim(),
+            },
+      }
+          : d.examReleaseInfo,
       sectionSubjects: ss is List
           ? [
         for (final e in ss)
@@ -21299,6 +21407,419 @@ DailyAttendanceReport.docx(tables(), period, title: title),
 );
 }
 
+// ---------------- Students dashboard ----------------
+static const Color _kMale = Color(0xFF3498DB);
+static const Color _kFemale = Color(0xFFE84393);
+
+/// A dashboard for the Students page: the whole school, every form and every
+/// class with the number of students, how many are Male and Female, and a
+/// few useful totals. Tap a form or a class to open its students.
+Widget _dashboard(List<SectionInfo> secs, List<StudentInfo> visible,
+void Function(String form, String classKey) open) {
+final cs = Theme.of(context).colorScheme;
+final secById = {for (final s in secs) s.id: s};
+bool isM(StudentInfo s) => s.gender.trim().toLowerCase() == 'male';
+bool isF(StudentInfo s) => s.gender.trim().toLowerCase() == 'female';
+
+// class / form -> [students, male, female]
+final cls = <String, List<int>>{};
+final clsForm = <String, String>{};
+final frm = <String, List<int>>{};
+for (final sec in secs) {
+final k = SectionInfo.code(sec.form, sec.classKey);
+cls.putIfAbsent(k, () => [0, 0, 0]);
+clsForm[k] = sec.form;
+frm.putIfAbsent(sec.form, () => [0, 0, 0]);
+}
+var total = 0, male = 0, female = 0;
+var linked = 0, cert = 0, transfer = 0, noPhone = 0, noEmis = 0;
+for (final st in visible) {
+final sec = secById[st.sectionId];
+if (sec == null) continue;
+final k = SectionInfo.code(sec.form, sec.classKey);
+for (final a in [cls[k]!, frm[sec.form]!]) {
+a[0]++;
+if (isM(st)) a[1]++;
+if (isF(st)) a[2]++;
+}
+total++;
+if (isM(st)) male++;
+if (isF(st)) female++;
+if (st.accountUid.isNotEmpty) linked++;
+if (st.phoneText.isEmpty) noPhone++;
+if (st.emisId.trim().isEmpty) noEmis++;
+final c = st.certificate.trim().toLowerCase();
+if (c.startsWith('cert')) cert++;
+if (c.startsWith('trans')) transfer++;
+}
+final notSet = total - male - female;
+final forms = [
+for (final f in ExamService.forms)
+if (frm.containsKey(f)) f,
+];
+final classKeys = cls.keys.toList()..sort();
+final maxCls = cls.values.fold<int>(0, (a, b) => b[0] > a ? b[0] : a);
+var biggest = '-';
+var biggestN = 0;
+for (final e in cls.entries) {
+if (e.value[0] > biggestN) {
+biggestN = e.value[0];
+biggest = e.key;
+}
+}
+final avg = cls.isEmpty ? 0 : (total / cls.length).round();
+
+String pct(int a, int t) => t == 0 ? '0%' : '${(a * 100 / t).round()}%';
+
+Widget splitBar(int m, int f, int t, {double h = 8}) {
+final rest = t - m - f;
+if (t == 0) {
+return Container(
+height: h,
+decoration: BoxDecoration(
+color: Colors.grey.shade300,
+borderRadius: BorderRadius.circular(h)));
+}
+return ClipRRect(
+borderRadius: BorderRadius.circular(h),
+child: SizedBox(
+height: h,
+child: Row(children: [
+if (m > 0) Expanded(flex: m, child: Container(color: _kMale)),
+if (f > 0) Expanded(flex: f, child: Container(color: _kFemale)),
+if (rest > 0)
+Expanded(flex: rest, child: Container(color: Colors.grey.shade400)),
+]),
+),
+);
+}
+
+Widget dot(Color c, String t, {Color? text}) =>
+Row(mainAxisSize: MainAxisSize.min, children: [
+Container(
+width: 10,
+height: 10,
+decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
+const SizedBox(width: 6),
+Text(t, style: TextStyle(fontSize: 12.5, color: text)),
+]);
+
+Widget title(String t, IconData icon) => Padding(
+padding: const EdgeInsets.fromLTRB(2, 0, 2, 10),
+child: Row(children: [
+Container(
+width: 4,
+height: 18,
+decoration: BoxDecoration(
+color: cs.primary, borderRadius: BorderRadius.circular(4))),
+const SizedBox(width: 8),
+Icon(icon, size: 18, color: cs.primary),
+const SizedBox(width: 6),
+Text(t,
+style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+]),
+);
+
+Widget bigNum(IconData icon, String label, int v, String sub) => Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Row(mainAxisSize: MainAxisSize.min, children: [
+Icon(icon, size: 18, color: Colors.white70),
+const SizedBox(width: 6),
+Text(label,
+style: const TextStyle(color: Colors.white70, fontSize: 13)),
+]),
+const SizedBox(height: 4),
+Text('$v',
+style: const TextStyle(
+color: Colors.white,
+fontSize: 34,
+fontWeight: FontWeight.w800,
+height: 1.1)),
+if (sub.isNotEmpty)
+Text(sub,
+style: const TextStyle(color: Colors.white70, fontSize: 12)),
+],
+);
+
+Widget hero() => Container(
+width: double.infinity,
+padding: const EdgeInsets.all(18),
+decoration: BoxDecoration(
+borderRadius: BorderRadius.circular(18),
+gradient: const LinearGradient(
+begin: Alignment.topLeft,
+end: Alignment.bottomRight,
+colors: [Color(0xFF0F2A43), Color(0xFF1F6A9C)]),
+boxShadow: [
+BoxShadow(
+color: const Color(0xFF1F6A9C).withOpacity(0.25),
+blurRadius: 14,
+offset: const Offset(0, 6)),
+],
+),
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+const Text('Whole school',
+style: TextStyle(
+color: Colors.white,
+fontSize: 15,
+fontWeight: FontWeight.w700)),
+const SizedBox(height: 12),
+Wrap(spacing: 36, runSpacing: 14, children: [
+bigNum(Icons.groups_2_outlined, 'Students', total,
+'${cls.length} classes · ${forms.length} forms'),
+bigNum(Icons.male, 'Male', male, pct(male, total)),
+bigNum(Icons.female, 'Female', female, pct(female, total)),
+]),
+const SizedBox(height: 16),
+splitBar(male, female, total, h: 12),
+const SizedBox(height: 10),
+Wrap(spacing: 16, runSpacing: 4, children: [
+dot(_kMale, 'Male ${pct(male, total)}', text: Colors.white),
+dot(_kFemale, 'Female ${pct(female, total)}', text: Colors.white),
+if (notSet > 0)
+dot(Colors.grey.shade400, '$notSet gender not set',
+text: Colors.white),
+]),
+]),
+);
+
+Widget tile(double w, IconData icon, Color c, String label, String value,
+[String sub = '']) =>
+SizedBox(
+width: w,
+child: Container(
+padding: const EdgeInsets.all(12),
+decoration: BoxDecoration(
+color: c.withOpacity(0.09),
+borderRadius: BorderRadius.circular(14),
+border: Border.all(color: c.withOpacity(0.25)),
+),
+child: Row(children: [
+Container(
+width: 38,
+height: 38,
+decoration: BoxDecoration(
+color: c.withOpacity(0.16), shape: BoxShape.circle),
+child: Icon(icon, size: 20, color: c),
+),
+const SizedBox(width: 10),
+Expanded(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Text(value,
+style: const TextStyle(
+fontSize: 20, fontWeight: FontWeight.w800)),
+Text(label,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+if (sub.isNotEmpty)
+Text(sub,
+maxLines: 1,
+overflow: TextOverflow.ellipsis,
+style: TextStyle(fontSize: 11, color: c)),
+]),
+),
+]),
+),
+);
+
+Widget formCard(double w, String f) {
+final v = frm[f]!;
+return SizedBox(
+width: w,
+child: Card(
+margin: EdgeInsets.zero,
+elevation: 0,
+clipBehavior: Clip.antiAlias,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(16),
+side: BorderSide(color: cs.outlineVariant)),
+child: InkWell(
+onTap: () => open(f, ''),
+child: Padding(
+padding: const EdgeInsets.all(14),
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+Row(children: [
+Text(f,
+style: const TextStyle(
+fontSize: 15, fontWeight: FontWeight.w700)),
+const Spacer(),
+Text('${v[0]}',
+style: const TextStyle(
+fontSize: 24, fontWeight: FontWeight.w800)),
+]),
+Text(
+'${classKeys.where((k) => clsForm[k] == f).length} classes',
+style: const TextStyle(
+fontSize: 12, color: Colors.black54)),
+const SizedBox(height: 10),
+splitBar(v[1], v[2], v[0]),
+const SizedBox(height: 8),
+Row(children: [
+dot(_kMale, '${v[1]} Male'),
+const Spacer(),
+dot(_kFemale, '${v[2]} Female'),
+]),
+]),
+),
+),
+),
+);
+}
+
+// ---- class table ----
+const cClass = 46.0, cTot = 46.0, cGen = 54.0;
+TextStyle head() => const TextStyle(
+fontSize: 12, fontWeight: FontWeight.w700, color: Colors.black54);
+
+Widget cells(String a, String t, String m, String f, Widget bar,
+{TextStyle? base}) =>
+Row(children: [
+SizedBox(
+width: cClass,
+child: Text(a,
+style: base ?? const TextStyle(fontWeight: FontWeight.w700))),
+SizedBox(
+width: cTot,
+child: Text(t,
+textAlign: TextAlign.right,
+style: base ?? const TextStyle(fontWeight: FontWeight.w700))),
+SizedBox(
+width: cGen,
+child: Text(m,
+textAlign: TextAlign.right,
+style: (base ?? const TextStyle(fontWeight: FontWeight.w600))
+    .copyWith(color: base == null ? _kMale : null))),
+SizedBox(
+width: cGen,
+child: Text(f,
+textAlign: TextAlign.right,
+style: (base ?? const TextStyle(fontWeight: FontWeight.w600))
+    .copyWith(color: base == null ? _kFemale : null))),
+const SizedBox(width: 14),
+Expanded(child: bar),
+]);
+
+Widget classRow(String k, String f) {
+final v = cls[k]!;
+final factor =
+maxCls == 0 ? 0.0 : (v[0] / maxCls).clamp(0.04, 1.0).toDouble();
+return InkWell(
+onTap: () => open(f, k),
+child: Padding(
+padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+child: cells(
+k,
+'${v[0]}',
+'${v[1]}',
+'${v[2]}',
+Align(
+alignment: Alignment.centerLeft,
+child: FractionallySizedBox(
+widthFactor: factor, child: splitBar(v[1], v[2], v[0], h: 10)),
+)),
+),
+);
+}
+
+Widget formRow(String f) {
+final v = frm[f]!;
+return Container(
+color: cs.primaryContainer.withOpacity(0.35),
+padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+child: cells(f, '${v[0]}', '${v[1]}', '${v[2]}',
+Text('${classKeys.where((k) => clsForm[k] == f).length} classes',
+style: const TextStyle(fontSize: 12, color: Colors.black54)),
+base: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+);
+}
+
+Widget classTable() => Card(
+margin: EdgeInsets.zero,
+elevation: 0,
+clipBehavior: Clip.antiAlias,
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(16),
+side: BorderSide(color: cs.outlineVariant)),
+child: Column(children: [
+Padding(
+padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+child: cells('Class', 'Total', 'Male', 'Female',
+Row(children: [
+dot(_kMale, 'Male'),
+const SizedBox(width: 12),
+dot(_kFemale, 'Female'),
+]),
+base: head()),
+),
+const Divider(height: 1),
+for (final f in forms) ...[
+formRow(f),
+for (final k in classKeys.where((k) => clsForm[k] == f))
+classRow(k, f),
+],
+const Divider(height: 1),
+Container(
+color: cs.primary.withOpacity(0.08),
+padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+child: cells('All', '$total', '$male', '$female',
+Text('${pct(male, total)} male · ${pct(female, total)} female',
+style:
+const TextStyle(fontSize: 12, color: Colors.black54)),
+base: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+),
+]),
+);
+
+return LayoutBuilder(builder: (context, box) {
+final w = box.maxWidth;
+final tileW = w >= 760 ? (w - 3 * 10) / 4 : (w - 10) / 2;
+final formW = w >= 960
+? (w - 3 * 12) / 4
+    : w >= 560
+? (w - 12) / 2
+    : w;
+return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+hero(),
+const SizedBox(height: 14),
+Wrap(spacing: 10, runSpacing: 10, children: [
+tile(tileW, Icons.school_outlined, kBlue, 'Classes',
+'${cls.length}', '${forms.length} forms'),
+tile(tileW, Icons.functions, const Color(0xFF8E44AD),
+'Average per class', '$avg'),
+tile(tileW, Icons.trending_up, const Color(0xFF16A085),
+'Largest class', biggest, '$biggestN students'),
+tile(tileW, Icons.verified_user_outlined, kGreen, 'Login accounts',
+'$linked', pct(linked, total)),
+tile(tileW, Icons.phone_disabled_outlined, kRed, 'Without phone',
+'$noPhone'),
+tile(tileW, Icons.badge_outlined, const Color(0xFFE67E22),
+'Without EMIS ID', '$noEmis'),
+tile(tileW, Icons.workspace_premium_outlined, const Color(0xFF2980B9),
+'Certificate', '$cert'),
+tile(tileW, Icons.swap_horiz, const Color(0xFFC0392B), 'Transfer',
+'$transfer'),
+]),
+const SizedBox(height: 20),
+title('By form', Icons.layers_outlined),
+Wrap(spacing: 12, runSpacing: 12, children: [
+for (final f in forms) formCard(formW, f),
+]),
+const SizedBox(height: 20),
+title('By class', Icons.table_chart_outlined),
+classTable(),
+const SizedBox(height: 20),
+title('Browse students', Icons.search),
+]);
+});
+}
+
 // Totals page: whole school, each form and each class. Tap a form or a
 // class (or "Show all students") to open the list of students.
 Widget _summary(List<SectionInfo> secs, List<StudentInfo> visible) {
@@ -21376,6 +21897,8 @@ _noPhoneReport(visible, secById, 'All classes'),
 ]),
 ),
 ),
+const SizedBox(height: 14),
+_dashboard(secs, visible, open),
 const SizedBox(height: 12),
 Wrap(spacing: 12, runSpacing: 12, children: [
 for (final f in forms)
@@ -21916,9 +22439,18 @@ State<_StudentResultsBody> createState() => _StudentResultsBodyState();
 class _StudentResultsBodyState extends State<_StudentResultsBody> {
 late Future<Map<String, ResultMarks>> _f = _load();
 String _form = ''; // the student's form (to know what is released)
+String _first = ''; // the student's first name (for the release note)
 
 Future<Map<String, ResultMarks>> _load() async {
 _form = await _studentFormOf(widget.studentId);
+try {
+final sd = await FirebaseFirestore.instance
+    .yearCol('students')
+    .doc(widget.studentId)
+    .get();
+final n = '${sd.data()?['name'] ?? ''}'.trim();
+_first = n.isEmpty ? '' : n.split(RegExp(r'\s+')).first;
+} catch (_) {}
 final col = FirebaseFirestore.instance.yearCol('results');
 // also the marks entered on this student's twin record (class <-> section)
 final twin = (await ResultService().twinMap())[widget.studentId];
@@ -21993,18 +22525,75 @@ children: [
 if (exams.isEmpty)
 Padding(
 padding: const EdgeInsets.all(24),
-child: Center(
+child: Column(children: [
+Center(
 child: Text(
 closedCount > 0
 ? 'Your results are not released yet.\nThe administrator has not opened them for your form.'
     : 'No results published yet.',
 textAlign: TextAlign.center)),
+if (closedCount > 0)
+_releaseNotice([
+for (final e in withMarks)
+if (!exams.contains(e)) e,
+]),
+]),
 ),
 if (exams.isNotEmpty) _transcript(exams, data),
 ],
 ),
 );
 },
+);
+}
+
+/// "Safa, Natiijada imtixaanka Monthly1 2026 waxa si rasmi ah loo shaacin
+/// doona 27 Noofembar 2026." plus the administrator's note. The date and the
+/// note are set in Settings > Exams > the people icon of the exam.
+Widget _releaseNotice(List<String> hidden) {
+final st = appSettings.value;
+String? pick;
+for (final e in [st.currentExam, ...hidden]) {
+if (e.isEmpty) continue;
+if (st.releaseDateOf(e).isNotEmpty ||
+st.releaseNoteOf(e).trim().isNotEmpty) {
+pick = e;
+break;
+}
+}
+if (pick == null) return const SizedBox.shrink();
+final date = st.releaseDateTimeOf(pick);
+final note = st.releaseNoteOf(pick).trim();
+final cs = Theme.of(context).colorScheme;
+final hi = _first.isEmpty ? '' : '$_first, ';
+return Container(
+width: double.infinity,
+margin: const EdgeInsets.only(top: 18),
+padding: const EdgeInsets.all(14),
+decoration: BoxDecoration(
+color: cs.primaryContainer.withOpacity(0.35),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: cs.primary.withOpacity(0.25)),
+),
+child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+Icon(Icons.event_available, color: cs.primary),
+const SizedBox(width: 10),
+Expanded(
+child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+if (date != null)
+Text(
+'${hi}Natiijada imtixaanka $pick waxa si rasmi ah loo '
+'shaacin doona ${_somaliDate(date)}.',
+style: const TextStyle(
+fontSize: 14.5, fontWeight: FontWeight.w600)),
+if (note.isNotEmpty)
+Padding(
+padding: EdgeInsets.only(top: date != null ? 8 : 0),
+child: Text(note, style: const TextStyle(fontSize: 13.5)),
+),
+]),
+),
+]),
 );
 }
 
@@ -24765,7 +25354,8 @@ if (!mounted) return;
 ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
 }
 
-/// Overview: name, phone number(s) and Student ID.
+/// Overview: every detail of the student that the page shows: name, gender,
+/// Student ID, phone number(s), primary school, EMIS ID, Certificate/Transfer.
 Future<void> _editStudent(Map<String, dynamic> m) async {
 final oldPhones = <String>[
 if (m['phones'] is List)
@@ -24782,6 +25372,12 @@ final phoneC = TextEditingController(text: oldPhones.join(', '));
 final noC = TextEditingController(text: oldNo);
 final oldGender = '${m['gender'] ?? ''}'.trim();
 var gender = oldGender; // '' = not set
+final oldSchool = '${m['primarySchool'] ?? ''}'.trim();
+final oldEmis = '${m['emisId'] ?? ''}'.trim();
+final oldCert = '${m['certificate'] ?? ''}'.trim();
+final schoolC = TextEditingController(text: oldSchool);
+final emisC = TextEditingController(text: oldEmis);
+var cert = oldCert; // '' = not set
 final ok = await showDialog<bool>(
 context: context,
 builder: (ctx) => StatefulBuilder(
@@ -24838,6 +25434,41 @@ onSelected: (on) => setD(() => gender = on ? g : ''),
 ),
 ]),
 ),
+const SizedBox(height: 14),
+TextField(
+controller: schoolC,
+textCapitalization: TextCapitalization.words,
+decoration: const InputDecoration(
+labelText: 'Primary school',
+border: OutlineInputBorder(),
+),
+),
+const SizedBox(height: 12),
+TextField(
+controller: emisC,
+decoration: const InputDecoration(
+labelText: 'EMIS ID',
+border: OutlineInputBorder(),
+),
+),
+const SizedBox(height: 14),
+Align(
+alignment: Alignment.centerLeft,
+child: Text('Certificate / Transfer',
+style: TextStyle(fontSize: 12.5, color: Colors.black54)),
+),
+const SizedBox(height: 6),
+Align(
+alignment: Alignment.centerLeft,
+child: Wrap(spacing: 8, children: [
+for (final c in const ['Certificate', 'Transfer'])
+ChoiceChip(
+label: Text(c),
+selected: cert == c,
+onSelected: (on) => setD(() => cert = on ? c : ''),
+),
+]),
+),
 ]),
 ),
 ),
@@ -24855,9 +25486,13 @@ child: const Text('Save')),
 final name = nameC.text.trim();
 final phoneText = phoneC.text.trim();
 final no = noC.text.trim();
+final school = schoolC.text.trim();
+final emis = emisC.text.trim();
 nameC.dispose();
 phoneC.dispose();
 noC.dispose();
+schoolC.dispose();
+emisC.dispose();
 if (ok != true || !mounted) return;
 if (name.isEmpty) {
 _snack('The name cannot be empty.');
@@ -24873,7 +25508,10 @@ final oldFirst = oldPhones.isEmpty ? '' : oldPhones.first;
 if (name == oldName &&
 no == oldNo &&
 '$phones' == '$oldPhones' &&
-gender == oldGender) {
+gender == oldGender &&
+school == oldSchool &&
+emis == oldEmis &&
+cert == oldCert) {
 return;
 }
 try {
@@ -24893,6 +25531,9 @@ final upd = <String, Object?>{
 'username': newFirst,
 'studentNo': no,
 'gender': gender,
+'primarySchool': school,
+'emisId': emis,
+'certificate': cert,
 if (no != oldNo) 'studentNoAuto': false,
 'updatedBy': FirebaseAuth.instance.currentUser?.uid,
 'updatedAt': FieldValue.serverTimestamp(),
