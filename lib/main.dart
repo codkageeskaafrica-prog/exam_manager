@@ -9183,7 +9183,7 @@ class AppPages {
     assignments: 'Assignments',
     sections: 'Sections',
     students: 'Students',
-    attendance: 'Attendance',
+    attendance: 'Exam attendance',
     daily: 'Daily attendance',
     result: 'Result',
     schedule: 'Schedule',
@@ -10065,8 +10065,8 @@ class HomeScreen extends StatefulWidget {
     ),
     _HomeItem(
       page: AppPages.attendance,
-      title: 'Attendance',
-      subtitle: 'Mark exam attendance for a section',
+      title: 'Exam attendance',
+      subtitle: 'Mark attendance for each exam, by section',
       icon: Icons.fact_check,
       color: kGreen,
       builder: (_) => const AttendanceScreen(),
@@ -30108,7 +30108,7 @@ return _list(snap.data!);
 );
 }
 return Scaffold(
-appBar: AppBar(title: const Text('Attendance')),
+appBar: AppBar(title: const Text('Exam attendance')),
 body: Align(
 alignment: Alignment.topCenter,
 child: ConstrainedBox(
