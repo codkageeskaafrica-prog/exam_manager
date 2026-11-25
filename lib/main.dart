@@ -2761,7 +2761,7 @@ class ExamService {
           crossAxisAlignment: pw.CrossAxisAlignment.stretch,
           children: [
             if (logoImg != null) pdfLogoBlock(logoImg),
-            pw.Image(headerImg, width: double.infinity, fit: pw.BoxFit.fitWidth),
+            pw.Image(headerImg, fit: pw.BoxFit.fitWidth),
             pw.SizedBox(height: 8),
             if (heading != null) ...[
               _pdfHeading(heading, arFont),
@@ -3769,6 +3769,20 @@ class _UploadDialogState extends State<UploadDialog> {
     });
     final messenger = ScaffoldMessenger.of(context);
     try {
+      final rec = widget.record;
+      // No new file chosen: show the Word file that is already uploaded.
+      if (_file == null &&
+          rec.received &&
+          (rec.fileName ?? '').toLowerCase().endsWith('.docx')) {
+        final stored = await widget.service.loadStoredDocx(rec);
+        if (!mounted) return;
+        await showDialog(
+          context: context,
+          builder: (_) => DocxViewDialog(
+              bytes: stored, title: rec.fileName ?? 'Word file'),
+        );
+        return;
+      }
       final p = await widget.service.buildPreview(
         current: widget.record,
         file: _file,
@@ -3781,13 +3795,11 @@ class _UploadDialogState extends State<UploadDialog> {
       );
       if (!mounted) return;
       if (p.isDocx) {
-        // Word files cannot be drawn inside the app: download a copy to check.
-        _downloadInBrowser(p.bytes, p.name, _docxMimeType);
-        messenger.showSnackBar(const SnackBar(
-          duration: Duration(seconds: 6),
-          content: Text('Preview downloaded. Open it in Word to check, '
-              'then press Upload if it is correct.'),
-        ));
+        // Word file: show it inside the app (with a Download button).
+        await showDialog(
+          context: context,
+          builder: (_) => DocxViewDialog(bytes: p.bytes, title: p.name),
+        );
       } else {
         await showDialog(
           context: context,
@@ -5627,6 +5639,166 @@ class _ExamHeadingDialogState extends State<ExamHeadingDialog> {
           child: const Text('Save'),
         ),
       ],
+    );
+  }
+}
+
+/// Read-only, in-app view of a Word (.docx) file with a Download button.
+class DocxViewDialog extends StatefulWidget {
+  final Uint8List bytes;
+  final String title;
+  const DocxViewDialog({super.key, required this.bytes, required this.title});
+
+  @override
+  State<DocxViewDialog> createState() => _DocxViewDialogState();
+}
+
+class _DocxViewDialogState extends State<DocxViewDialog> {
+  List<DocxPara> _paras = const [];
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    try {
+      _paras = ExamService.docxParagraphs(widget.bytes);
+    } catch (e) {
+      _error = '$e'.replaceFirst('Exception: ', '');
+    }
+  }
+
+  TextAlign _align(DocxAlign a) {
+    switch (a) {
+      case DocxAlign.center:
+        return TextAlign.center;
+      case DocxAlign.end:
+        return TextAlign.end;
+      case DocxAlign.justify:
+        return TextAlign.justify;
+      case DocxAlign.start:
+        return TextAlign.start;
+    }
+  }
+
+  Widget _para(DocxPara p) {
+    if (p.text.isEmpty) return const SizedBox(height: 10);
+    final spans = <TextSpan>[];
+    var start = 0;
+    for (var i = 1; i <= p.text.length; i++) {
+      final end = i == p.text.length ||
+          i >= p.fmts.length ||
+          start >= p.fmts.length ||
+          p.fmts[i] != p.fmts[start];
+      if (end) {
+        final f = start < p.fmts.length ? p.fmts[start] : const DocxFmt();
+        spans.add(TextSpan(
+            text: p.text.substring(start, i),
+            style: _RichController.styleOf(f)
+                .copyWith(color: f.color == null ? Colors.black : null)));
+        start = i;
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: SizedBox(
+        width: double.infinity,
+        child: Text.rich(
+          TextSpan(children: spans),
+          textAlign: _align(p.align),
+          textDirection: p.rtl ? ui.TextDirection.rtl : ui.TextDirection.ltr,
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _body() {
+    final out = <Widget>[];
+    var i = 0;
+    while (i < _paras.length) {
+      final p = _paras[i];
+      if (p.cell < 0) {
+        out.add(_para(p));
+        i++;
+      } else {
+        // paragraphs of one table cell are boxed together
+        final cell = p.cell;
+        final inside = <Widget>[];
+        while (i < _paras.length && _paras[i].cell == cell) {
+          inside.add(_para(_paras[i]));
+          i++;
+        }
+        out.add(Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+              border: Border.all(color: Colors.black26, width: 0.8)),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: inside),
+        ));
+      }
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    return Dialog(
+      insetPadding: const EdgeInsets.all(16),
+      child: SizedBox(
+        width: size.width > 820 ? 780 : size.width,
+        height: size.height * 0.9,
+        child: Column(children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+            child: Row(children: [
+              Expanded(
+                child: Text(widget.title,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+              IconButton(
+                tooltip: 'Download',
+                icon: const Icon(Icons.download),
+                onPressed: () async {
+                  final name = widget.title.toLowerCase().endsWith('.docx')
+                      ? widget.title
+                      : '${widget.title}.docx';
+                  await _downloadInBrowser(
+                      widget.bytes, name, ExamService._docxMime);
+                },
+              ),
+              IconButton(
+                tooltip: 'Close',
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ]),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: _error != null
+                ? Center(child: Text(_error!))
+                : Container(
+              color: const Color(0xFFE9ECEF),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(12),
+                child: Container(
+                  padding: const EdgeInsets.all(24),
+                  color: Colors.white,
+                  child: SelectionArea(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: _body()),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
     );
   }
 }
