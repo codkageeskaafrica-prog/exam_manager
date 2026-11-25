@@ -19407,10 +19407,20 @@ padding: const EdgeInsets.fromLTRB(pad, 12, pad, 88),
 child: SizedBox(height: h, child: row),
 );
 });
-if (found == 0) return layout;
+// students still in a whole class that is not divided
+final banner = searching
+? const SizedBox.shrink()
+    : _notInSectionBar(context, sections, counts);
+if (found == 0) {
+return Column(children: [
+banner,
+Expanded(child: layout),
+]);
+}
 return Column(
 crossAxisAlignment: CrossAxisAlignment.start,
 children: [
+banner,
 Padding(
 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
 child: Text(
@@ -19427,6 +19437,160 @@ Expanded(child: layout),
 },
 );
 },
+);
+}
+
+/// A bar above the classes: how many students are NOT in a section yet (they
+/// are still in a whole class that was not divided), with a button that
+/// lists them.
+Widget _notInSectionBar(BuildContext context, List<SectionInfo> sections,
+Map<String, int> counts) {
+final whole = sections.where((s) => !s.isSub).toList();
+final n = whole.fold<int>(0, (a, s) => a + (counts[s.id] ?? 0));
+if (n == 0) return const SizedBox.shrink();
+final classes = whole.where((s) => (counts[s.id] ?? 0) > 0).length;
+return Padding(
+padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+child: Container(
+padding: const EdgeInsets.fromLTRB(14, 6, 8, 6),
+decoration: BoxDecoration(
+color: const Color(0xFFFFF4E0),
+borderRadius: BorderRadius.circular(12),
+border: Border.all(color: const Color(0xFFFFCC80)),
+),
+child: Row(children: [
+const Icon(Icons.person_off_outlined, color: Color(0xFFE67E22)),
+const SizedBox(width: 10),
+Expanded(
+child: Text(
+'$n student${n == 1 ? '' : 's'} ${n == 1 ? 'is' : 'are'} not in '
+'a section yet · $classes class${classes == 1 ? '' : 'es'} '
+'not divided',
+style: const TextStyle(fontWeight: FontWeight.w600),
+),
+),
+TextButton(
+onPressed: () => _showNotInSection(context, sections),
+child: const Text('Show'),
+),
+]),
+),
+);
+}
+
+/// Lists the students that are not in a section, grouped by class.
+Future<void> _showNotInSection(
+BuildContext context, List<SectionInfo> sections) {
+final byId = {for (final s in sections) s.id: s};
+final future = _service.watchAllStudents().first; // loaded once
+var q = '';
+return showDialog<void>(
+context: context,
+builder: (ctx) => StatefulBuilder(
+builder: (ctx, setD) => AlertDialog(
+title: const Text('Students not in a section'),
+content: SizedBox(
+width: 480,
+height: 520,
+child: FutureBuilder<List<StudentInfo>>(
+future: future,
+builder: (c, snap) {
+if (snap.hasError) {
+return Center(child: Text('Error: ${snap.error}'));
+}
+if (!snap.hasData) {
+return const Center(child: CircularProgressIndicator());
+}
+final words = q
+    .toLowerCase()
+    .split(RegExp(r'\s+'))
+    .where((t) => t.isNotEmpty)
+    .toList();
+final groups = <String, List<StudentInfo>>{};
+for (final p in snap.data!) {
+final sec = byId[p.sectionId];
+if (sec != null && sec.isSub) continue; // already in one
+if (!_hit('${p.name} ${p.phoneText}', words)) continue;
+(groups[sec?.label ?? 'No class'] ??= []).add(p);
+}
+final keys = groups.keys.toList()..sort();
+final total =
+groups.values.fold<int>(0, (a, l) => a + l.length);
+return Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+TextField(
+onChanged: (v) => setD(() => q = v),
+decoration: const InputDecoration(
+prefixIcon: Icon(Icons.search),
+hintText: 'Search name or phone',
+isDense: true,
+border: OutlineInputBorder(),
+),
+),
+const SizedBox(height: 10),
+Text(
+'$total student${total == 1 ? '' : 's'} in '
+'${keys.length} class${keys.length == 1 ? '' : 'es'}',
+style: const TextStyle(fontWeight: FontWeight.w600),
+),
+const SizedBox(height: 6),
+Expanded(
+child: keys.isEmpty
+? const Center(
+child: Text('Every student is in a section.'))
+    : ListView(children: [
+for (final k in keys)
+ExpansionTile(
+key: ValueKey('$k|$q'),
+initiallyExpanded: keys.length <= 2 ||
+words.isNotEmpty,
+tilePadding: EdgeInsets.zero,
+title: Text(k,
+style: const TextStyle(
+fontWeight: FontWeight.bold)),
+subtitle: Text(
+'${groups[k]!.length} student'
+'${groups[k]!.length == 1 ? '' : 's'}'),
+children: [
+for (final e in ([...groups[k]!]
+..sort((a, b) => a.name
+    .toLowerCase()
+    .compareTo(b.name.toLowerCase())))
+    .asMap()
+    .entries)
+ListTile(
+dense: true,
+contentPadding: EdgeInsets.zero,
+leading: SizedBox(
+width: 28,
+child: Text('${e.key + 1}',
+textAlign: TextAlign.right,
+style: const TextStyle(
+color: Colors.black54)),
+),
+title: Text(e.value.name),
+subtitle: e.value.phoneText.isEmpty
+? null
+    : Text(e.value.phoneText),
+),
+],
+),
+]),
+),
+],
+);
+},
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx),
+child: const Text('Close'),
+),
+],
+),
+),
 );
 }
 
