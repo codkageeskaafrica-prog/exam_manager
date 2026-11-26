@@ -2827,7 +2827,51 @@ class ExamService {
       'allowedTime': allowedTime,
       'updatedBy': FirebaseAuth.instance.currentUser?.uid,
       'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    }, SetOptions(merge: true)).then((_) => _refreshStoredFooter(
+        subject, form,
+        footer.replaceAll('Teacher: ', '').replaceAll('Teacher:', '')));
+  }
+
+  /// The footer text is written INTO the Word file when it is uploaded. When
+  /// the teacher is chosen or changed later, the footer of the already stored
+  /// .docx is rewritten too (PDF files cannot be changed: upload them again).
+  Future<void> _refreshStoredFooter(
+      String subject, String form, String footer) async {
+    if (footer.trim().isEmpty) return;
+    try {
+      final ref = _files.doc(ExamRecord.idFor(subject, form));
+      final d = (await ref.get()).data();
+      if (d == null || d['dataBase64'] == null) return;
+      if (!((d['fileName'] as String?) ?? '').toLowerCase().endsWith('.docx')) {
+        return;
+      }
+      final files = <String, List<int>>{};
+      for (final f
+      in zip.ZipDecoder().decodeBytes(base64Decode(d['dataBase64'] as String)).files) {
+        if (f.isFile) files[f.name] = List<int>.from(f.content as List<int>);
+      }
+      final raw = files['word/footer_school.xml'];
+      if (raw == null) return;
+      final xml = utf8.decode(raw);
+      final re = RegExp(r'(<w:t xml:space="preserve">)[^<]*(\| Page </w:t>)');
+      if (!re.hasMatch(xml)) return;
+      final next = xml.replaceFirstMapped(
+          re, (m) => '${m[1]}${_xml(footer.trim())} ${m[2]}');
+      if (next == xml) return;
+      files['word/footer_school.xml'] = utf8.encode(next);
+      final out = zip.Archive();
+      files.forEach(
+              (n, b) => out.addFile(zip.ArchiveFile(n, b.length, b)));
+      final bytes = Uint8List.fromList(zip.ZipEncoder().encode(out)!);
+      await ref.set({
+        'dataBase64': base64Encode(bytes),
+        'size': bytes.length,
+        'updatedBy': FirebaseAuth.instance.currentUser?.uid,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('Footer of the stored file was not updated: $e');
+    }
   }
 
   /// Stamps the general letterhead + footer on the file, uploads it and
@@ -2847,6 +2891,11 @@ class ExamService {
     void Function(String status)? onStatus,
   }) async {
     footer = footer.replaceAll('Teacher: ', '').replaceAll('Teacher:', '');
+    if (footer.trim().isEmpty) {
+      throw Exception(
+          'Choose the teacher first: the footer (Subject | Form | Teacher) is '
+              'written into the file and is empty until a teacher is chosen.');
+    }
     final letterhead = await getLetterhead();
     if (letterhead == null) {
       throw Exception(
