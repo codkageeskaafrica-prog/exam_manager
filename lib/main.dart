@@ -6931,14 +6931,18 @@ class ExamTableScreen extends StatelessWidget {
                         ),
                       );
                     }
-                    final table = SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Card(
-                        clipBehavior: Clip.antiAlias,
-                        child: ValueListenableBuilder<AppSettings>(
-                          valueListenable: appSettings,
-                          builder: (_, __, ___) =>
-                              _buildTable(context, service, data, sc),
+                    // The columns shrink to fit the space (all forms stay
+                    // visible); only if it is really tight does it scroll.
+                    final table = LayoutBuilder(
+                      builder: (_, bc) => SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: ValueListenableBuilder<AppSettings>(
+                            valueListenable: appSettings,
+                            builder: (_, __, ___) => _buildTable(
+                                context, service, data, sc, bc.maxWidth),
+                          ),
                         ),
                       ),
                     );
@@ -6976,7 +6980,9 @@ class ExamTableScreen extends StatelessWidget {
                     return LayoutBuilder(builder: (context, box) {
                       final w = box.maxWidth;
                       Widget body;
-                      if (w >= 1250 && cards.length > 1) {
+                      // room the table needs so every form column is visible
+                      final need = 290.0 + sc.formList.length * 170.0;
+                      if (cards.length > 1 && w >= need + 2 * 336 + 32) {
                         // first structure on the left, the others on the
                         // right blank space of the table
                         body = Row(
@@ -6989,7 +6995,7 @@ class ExamTableScreen extends StatelessWidget {
                             SizedBox(width: 320, child: stack(cards.sublist(1))),
                           ],
                         );
-                      } else if (w >= 900) {
+                      } else if (w >= need + 336 + 32) {
                         body = Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -7001,7 +7007,17 @@ class ExamTableScreen extends StatelessWidget {
                       } else {
                         body = Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [stack(cards), const SizedBox(height: 12), table],
+                          children: [
+                            Wrap(
+                              spacing: 12,
+                              runSpacing: 12,
+                              children: [
+                                for (final cd in cards) SizedBox(width: 320, child: cd),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            table,
+                          ],
                         );
                       }
                       return SingleChildScrollView(
@@ -7020,10 +7036,15 @@ class ExamTableScreen extends StatelessWidget {
   }
 
   Widget _buildTable(BuildContext context, ExamService service,
-      Map<String, ExamRecord> data, TeacherScope sc) {
+      Map<String, ExamRecord> data, TeacherScope sc,
+      [double avail = double.infinity]) {
     const subjectWidth = 130.0;
     const dateWidth = 150.0;
-    const cellWidth = 220.0;
+    // fit all forms in the available width (150..220 per form column)
+    final nForms = sc.formList.isEmpty ? 1 : sc.formList.length;
+    final cellWidth = avail.isFinite
+        ? ((avail - 8 - subjectWidth - dateWidth) / nForms).clamp(150.0, 220.0).toDouble()
+        : 220.0;
     // only someone who sees every subject can set the exam dates
     final canSetDates = !sc.restricted && !sc.isStudent;
 
@@ -21612,22 +21633,54 @@ _toast('Download failed: ${_err(e)}');
 }
 }
 
-Future<void> _exportList(
-List<StudentInfo> shown, Map<String, SectionInfo> secById) {
-final b = StringBuffer('Class,Student name,Phone,Gender,Primary school,'
-'EMIS ID,Certificate/Transfer\r\n');
-for (final s in shown) {
-b.write('${_csvCell(secById[s.sectionId]?.label ?? '')},'
-'${_csvCell(s.name)},${_csvCell(s.phone)},${_csvCell(s.gender)},'
-'${_csvCell(s.primarySchool)},${_csvCell(s.emisId)},'
-'${_csvCell(s.certificate)}\r\n');
+Future<void> _saveXlsx(String fileName, Uint8List bytes) async {
+try {
+final path = await _downloadInBrowser(bytes, fileName,
+'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+_toast(
+path == null && !kIsWeb
+? 'Download cancelled (nothing was saved).'
+    : 'Saved $fileName${path == null ? '' : '\nSaved to: $path'}',
+seconds: 8);
+} catch (e) {
+_toast('Download failed: ${_err(e)}');
 }
-return _saveCsv('Students-${DateTime.now().year}.csv', b.toString());
 }
 
-Future<void> _template() =>
-_saveCsv('Students-template.csv',
-'Class,Student name,Phone,Gender,Primary school,EMIS ID,Certificate/Transfer\r\n');
+static const _studentHead = [
+'Class',
+'Student name',
+'Phone',
+'Gender',
+'Primary school',
+'EMIS ID',
+'Certificate/Transfer'
+];
+
+Future<void> _exportList(
+List<StudentInfo> shown, Map<String, SectionInfo> secById) {
+final bytes = buildSimpleXlsx(
+sheetName: 'Students',
+head: _studentHead,
+rows: [
+for (final s in shown)
+[
+secById[s.sectionId]?.label ?? '',
+s.name,
+s.phone,
+s.gender,
+s.primarySchool,
+s.emisId,
+s.certificate,
+]
+],
+);
+return _saveXlsx('Students-${DateTime.now().year}.xlsx', bytes);
+}
+
+Future<void> _template() => _saveXlsx(
+'Students-template.xlsx',
+buildSimpleXlsx(sheetName: 'Students', head: _studentHead, rows: const []));
 
 // ---------------- Screen ----------------
 Widget _frame(Widget body,
@@ -22469,9 +22522,13 @@ final sec = secById[s.sectionId]!;
 return Card(
 child: ListTile(
 onTap: () => _open(s, sec),
-leading: CircleAvatar(
+leading: UserAvatar(
+uid: s.accountUid,
+name: s.name,
+fallback: CircleAvatar(
 backgroundColor: cs.primaryContainer,
 child: Text('${i + 1}'),
+),
 ),
 title: Text(s.name),
 subtitle: Column(
@@ -22500,6 +22557,10 @@ color: s.phoneText.isEmpty
 ? Colors.orange.shade800
     : Colors.black87)),
 ),
+if (s.phoneText.isNotEmpty) ...[
+const SizedBox(width: 6),
+WhatsAppButton(s.phoneText),
+],
 ]),
 ],
 ),
@@ -22611,7 +22672,7 @@ value: 'list',
 child: ListTile(
 dense: true,
 leading: Icon(Icons.table_chart, color: Color(0xFF1D6F42)),
-title: Text('Download this list (CSV)'))),
+title: Text('Download this list (Excel)'))),
 PopupMenuItem(
 value: 'template',
 child: ListTile(
@@ -22725,14 +22786,11 @@ margin: EdgeInsets.zero,
 child: Padding(
 padding: const EdgeInsets.all(14),
 child: Row(children: [
-CircleAvatar(
+EditableAvatar(
+name: name,
 radius: 28,
 backgroundColor: cs.primaryContainer,
-child: Text(name.isEmpty ? '?' : name[0].toUpperCase(),
-style: TextStyle(
-fontSize: 24,
-fontWeight: FontWeight.bold,
-color: cs.onPrimaryContainer)),
+foregroundColor: cs.onPrimaryContainer,
 ),
 const SizedBox(width: 14),
 Expanded(
@@ -41110,9 +41168,7 @@ return ExpansionTile(
 tilePadding: EdgeInsets.zero,
 childrenPadding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
 expandedCrossAxisAlignment: CrossAxisAlignment.start,
-leading: CircleAvatar(
-child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
-),
+leading: UserAvatar(uid: u.uid, name: title),
 title: Text(isMe ? '$title (you)' : title),
 trailing: u.approved
 ? null
@@ -41396,6 +41452,7 @@ style: const TextStyle(fontSize: 12, color: Colors.black54)),
 /// One teacher or staff member (Firestore: teachers/{id}).
 class TeacherInfo {
 final String id, name, role, phone, email;
+final String gender; // '', 'Male' or 'Female'
 final List<String> subjects, forms;
 
 /// Allowed by the administrator to take attendance of every section.
@@ -41414,15 +41471,20 @@ required this.name,
 this.role = 'Teacher',
 this.phone = '',
 this.email = '',
+this.gender = '',
 this.subjects = const [],
 this.forms = const [],
 this.assignments = const {},
 });
 
 static const roles = ['Teacher', 'Head teacher', 'Deputy head', 'Staff'];
+static const genders = ['Male', 'Female'];
 
 /// Everybody except the non-teaching "Staff" role.
 bool get isTeaching => role != 'Staff';
+
+/// Head teacher / Deputy head: shown as "Administration".
+bool get isAdministration => role == 'Head teacher' || role == 'Deputy head';
 
 String get initials {
 final parts =
@@ -41448,6 +41510,9 @@ name: '${m['name'] ?? ''}',
 role: TeacherInfo.roles.contains(role) ? role : 'Teacher',
 phone: '${m['phone'] ?? ''}',
 email: '${m['email'] ?? ''}',
+gender: TeacherInfo.genders.contains('${m['gender'] ?? ''}')
+? '${m['gender']}'
+    : '',
 subjects: asg.isEmpty
 ? list('subjects')
     : [for (final s in ExamService.subjects) if (asg.containsKey(s)) s],
@@ -41521,6 +41586,274 @@ await FirebaseFirestore.instance.yearCol('notifications').add({
 return true;
 }
 
+// ======================= PROFILE PHOTOS =======================
+/// Profile photos of every account (admin, teacher / staff, student...).
+/// Stored as a small square image in Firestore: profilePhotos/{uid}
+/// -> { data: Blob, updatedAt }. Kept apart from users/{uid} so the lists
+/// that read the users do not become heavy.
+class ProfilePhotos {
+static const int _size = 256; // saved photo: 256 x 256 px
+static const int _maxPickBytes = 20 * 1024 * 1024;
+
+static DocumentReference<Map<String, dynamic>> _doc(String uid) =>
+FirebaseFirestore.instance.collection('profilePhotos').doc(uid);
+
+static Stream<Uint8List?> watch(String uid) => _doc(uid).snapshots().map((d) {
+final v = d.data()?['data'];
+if (v is Blob && v.bytes.isNotEmpty) return v.bytes;
+return null;
+});
+
+/// Crops the picture to a centred square and shrinks it (PNG).
+static Future<Uint8List> _square(Uint8List src) async {
+final codec = await ui.instantiateImageCodec(src, targetWidth: 640);
+final frame = await codec.getNextFrame();
+final img = frame.image;
+final side = img.width < img.height ? img.width : img.height;
+final srcRect = Rect.fromLTWH((img.width - side) / 2,
+(img.height - side) / 2, side.toDouble(), side.toDouble());
+final dst = Rect.fromLTWH(0, 0, _size.toDouble(), _size.toDouble());
+final rec = ui.PictureRecorder();
+final canvas = Canvas(rec);
+canvas.drawImageRect(
+img, srcRect, dst, Paint()..filterQuality = FilterQuality.high);
+final out = await rec.endRecording().toImage(_size, _size);
+final data = await out.toByteData(format: ui.ImageByteFormat.png);
+img.dispose();
+out.dispose();
+if (data == null) throw 'The picture could not be converted.';
+return data.buffer.asUint8List();
+}
+
+/// Lets the signed-in person choose a picture and saves it as the own
+/// profile photo.
+static Future<void> pickAndSave(BuildContext context) async {
+final messenger = ScaffoldMessenger.of(context);
+final uid = FirebaseAuth.instance.currentUser?.uid;
+if (uid == null) return;
+try {
+final res = await FilePicker.platform
+    .pickFiles(type: FileType.image, withData: true);
+if (res == null || res.files.isEmpty) return;
+final bytes = res.files.first.bytes;
+if (bytes == null) throw 'The picture could not be read.';
+if (bytes.length > _maxPickBytes) {
+throw 'The picture is too big (maximum 20 MB).';
+}
+final small = await _square(bytes);
+await _doc(uid).set({
+'data': Blob(small),
+'updatedAt': FieldValue.serverTimestamp(),
+});
+messenger.showSnackBar(
+const SnackBar(content: Text('Profile photo saved.')));
+} catch (e) {
+messenger.showSnackBar(
+SnackBar(content: Text('Could not save the photo: $e')));
+}
+}
+
+static Future<void> removeMine(BuildContext context) async {
+final messenger = ScaffoldMessenger.of(context);
+final uid = FirebaseAuth.instance.currentUser?.uid;
+if (uid == null) return;
+try {
+await _doc(uid).delete();
+messenger.showSnackBar(
+const SnackBar(content: Text('Profile photo removed.')));
+} catch (e) {
+messenger.showSnackBar(
+SnackBar(content: Text('Could not remove the photo: $e')));
+}
+}
+}
+
+/// Round picture of a person: the profile photo when there is one, else the
+/// first letter of the name.
+class UserAvatar extends StatelessWidget {
+final String uid;
+final String name;
+final double radius;
+final Color? backgroundColor;
+final Color? foregroundColor;
+
+/// Shown instead of the first letter while there is no photo.
+final Widget? fallback;
+const UserAvatar({
+super.key,
+required this.uid,
+required this.name,
+this.radius = 20,
+this.backgroundColor,
+this.foregroundColor,
+this.fallback,
+});
+
+static Widget _letter(String name, double radius, Color? bg, Color? fg) =>
+CircleAvatar(
+radius: radius,
+backgroundColor: bg,
+foregroundColor: fg,
+child: Text(name.trim().isEmpty ? '?' : name.trim()[0].toUpperCase(),
+style: TextStyle(
+fontSize: radius * 0.85, fontWeight: FontWeight.bold)),
+);
+
+@override
+Widget build(BuildContext context) {
+if (uid.isEmpty) {
+return fallback ??
+_letter(name, radius, backgroundColor, foregroundColor);
+}
+return StreamBuilder<Uint8List?>(
+stream: ProfilePhotos.watch(uid),
+builder: (context, snap) {
+final bytes = snap.data;
+if (bytes == null) {
+return fallback ??
+_letter(name, radius, backgroundColor, foregroundColor);
+}
+return CircleAvatar(
+radius: radius,
+backgroundColor: backgroundColor,
+backgroundImage: MemoryImage(bytes),
+);
+},
+);
+}
+}
+
+/// Photo of a teacher / staff member in the Teachers & Staff list. The photo
+/// belongs to the person's login account, so the account is looked up once
+/// (same id, or the same email) and remembered. [fallback] (the coloured
+/// initials) is shown while there is no account or no photo.
+class TeacherPhoto extends StatelessWidget {
+final TeacherInfo teacher;
+final double size;
+final Widget fallback;
+const TeacherPhoto({
+super.key,
+required this.teacher,
+required this.fallback,
+this.size = 52,
+});
+
+static final Map<String, Future<String?>> _uids = {};
+
+Future<String?> _uid() => _uids.putIfAbsent(
+'${teacher.id}|${teacher.email.trim().toLowerCase()}',
+() => userUidOfTeacher(teacher.id).then<String?>((v) => v,
+onError: (_) => null),
+);
+
+@override
+Widget build(BuildContext context) {
+if (teacher.id.isEmpty) return fallback;
+return FutureBuilder<String?>(
+future: _uid(),
+builder: (context, a) {
+final uid = a.data;
+if (uid == null || uid.isEmpty) return fallback;
+return StreamBuilder<Uint8List?>(
+stream: ProfilePhotos.watch(uid),
+builder: (context, b) {
+final bytes = b.data;
+if (bytes == null) return fallback;
+return Container(
+width: size,
+height: size,
+decoration: BoxDecoration(
+shape: BoxShape.circle,
+image: DecorationImage(
+image: MemoryImage(bytes), fit: BoxFit.cover),
+),
+);
+},
+);
+},
+);
+}
+}
+
+/// The signed-in person's own photo: tap it to add, change or remove it.
+class EditableAvatar extends StatelessWidget {
+final String name;
+final double radius;
+final Color? backgroundColor;
+final Color? foregroundColor;
+const EditableAvatar({
+super.key,
+required this.name,
+this.radius = 28,
+this.backgroundColor,
+this.foregroundColor,
+});
+
+@override
+Widget build(BuildContext context) {
+final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+return StreamBuilder<Uint8List?>(
+stream: uid.isEmpty ? null : ProfilePhotos.watch(uid),
+builder: (context, snap) {
+final has = snap.data != null;
+return Tooltip(
+message: has ? 'Change profile photo' : 'Add profile photo',
+child: InkWell(
+customBorder: const CircleBorder(),
+onTap: uid.isEmpty
+? null
+    : () => showModalBottomSheet<void>(
+context: context,
+builder: (ctx) => SafeArea(
+child: Column(mainAxisSize: MainAxisSize.min, children: [
+ListTile(
+leading: const Icon(Icons.photo_library_outlined),
+title: Text(has ? 'Choose a new photo' : 'Choose a photo'),
+onTap: () {
+Navigator.pop(ctx);
+ProfilePhotos.pickAndSave(context);
+},
+),
+if (has)
+ListTile(
+leading: const Icon(Icons.delete_outline,
+color: Colors.red),
+title: const Text('Remove photo',
+style: TextStyle(color: Colors.red)),
+onTap: () {
+Navigator.pop(ctx);
+ProfilePhotos.removeMine(context);
+},
+),
+]),
+),
+),
+child: Stack(clipBehavior: Clip.none, children: [
+UserAvatar(
+uid: uid,
+name: name,
+radius: radius,
+backgroundColor: backgroundColor,
+foregroundColor: foregroundColor),
+Positioned(
+right: -2,
+bottom: -2,
+child: CircleAvatar(
+radius: radius * 0.32 < 9 ? 9 : radius * 0.32,
+backgroundColor: Theme.of(context).colorScheme.primary,
+child: Icon(Icons.camera_alt,
+size: (radius * 0.32 < 9 ? 9 : radius * 0.32) * 1.1,
+color: Theme.of(context).colorScheme.onPrimary),
+),
+),
+]),
+),
+);
+},
+);
+}
+}
+
 /// Name, role and email of the signed-in person in the app bar. Tap it to see
 /// the full details (phone, subjects and forms of a teacher / staff member).
 class AccountBadge extends StatefulWidget {
@@ -41567,8 +41900,7 @@ showDialog(
 context: context,
 builder: (ctx) => AlertDialog(
 title: Row(children: [
-CircleAvatar(
-child: Text(TeacherInfo(id: '', name: name).initials)),
+EditableAvatar(name: name, radius: 26),
 const SizedBox(width: 12),
 Expanded(child: Text(name, overflow: TextOverflow.ellipsis)),
 ]),
@@ -41576,7 +41908,14 @@ content: SizedBox(
 width: 380,
 child: SingleChildScrollView(
 child: Column(mainAxisSize: MainAxisSize.min, children: [
+const Padding(
+padding: EdgeInsets.only(bottom: 8),
+child: Text('Tap your picture to add or change your photo.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+),
 _row(Icons.badge_outlined, 'Role', role),
+if (t != null && t.gender.isNotEmpty)
+_row(Icons.wc_outlined, 'Gender', t.gender),
 if (!hideEmail) _row(Icons.email_outlined, 'Email', email),
 if (t != null) ...[
 _row(Icons.phone_outlined, 'Phone', t.phone),
@@ -41636,10 +41975,12 @@ borderRadius: BorderRadius.circular(8),
 onTap: () =>
 _details(name, role, email, t, hideEmail: isStudent),
 child: ConstrainedBox(
-constraints: const BoxConstraints(maxWidth: 230),
+constraints: const BoxConstraints(maxWidth: 270),
 child: Padding(
 padding:
 const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+child: Row(mainAxisSize: MainAxisSize.min, children: [
+Flexible(
 child: Column(
 mainAxisSize: MainAxisSize.min,
 crossAxisAlignment: CrossAxisAlignment.end,
@@ -41655,6 +41996,10 @@ overflow: TextOverflow.ellipsis,
 style: const TextStyle(fontSize: 11)),
 ],
 ),
+),
+const SizedBox(width: 8),
+UserAvatar(uid: user?.uid ?? '', name: name, radius: 16),
+]),
 ),
 ),
 );
@@ -41762,6 +42107,7 @@ await ref.set({
 'role': t.role,
 'phone': t.phone.trim(),
 'email': t.email.trim().toLowerCase(),
+'gender': t.gender,
 'subjects': t.subjects,
 'forms': t.forms,
 'assignments': t.assignments,
@@ -41772,7 +42118,7 @@ await ref.set({
 // mergeFields replaces "assignments" as a whole; a plain merge would
 // keep a subject that was just removed.
 }, SetOptions(mergeFields: [
-'name', 'role', 'phone', 'email', 'subjects', 'forms', 'assignments',
+'name', 'role', 'gender', 'phone', 'email', 'subjects', 'forms', 'assignments',
 'formClasses', 'allSections', 'updatedBy', 'updatedAt',
 ]));
 await _ensureUser(ref.id, t);
@@ -41845,6 +42191,7 @@ final name = TextEditingController(text: t?.name ?? presetName);
 final phone = TextEditingController(text: t?.phone ?? '');
 final email = TextEditingController(text: t?.email ?? presetEmail);
 var role = t?.role ?? 'Teacher';
+var gender = t?.gender ?? '';
 var allSec = t?.allSections ?? false;
 // subject -> the forms in which it is taught
 final assign = <String, Set<String>>{
@@ -41907,6 +42254,19 @@ for (final r in TeacherInfo.roles)
 DropdownMenuItem(value: r, child: Text(r)),
 ],
 onChanged: (v) => setD(() => role = v ?? role),
+),
+const SizedBox(height: 12),
+DropdownButtonFormField<String>(
+value: gender.isEmpty ? null : gender,
+decoration: const InputDecoration(
+labelText: 'Gender',
+border: OutlineInputBorder(),
+),
+items: [
+for (final g in TeacherInfo.genders)
+DropdownMenuItem(value: g, child: Text(g)),
+],
+onChanged: (v) => setD(() => gender = v ?? ''),
 ),
 const SizedBox(height: 12),
 TextField(
@@ -42190,6 +42550,7 @@ TeacherInfo(
 id: t?.id ?? newId,
 name: name.text.trim(),
 role: role,
+gender: gender,
 phone: phone.text.trim(),
 email: email.text.trim(),
 subjects: asg.keys.toList(),
@@ -42241,6 +42602,182 @@ toast('Failed: $e');
 }
 }
 
+/// Builds a one-sheet Excel (.xlsx) file. Every value is stored as text (so
+/// phone numbers keep their digits) and each column is sized to fit its
+/// longest value (min 8, max 60 characters).
+Uint8List buildSimpleXlsx({
+required String sheetName,
+required List<String> head,
+required List<List<String>> rows,
+}) {
+String colName(int i) {
+var n = i + 1;
+var s = '';
+while (n > 0) {
+final m = (n - 1) % 26;
+s = String.fromCharCode(65 + m) + s;
+n = (n - 1) ~/ 26;
+}
+return s;
+}
+
+String cell(int c, int r, String v, int style) =>
+'<c r="${colName(c)}$r" s="$style" t="inlineStr"><is>'
+'<t xml:space="preserve">${ExamService._xml(v)}</t></is></c>';
+
+// auto-fit: widest value in each column
+final widths = [for (final h in head) h.length + 4.0];
+for (final row in rows) {
+for (var i = 0; i < head.length && i < row.length; i++) {
+final w = row[i].length + 3.0;
+if (w > widths[i]) widths[i] = w;
+}
+}
+for (var i = 0; i < widths.length; i++) {
+widths[i] = widths[i].clamp(8.0, 60.0).toDouble();
+}
+
+final sheetRows = StringBuffer('<row r="1">');
+for (var i = 0; i < head.length; i++) {
+sheetRows.write(cell(i, 1, head[i], 1));
+}
+sheetRows.write('</row>');
+var r = 2;
+for (final row in rows) {
+sheetRows.write('<row r="$r">');
+for (var i = 0; i < head.length && i < row.length; i++) {
+if (row[i].isNotEmpty) sheetRows.write(cell(i, r, row[i], 0));
+}
+sheetRows.write('</row>');
+r++;
+}
+const xmlHead = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+const ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+final cols = StringBuffer('<cols>');
+for (var i = 0; i < widths.length; i++) {
+cols.write('<col min="${i + 1}" max="${i + 1}" width="${widths[i]}" customWidth="1"/>');
+}
+cols.write('</cols>');
+final safeName = sheetName.replaceAll(RegExp(r'[\\/?*\[\]:]'), ' ');
+final files = <String, String>{
+'[Content_Types].xml': '$xmlHead<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+'<Default Extension="xml" ContentType="application/xml"/>'
+'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+'<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+'</Types>',
+'_rels/.rels': '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+'<Relationship Id="rId1" Type="$rel/officeDocument" Target="xl/workbook.xml"/>'
+'</Relationships>',
+'xl/workbook.xml': '$xmlHead<workbook xmlns="$ns" xmlns:r="$rel">'
+'<sheets><sheet name="${ExamService._xml(safeName)}" sheetId="1" r:id="rId1"/></sheets></workbook>',
+'xl/_rels/workbook.xml.rels': '$xmlHead<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+'<Relationship Id="rId1" Type="$rel/worksheet" Target="worksheets/sheet1.xml"/>'
+'<Relationship Id="rId2" Type="$rel/styles" Target="styles.xml"/>'
+'</Relationships>',
+'xl/styles.xml': '$xmlHead<styleSheet xmlns="$ns">'
+'<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+'<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>'
+'<fills count="3"><fill><patternFill patternType="none"/></fill>'
+'<fill><patternFill patternType="gray125"/></fill>'
+'<fill><patternFill patternType="solid"><fgColor rgb="FF3498DB"/><bgColor indexed="64"/></patternFill></fill></fills>'
+'<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+'<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+'<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+'<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs>'
+'</styleSheet>',
+'xl/worksheets/sheet1.xml': '$xmlHead<worksheet xmlns="$ns">'
+'<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+'$cols<sheetData>$sheetRows</sheetData></worksheet>',
+};
+final out = zip.Archive();
+files.forEach((name, text) {
+final data = utf8.encode(text);
+out.addFile(zip.ArchiveFile(name, data.length, data));
+});
+return Uint8List.fromList(zip.ZipEncoder().encode(out)!);
+}
+
+/// Digits-only international number for WhatsApp ("252634187418"), or ''.
+/// Somali local numbers (9 digits starting with 6 or 7, or 0 + 9 digits)
+/// get the 252 country code.
+String whatsAppNumber(String raw) {
+var d = raw.replaceAll(RegExp(r'[^0-9]'), '');
+if (d.startsWith('00')) d = d.substring(2);
+if (d.length == 10 && d.startsWith('0')) d = d.substring(1);
+if (d.length == 9 && (d.startsWith('6') || d.startsWith('7'))) d = '252$d';
+return d.length >= 10 && d.length <= 15 ? d : '';
+}
+
+/// Every phone number found in a text such as "2526341 / 2526339".
+List<String> whatsAppNumbers(String raw) {
+final out = <String>[];
+for (final p in raw.split(RegExp(r'[/,;\n]'))) {
+final n = whatsAppNumber(p);
+if (n.isNotEmpty && !out.contains(n)) out.add(n);
+}
+return out;
+}
+
+/// Small green WhatsApp button: opens a WhatsApp chat with the number
+/// (a menu lets you pick when there are several numbers).
+class WhatsAppButton extends StatelessWidget {
+final String phones;
+const WhatsAppButton(this.phones, {super.key});
+
+static const _green = Color(0xFF25D366);
+
+Future<void> _open(BuildContext context, String number) async {
+var ok = false;
+try {
+ok = await launchUrl(Uri.parse('https://wa.me/$number'),
+mode: LaunchMode.externalApplication);
+} catch (_) {}
+if (!ok && context.mounted) {
+ScaffoldMessenger.of(context).showSnackBar(
+const SnackBar(content: Text('Could not open WhatsApp')));
+}
+}
+
+@override
+Widget build(BuildContext context) {
+final nums = whatsAppNumbers(phones);
+if (nums.isEmpty) return const SizedBox.shrink();
+const icon = Padding(
+padding: EdgeInsets.all(3),
+child: Icon(Icons.chat_rounded, size: 18, color: _green),
+);
+if (nums.length == 1) {
+return Tooltip(
+message: 'WhatsApp +${nums.first}',
+child: InkWell(
+borderRadius: BorderRadius.circular(12),
+onTap: () => _open(context, nums.first),
+child: icon,
+),
+);
+}
+return PopupMenuButton<String>(
+tooltip: 'WhatsApp',
+padding: EdgeInsets.zero,
+onSelected: (n) => _open(context, n),
+itemBuilder: (_) => [
+for (final n in nums)
+PopupMenuItem(
+value: n,
+child: Row(children: [
+const Icon(Icons.chat_rounded, size: 18, color: _green),
+const SizedBox(width: 8),
+Text('WhatsApp +$n'),
+])),
+],
+child: icon,
+);
+}
+}
+
 class TeachersScreen extends StatefulWidget {
 const TeachersScreen({super.key});
 
@@ -42251,7 +42788,8 @@ State<TeachersScreen> createState() => _TeachersScreenState();
 class _TeachersScreenState extends State<TeachersScreen> {
 final _service = TeacherService();
 final _search = TextEditingController();
-String _filter = 'All'; // All | Teaching | Staff
+String _filter = 'All'; // All | Teaching | Administration | Staff
+bool _busy = false;
 
 @override
 void dispose() {
@@ -42289,9 +42827,252 @@ _toast('Failed: $e');
 }
 }
 
+static String _csv(String v) =>
+RegExp(r'[",\r\n]').hasMatch(v) ? '"${v.replaceAll('"', '""')}"' : v;
+
+/// Downloads everybody (teachers, administration and staff) as an Excel
+/// (.xlsx) file. The same file can be uploaded again.
+Future<void> _download() async {
+try {
+final all = await _service.watch().first;
+final bytes = _buildStaffXlsx(all);
+final path = await _downloadInBrowser(
+bytes,
+'Teachers-and-staff.xlsx',
+'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+if (path != null || kIsWeb) _toast('Staff file saved (${all.length} people)');
+} catch (e) {
+_toast('Download failed: $e');
+}
+}
+
+static Uint8List _buildStaffXlsx(List<TeacherInfo> all) {
+return buildSimpleXlsx(
+sheetName: 'Teachers and staff',
+head: const ['Name', 'Role', 'Gender', 'Phone', 'Email', 'Subjects and forms'],
+rows: [
+for (final t in all)
+[
+t.name,
+t.role,
+t.gender,
+t.phone,
+t.email,
+t.assignments.isEmpty
+? [...t.subjects, ...t.forms].join(', ')
+    : assignmentsText(t.assignments),
+]
+],
+);
+}
+
+/// Excel may turn a phone number into 6.34E+08: bring the digits back.
+static String _phoneFrom(String raw) {
+final v = raw.trim();
+if (RegExp(r'^\d+(\.\d+)?[eE]\+?\d+$').hasMatch(v)) {
+final d = double.tryParse(v);
+if (d != null) return d.toStringAsFixed(0);
+}
+return v.endsWith('.0') ? v.substring(0, v.length - 2) : v;
+}
+
+static String _roleFrom(String raw) {
+final r = raw.trim().toLowerCase();
+if (r.isEmpty) return 'Teacher';
+if (r.contains('deputy')) return 'Deputy head';
+if (r.contains('head') || r.contains('admin') || r.contains('principal')) {
+return 'Head teacher';
+}
+if (r.contains('staff')) return 'Staff';
+return 'Teacher';
+}
+
+static String _genderFrom(String raw) {
+final g = raw.trim().toLowerCase();
+if (g.startsWith('m')) return 'Male';
+if (g.startsWith('f')) return 'Female';
+return '';
+}
+
+/// Uploads an Excel (.xlsx) or CSV file (columns: Name, Role, Gender, Phone, Email). People that
+/// already exist (same email, phone or name) are updated, the others added.
+Future<void> _upload() async {
+try {
+final res = await FilePicker.platform.pickFiles(
+withData: true,
+type: FileType.custom,
+allowedExtensions: ['xlsx', 'csv', 'txt'],
+);
+if (res == null || res.files.isEmpty) return;
+final bytes = res.files.first.bytes;
+if (bytes == null) throw Exception('Could not read the file.');
+final isXlsx = (res.files.first.extension ?? '').toLowerCase() == 'xlsx';
+final rows = isXlsx
+? SchoolService.parseXlsx(bytes)
+    : SchoolService.parseCsv(utf8.decode(bytes, allowMalformed: true));
+if (rows.length < 2) throw Exception('The file has no rows.');
+final head = [for (final h in rows.first) h.trim().toLowerCase()];
+int col(List<String> names) {
+for (var i = 0; i < head.length; i++) {
+if (names.any((n) => head[i] == n || head[i].startsWith(n))) return i;
+}
+return -1;
+}
+
+final iName = col(['name', 'full name']);
+final iRole = col(['role']);
+final iGender = col(['gender', 'sex']);
+final iPhone = col(['phone', 'mobile', 'tel']);
+final iEmail = col(['email']);
+if (iName < 0) {
+throw Exception('The first row must have a "Name" column '
+'(optional: Role, Gender, Phone, Email).');
+}
+String cell(List<String> r, int i) =>
+(i >= 0 && i < r.length) ? r[i].trim() : '';
+
+final existing = await _service.watch().first;
+final toSave = <TeacherInfo>[];
+var added = 0, updated = 0, unchanged = 0;
+final addedNames = <String>[];
+final changeLines = <String>[]; // "Name: Field old → new"
+for (final r in rows.skip(1)) {
+final name = cell(r, iName);
+if (name.isEmpty) continue;
+final phone = _phoneFrom(cell(r, iPhone));
+final email = cell(r, iEmail).toLowerCase();
+final role = iRole >= 0 ? _roleFrom(cell(r, iRole)) : null;
+final gender = _genderFrom(cell(r, iGender));
+TeacherInfo? old;
+for (final e in existing) {
+if ((email.isNotEmpty && e.email.toLowerCase() == email) ||
+(phone.isNotEmpty && e.phone == phone) ||
+e.name.trim().toLowerCase() == name.toLowerCase()) {
+old = e;
+break;
+}
+}
+if (old == null) {
+toSave.add(TeacherInfo(
+id: '',
+name: name,
+role: role ?? 'Teacher',
+gender: gender,
+phone: phone,
+email: email));
+added++;
+addedNames.add(name);
+} else {
+// only the fields that really differ from the system are updated
+final nName = name;
+final nRole = role ?? old.role;
+final nGender = gender.isNotEmpty ? gender : old.gender;
+final nPhone = phone.isNotEmpty ? phone : old.phone;
+final nEmail = email.isNotEmpty ? email : old.email.toLowerCase();
+final diffs = <String>[];
+String show(String v) => v.isEmpty ? '(empty)' : v;
+void diff(String field, String a, String b) {
+if (a != b) diffs.add('$field: ${show(a)} → ${show(b)}');
+}
+
+diff('Name', old.name.trim(), nName);
+diff('Role', old.role, nRole);
+diff('Gender', old.gender, nGender);
+diff('Phone', old.phone.trim(), nPhone.trim());
+diff('Email', old.email.trim().toLowerCase(), nEmail.trim());
+if (diffs.isEmpty) {
+unchanged++;
+} else {
+toSave.add(TeacherInfo(
+id: old.id,
+name: nName,
+role: nRole,
+gender: nGender,
+phone: nPhone,
+email: nEmail,
+subjects: old.subjects,
+forms: old.forms,
+assignments: old.assignments,
+formClasses: old.formClasses,
+allSections: old.allSections,
+));
+updated++;
+changeLines.add('${old.name.trim()}\n   ${diffs.join('\n   ')}');
+}
+}
+}
+if (toSave.isEmpty) {
+_toast(unchanged > 0
+? 'Nothing new: all $unchanged people in the file are already '
+'up to date.'
+    : 'No names found in the file.');
+return;
+}
+if (!mounted) return;
+final ok = await showDialog<bool>(
+context: context,
+builder: (ctx) => AlertDialog(
+title: const Text('Upload staff file'),
+content: SizedBox(
+width: 420,
+child: SingleChildScrollView(
+child: Column(
+crossAxisAlignment: CrossAxisAlignment.start,
+mainAxisSize: MainAxisSize.min,
+children: [
+Text('$added new · $updated updated · $unchanged unchanged'),
+if (addedNames.isNotEmpty) ...[
+const SizedBox(height: 10),
+const Text('New people',
+style: TextStyle(fontWeight: FontWeight.bold)),
+Text(addedNames.join(', ')),
+],
+if (changeLines.isNotEmpty) ...[
+const SizedBox(height: 10),
+const Text('Updated fields',
+style: TextStyle(fontWeight: FontWeight.bold)),
+for (final l in changeLines)
+Padding(
+padding: const EdgeInsets.only(top: 4),
+child: Text(l),
+),
+],
+const SizedBox(height: 10),
+const Text(
+'Fields that are the same, and subjects and forms, are '
+'not touched.',
+style: TextStyle(fontSize: 12, color: Colors.black54)),
+],
+),
+),
+),
+actions: [
+TextButton(
+onPressed: () => Navigator.pop(ctx, false),
+child: const Text('Cancel')),
+FilledButton(
+onPressed: () => Navigator.pop(ctx, true),
+child: const Text('Upload')),
+],
+),
+);
+if (ok != true || !mounted) return;
+setState(() => _busy = true);
+for (final t in toSave) {
+await _service.save(t);
+}
+_toast('Uploaded: $added added, $updated updated, $unchanged unchanged');
+} catch (e) {
+_toast('Upload failed: ${'$e'.replaceFirst('Exception: ', '')}');
+} finally {
+if (mounted) setState(() => _busy = false);
+}
+}
+
 bool _matches(TeacherInfo t) {
-if (_filter == 'Teaching' && !t.isTeaching) return false;
-if (_filter == 'Staff' && t.isTeaching) return false;
+if (_filter == 'Teaching' && t.role != 'Teacher') return false;
+if (_filter == 'Administration' && !t.isAdministration) return false;
+if (_filter == 'Staff' && t.role != 'Staff') return false;
 final q = _search.text.trim().toLowerCase();
 if (q.isEmpty) return true;
 return t.name.toLowerCase().contains(q) ||
@@ -42440,7 +43221,9 @@ Expanded(
 child: Padding(
 padding: const EdgeInsets.fromLTRB(14, 14, 6, 14),
 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-Container(
+TeacherPhoto(
+teacher: t,
+fallback: Container(
 width: 52,
 height: 52,
 alignment: Alignment.center,
@@ -42457,6 +43240,7 @@ style: const TextStyle(
 color: Colors.white,
 fontSize: 18,
 fontWeight: FontWeight.w800)),
+),
 ),
 const SizedBox(width: 14),
 Expanded(
@@ -42487,6 +43271,8 @@ const SizedBox(width: 5),
 Text(t.phone,
 style: const TextStyle(
 fontSize: 13, color: Colors.black87)),
+const SizedBox(width: 4),
+WhatsAppButton(t.phone),
 ],
 if (t.phone.isNotEmpty && t.email.isNotEmpty)
 const SizedBox(width: 14),
@@ -42541,7 +43327,18 @@ onPressed: () => _remove(t),
 Widget build(BuildContext context) {
 final cs = Theme.of(context).colorScheme;
 return Scaffold(
-appBar: AppBar(title: const Text('Teachers & Staff')),
+appBar: AppBar(title: const Text('Teachers & Staff'), actions: [
+IconButton(
+tooltip: 'Download staff file (Excel)',
+icon: const Icon(Icons.download),
+onPressed: _busy ? null : _download,
+),
+IconButton(
+tooltip: 'Upload staff file (Excel or CSV)',
+icon: const Icon(Icons.upload_file),
+onPressed: _busy ? null : _upload,
+),
+]),
 floatingActionButton: FloatingActionButton.extended(
 onPressed: () => _edit(),
 icon: const Icon(Icons.person_add),
@@ -42556,7 +43353,9 @@ return const Center(child: CircularProgressIndicator());
 }
 final all = snap.data!;
 final shown = all.where(_matches).toList();
-final teachingN = all.where((t) => t.isTeaching).length;
+final teachingN = all.where((t) => t.role == 'Teacher').length;
+final adminN = all.where((t) => t.isAdministration).length;
+final staffN = all.where((t) => t.role == 'Staff').length;
 return Align(
 alignment: Alignment.topCenter,
 child: ConstrainedBox(
@@ -42599,8 +43398,10 @@ _stat('All', all.length, Icons.groups, 'All'),
 const SizedBox(width: 10),
 _stat('Teaching', teachingN, Icons.school, 'Teaching'),
 const SizedBox(width: 10),
-_stat('Staff', all.length - teachingN,
-Icons.badge, 'Staff'),
+_stat('Administration', adminN,
+Icons.admin_panel_settings, 'Administration'),
+const SizedBox(width: 10),
+_stat('Staff', staffN, Icons.badge, 'Staff'),
 ]),
 ]),
 ),
